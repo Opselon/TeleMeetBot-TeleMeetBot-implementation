@@ -1,0 +1,350 @@
+// Package config loads, validates and persists the TeleMeetBot configuration.
+package config
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
+// Version is the application version, injected at build time (see Makefile).
+var Version = "dev"
+
+// Config is the full on-disk configuration (YAML).
+type Config struct {
+	Telegram TelegramConfig `yaml:"telegram"`
+	Server   ServerConfig   `yaml:"server"`
+	Browser  BrowserConfig  `yaml:"browser"`
+	Media    MediaConfig    `yaml:"media"`
+	Meet     MeetConfig     `yaml:"meet"`
+	Limits   LimitsConfig   `yaml:"limits"`
+	Logging  LoggingConfig  `yaml:"logging"`
+	Paths    PathsConfig    `yaml:"paths"`
+
+	// path is where the config was loaded from / should be saved to.
+	path string
+}
+
+// TelegramConfig holds bot token and access control.
+type TelegramConfig struct {
+	Token string `yaml:"token"`
+	// Admins is the allow-list of Telegram user IDs. Access is fail-closed:
+	// an empty list means nobody can control the bot (except when
+	// FirstStartClaimsAdmin is enabled and no admin has claimed the bot yet).
+	Admins []int64 `yaml:"admins"`
+	// FirstStartClaimsAdmin lets the very first /start claim the bot and become
+	// the sole admin. Useful for a fresh install: start the bot, press Start,
+	// done. Turn this off in hardened deployments.
+	FirstStartClaimsAdmin bool `yaml:"first_start_claims_admin"`
+	// NotifyChatID receives lifecycle notifications (started, failed, ended).
+	// Zero means "notify the admin who created the session".
+	NotifyChatID int64 `yaml:"notify_chat_id"`
+	// PollTimeoutSeconds is the long-poll timeout used for getUpdates.
+	PollTimeoutSeconds int `yaml:"poll_timeout_seconds"`
+}
+
+// ServerConfig is the local HTTP surface (health checks only, no remote login).
+type ServerConfig struct {
+	HealthAddr string `yaml:"health_addr"`
+}
+
+// BrowserConfig controls the embedded Chromium instance.
+type BrowserConfig struct {
+	// Executable is an explicit chrome/chromium path. Empty means auto-detect,
+	// falling back to rod's managed download.
+	Executable string `yaml:"executable"`
+	Headless   bool   `yaml:"headless"`
+	// PerSession launches one browser per meeting (isolation, more RAM).
+	// When false a single browser is shared, one tab per role.
+	PerSession   bool     `yaml:"per_session"`
+	Display      string   `yaml:"display"` // e.g. ":99" when headless=false
+	WindowWidth  int      `yaml:"window_width"`
+	WindowHeight int      `yaml:"window_height"`
+	Lang         string   `yaml:"lang"`
+	ExtraArgs    []string `yaml:"extra_args"`
+	// UserAgent overrides the headless UA; empty uses a stock Chrome UA.
+	UserAgent string `yaml:"user_agent"`
+	// Proxy is passed to Chromium, e.g. "socks5://127.0.0.1:9050".
+	Proxy string `yaml:"proxy"`
+}
+
+// MediaConfig controls playback inside the shared tab.
+type MediaConfig struct {
+	DefaultVolume      int     `yaml:"default_volume"`
+	DefaultSpeed       float64 `yaml:"default_speed"`
+	Autoplay           bool    `yaml:"autoplay"`
+	MuteUntilConnected bool    `yaml:"mute_until_connected"`
+	SeekStepSeconds    int     `yaml:"seek_step_seconds"`
+	Loop               bool    `yaml:"loop"`
+}
+
+// MeetConfig controls Google Meet join and screen-share behaviour.
+type MeetConfig struct {
+	// GuestName is the display name used when joining as a guest.
+	GuestName string `yaml:"guest_name"`
+	// PresentMode is "tab" (share the media tab, works headless) or "screen"
+	// (share the whole virtual display, needs Xvfb).
+	PresentMode string `yaml:"present_mode"`
+	// CaptureSource must match the auto-select desktop-capture-source value:
+	// for "tab" it is the media tab title, for "screen" it is e.g.
+	// "Entire screen (monitor 1)".
+	CaptureSource         string `yaml:"capture_source"`
+	JoinTimeoutSeconds    int    `yaml:"join_timeout_seconds"`
+	PresentTimeoutSeconds int    `yaml:"present_timeout_seconds"`
+	// AdmitWaitSeconds is how long to wait in the "ask to join" lobby before
+	// reporting an error (0 waits forever).
+	AdmitWaitSeconds int `yaml:"admit_wait_seconds"`
+}
+
+// LimitsConfig caps resource usage.
+type LimitsConfig struct {
+	MaxSessions int `yaml:"max_sessions"`
+}
+
+// LoggingConfig controls the logger.
+type LoggingConfig struct {
+	Level string `yaml:"level"` // debug, info, warn, error
+	File  string `yaml:"file"`
+}
+
+// PathsConfig holds writable locations.
+type PathsConfig struct {
+	DataDir string `yaml:"data_dir"`
+}
+
+// Default returns a fully populated, sane configuration.
+func Default() *Config {
+	return &Config{
+		Telegram: TelegramConfig{
+			FirstStartClaimsAdmin: true,
+			PollTimeoutSeconds:    30,
+		},
+		Server: ServerConfig{HealthAddr: "127.0.0.1:18080"},
+		Browser: BrowserConfig{
+			Headless:     true,
+			PerSession:   true,
+			Display:      ":99",
+			WindowWidth:  1280,
+			WindowHeight: 800,
+			Lang:         "en-US",
+		},
+		Media: MediaConfig{
+			DefaultVolume:      80,
+			DefaultSpeed:       1.0,
+			Autoplay:           true,
+			MuteUntilConnected: true,
+			SeekStepSeconds:    10,
+		},
+		Meet: MeetConfig{
+			GuestName:             "TeleMeet Bot",
+			PresentMode:           "tab",
+			CaptureSource:         "TeleMeet Media",
+			JoinTimeoutSeconds:    120,
+			PresentTimeoutSeconds: 45,
+			AdmitWaitSeconds:      300,
+		},
+		Limits:  LimitsConfig{MaxSessions: 2},
+		Logging: LoggingConfig{Level: "info"},
+		Paths:   PathsConfig{DataDir: "data"},
+	}
+}
+
+// ResolvePath picks the config file: explicit flag, env var, ./telemeetbot.yml,
+// /etc/telemeetbot/config.yml. The first existing candidate wins; otherwise the
+// first candidate is returned so the wizard can create it.
+func ResolvePath(explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	if p := os.Getenv("TELEMEETBOT_CONFIG"); p != "" {
+		return p
+	}
+	candidates := []string{"telemeetbot.yml", "/etc/telemeetbot/config.yml"}
+	for _, c := range candidates {
+		if _, err := os.Stat(c); err == nil {
+			abs, err := filepath.Abs(c)
+			if err == nil {
+				return abs
+			}
+			return c
+		}
+	}
+	abs, err := filepath.Abs(candidates[0])
+	if err != nil {
+		return candidates[0]
+	}
+	return abs
+}
+
+// Load reads the YAML file at path, starting from Default() so omitted keys keep
+// their defaults.
+func Load(path string) (*Config, error) {
+	cfg := Default()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config %s: %w", path, err)
+	}
+	if err := yaml.Unmarshal(raw, cfg); err != nil {
+		return nil, fmt.Errorf("parse config %s: %w", path, err)
+	}
+	cfg.path = path
+	cfg.normalize()
+	return cfg, nil
+}
+
+// Exists reports whether a config file is present at path.
+func Exists(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && !st.IsDir()
+}
+
+// Path returns the file the config was loaded from.
+func (c *Config) Path() string { return c.path }
+
+// normalize fills derived/legacy fields.
+func (c *Config) normalize() {
+	if strings.TrimSpace(c.Browser.Lang) == "" {
+		c.Browser.Lang = "en-US"
+	}
+	if c.Browser.WindowWidth <= 0 {
+		c.Browser.WindowWidth = 1280
+	}
+	if c.Browser.WindowHeight <= 0 {
+		c.Browser.WindowHeight = 800
+	}
+	if c.Media.SeekStepSeconds <= 0 {
+		c.Media.SeekStepSeconds = 10
+	}
+	if c.Media.DefaultSpeed <= 0 {
+		c.Media.DefaultSpeed = 1.0
+	}
+	if c.Telegram.PollTimeoutSeconds <= 0 {
+		c.Telegram.PollTimeoutSeconds = 30
+	}
+	if strings.TrimSpace(c.Meet.PresentMode) == "" {
+		c.Meet.PresentMode = "tab"
+	}
+	if strings.TrimSpace(c.Meet.CaptureSource) == "" {
+		if c.Meet.PresentMode == "screen" {
+			c.Meet.CaptureSource = "Entire screen (monitor 1)"
+		} else {
+			c.Meet.CaptureSource = "TeleMeet Media"
+		}
+	}
+	if c.Limits.MaxSessions <= 0 {
+		c.Limits.MaxSessions = 1
+	}
+}
+
+// Save writes the config back to disk (0600, atomic replace).
+func (c *Config) Save(path string) error {
+	if path == "" {
+		path = c.path
+	}
+	if path == "" {
+		return errors.New("no config path")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	out, err := yaml.Marshal(c)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	c.path = path
+	return os.Chmod(path, 0o600)
+}
+
+// Validate checks invariants that must hold before the bot starts.
+func (c *Config) Validate() error {
+	var problems []string
+	if strings.TrimSpace(c.Telegram.Token) == "" {
+		problems = append(problems, "telegram.token is empty")
+	} else if !strings.Contains(c.Telegram.Token, ":") {
+		problems = append(problems, "telegram.token does not look like <bot_id>:<secret>")
+	}
+	if len(c.Telegram.Admins) == 0 && !c.Telegram.FirstStartClaimsAdmin {
+		problems = append(problems, "telegram.admins is empty and first_start_claims_admin is disabled: nobody could control the bot")
+	}
+	for _, id := range c.Telegram.Admins {
+		if id <= 0 {
+			problems = append(problems, "telegram.admins contains a non-positive id")
+			break
+		}
+	}
+	switch c.Meet.PresentMode {
+	case "tab", "screen":
+	default:
+		problems = append(problems, `meet.present_mode must be "tab" or "screen"`)
+	}
+	if strings.TrimSpace(c.Meet.CaptureSource) == "" {
+		problems = append(problems, "meet.capture_source is empty")
+	}
+	if c.Meet.PresentMode == "tab" && strings.Contains(strings.ToLower(c.Meet.CaptureSource), "entire screen") {
+		problems = append(problems, `meet.capture_source looks like a screen source but present_mode is "tab"`)
+	}
+	if c.Media.DefaultVolume < 0 || c.Media.DefaultVolume > 100 {
+		problems = append(problems, "media.default_volume must be within 0..100")
+	}
+	if c.Media.DefaultSpeed < 0.25 || c.Media.DefaultSpeed > 4 {
+		problems = append(problems, "media.default_speed must be within 0.25..4")
+	}
+	if c.Limits.MaxSessions < 1 || c.Limits.MaxSessions > 8 {
+		problems = append(problems, "limits.max_sessions must be within 1..8")
+	}
+	if strings.TrimSpace(c.Paths.DataDir) == "" {
+		problems = append(problems, "paths.data_dir is empty")
+	}
+	if len(problems) > 0 {
+		return errors.New("invalid config: " + strings.Join(problems, "; "))
+	}
+	return nil
+}
+
+// IsAdmin reports whether a Telegram user may control the bot.
+func (c *Config) IsAdmin(userID int64) bool {
+	for _, id := range c.Telegram.Admins {
+		if id == userID {
+			return true
+		}
+	}
+	return false
+}
+
+// ClaimAdmin records userID as the only admin (first /start flow).
+// It returns true when the claim happened.
+func (c *Config) ClaimAdmin(userID int64) bool {
+	if len(c.Telegram.Admins) > 0 || !c.Telegram.FirstStartClaimsAdmin || userID <= 0 {
+		return false
+	}
+	c.Telegram.Admins = []int64{userID}
+	return true
+}
+
+// StateFile returns the persisted state file path.
+func (c *Config) StateFile() string {
+	return filepath.Join(c.Paths.DataDir, "state.json")
+}
+
+// TokenPreview redacts the bot token for logs and UI.
+func (c *Config) TokenPreview() string {
+	t := strings.TrimSpace(c.Telegram.Token)
+	if t == "" {
+		return "(unset)"
+	}
+	if i := strings.Index(t, ":"); i > 0 {
+		return t[:i] + ":***"
+	}
+	return "***"
+}

@@ -1,0 +1,7 @@
+/dist/
+/telemeetbot
+/telemeetbot.yml
+/data/
+*.log
+.DS_Store
+/coverage.out

@@ -1,0 +1,26 @@
+[Unit]
+Description=TeleMeetBot — Google Meet streaming bot with a Telegram dashboard
+Documentation=https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Replace the paths if the binary/config live elsewhere.
+ExecStart=/usr/local/bin/telemeetbot --config /etc/telemeetbot/config.yml
+WorkingDirectory=/etc/telemeetbot
+Restart=always
+RestartSec=5
+
+# Chromium runs headless; --no-sandbox is set by the app, so no extra caps are needed.
+NoNewPrivileges=true
+Environment=HOME=/root
+LimitNOFILE=65536
+
+# Hardening: the bot only needs its data dir, plus writing to /tmp for Chromium.
+ReadWritePaths=/etc/telemeetbot /var/lib/telemeetbot
+ProtectSystem=full
+PrivateTmp=false
+
+[Install]
+WantedBy=multi-user.target

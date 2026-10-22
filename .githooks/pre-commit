@@ -1,0 +1,12 @@
+#!/bin/sh
+# Reject accidental check-ins of built artifacts and local state.
+if [ -n "$(git status --porcelain -- dist telemeetbot '*.log' data 2>/dev/null)" ]; then
+  echo "pre-commit: refusing to commit dist/, build binaries or local state" >&2
+  exit 1
+fi
+unformatted="$(gofmt -l . | grep -v '^dist/' || true)"
+if [ -n "$unformatted" ]; then
+  echo "pre-commit: gofmt needed for:" >&2
+  echo "$unformatted" >&2
+  exit 1
+fi

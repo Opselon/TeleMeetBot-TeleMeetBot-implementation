@@ -1,0 +1,35 @@
+# TeleMeetBot — Docker Compose
+#
+# First run (creates /data/telemeetbot.yml interactively):
+#   docker compose run --rm telemeetbot --wizard --config /data/telemeetbot.yml
+#   docker compose up -d
+#
+# The wizard should bind the health endpoint to 0.0.0.0:18080 inside the container.
+services:
+  telemeetbot:
+    build:
+      context: .
+      args:
+        VERSION: ${TELEMEETBOT_VERSION:-dev}
+    image: telemeetbot:${TELEMEETBOT_VERSION:-dev}
+    container_name: telemeetbot
+    restart: unless-stopped
+    init: true
+    shm_size: "1gb"          # Chromium needs more shared memory than the default 64m
+    ports:
+      - "127.0.0.1:18080:18080"
+    volumes:
+      - ./data:/data
+    environment:
+      TZ: UTC
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18080/livez"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

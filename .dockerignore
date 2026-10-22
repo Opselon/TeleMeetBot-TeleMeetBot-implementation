@@ -1,0 +1,6 @@
+dist/
+data/
+.git/
+.github/
+*.log
+telemeetbot.yml

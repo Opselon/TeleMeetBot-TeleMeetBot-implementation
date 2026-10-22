@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TeleMeet Media</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; font-family: system-ui, sans-serif; }
+  #wrap { width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; }
+  video, audio { width: 100%; height: 100%; max-height: 100vh; background: #000; object-fit: contain; }
+  audio { height: 60px; }
+  #badge {
+    position: fixed; top: 14px; left: 14px; padding: 6px 12px; border-radius: 999px;
+    background: rgba(20, 20, 25, .72); color: #e8e8ee; font-size: 13px; letter-spacing: .4px;
+    backdrop-filter: blur(6px); pointer-events: none; user-select: none;
+  }
+  #hint { position: fixed; bottom: 16px; left: 0; right: 0; text-align: center; color: #8a8a95; font-size: 13px; }
+  #err { max-width: 700px; padding: 24px; color: #ffb4ab; font-size: 15px; line-height: 1.5; }
+  #err code { color: #ffd7d2; word-break: break-all; }
+</style>
+</head>
+<body>
+<div id="wrap"></div>
+<div id="badge">TeleMeet Media</div>
+<div id="hint"></div>
+<script>
+(() => {
+  const cfg = __TM_BOOTSTRAP__;
+  const wrap = document.getElementById('wrap');
+  const hint = document.getElementById('hint');
+  const isAudio = /\.(mp3|m4a|aac|flac|wav|opus|oga|ogg)(\?|#|$)/i.test(cfg.src) && !/\.ogv(\?|#|$)/i.test(cfg.src);
+  const el = document.createElement(isAudio ? 'audio' : 'video');
+  el.id = 'tm-player';
+  el.src = cfg.src;
+  el.autoplay = !!cfg.autoplay;
+  el.muted = !!cfg.mute;
+  el.loop = !!cfg.loop;
+  el.volume = Math.min(1, Math.max(0, cfg.volume / 100));
+  el.playbackRate = Math.min(4, Math.max(0.25, cfg.speed || 1));
+  el.playsInline = true;
+  el.setAttribute('controls', '');
+  wrap.appendChild(el);
+
+  // The tab title is what Chromium's auto-select-capture-source matches when
+  // Google Meet shares "a tab", so it must stay stable.
+  const lockTitle = () => { if (document.title !== cfg.tabTitle) document.title = cfg.tabTitle; };
+  lockTitle();
+  setInterval(lockTitle, 750);
+
+  el.addEventListener('error', () => {
+    const code = el.error ? (el.error.code + ' ' + (el.error.message || '')) : 'unknown media error';
+    hint.textContent = '';
+    const box = document.createElement('div');
+    box.id = 'err';
+    box.innerHTML = 'Cannot play this media in the browser.<br><code></code><br><br>' +
+      'If this is a web page (not a direct file), set it as a raw link instead — ' +
+      'TeleMeetBot opens raw links in a normal tab.';
+    box.querySelector('code').textContent = cfg.src + ' — ' + code;
+    wrap.appendChild(box);
+  });
+  el.addEventListener('loadedmetadata', () => { hint.textContent = ''; });
+  el.addEventListener('pause', () => { hint.textContent = ''; });
+  if (cfg.autoplay) {
+    const p = el.play();
+    if (p && p.catch) p.catch(() => { hint.textContent = 'Waiting for playback permission…'; });
+  }
+  window.__tmPlayer = el;
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,302 @@
+# TeleMeetBot
+
+**A 100% Go, headless streaming bot for Google Meet with a Telegram dashboard.**
+
+Send it a meeting link and any media link — YouTube, a direct `.mp4`/`.mp3`, or a public web page —
+TeleMeetBot spins up headless Chromium (rod/CDP), joins the meeting as a guest, starts presenting,
+plays your link in the shared tab and hands you **pause / resume / seek / volume / speed / mute /
+restart / stop** controls straight inside Telegram.
+
+No desktop environment. No Python/Selenium. No external automation service. One binary.
+
+```
+                 ┌────────────────────────────── Telegram ──────────────────────────────┐
+                 │  /start ──► live dashboard · cards refresh every few seconds         │
+                 │  /new    ──► 2-step wizard (Meet link → media link)                  │
+                 │  inline buttons: ⏸ ▶️ 🔇 🔉 🔊 ⏪ ⏩ 🔁 🛑                          │
+                 └───────────────┬──────────────────────────────────────────────────────┘
+                                 │ long poll (fail-closed admin allow-list)
+                                 ▼
+              ┌──────────────────────────┐        ┌────────────────────────────────┐
+              │   Engine manager         │        │  Chromium (headless, rod/CDP)  │
+              │  session state machine   ├───────►│  tab 1: media link (player)     │
+              │  play/pause/vol/seek API │        │  tab 2: meet.google.com         │
+              │  store + notifications   │        │   └─ present now → tab capture  │
+              └──────────────────────────┘        └────────────────────────────────┘
+                                 │
+                        /healthz · /livez  (local, no remote panel)
+```
+
+---
+
+## How the meeting side works (in one paragraph)
+
+The bot launches one headless Chromium per session with capture flags
+(`--enable-usermedia-screen-capturing`, `--auto-select-desktop-capture-source=…`,
+`--autoplay-policy=no-user-gesture-required`) and a stock Chrome user agent.
+Two tabs are opened: the **media tab** (titled `TeleMeet Media`, see title-lock below) and the
+**Meet tab** which is driven through the real UI — guest name fill, "Ask to join" / "Join now",
+ambient pop-ups dismissed — then *"Present now → A tab"*, auto-selected to the media tab, so
+whatever you streamed is what everyone in the call sees and hears.
+
+For a **screen** (Xvfb) mode instead of headless, set `present_mode: "screen"`, run Xvfb
+(`xvfb-run` or a your own `:99` display as `display: ":99"`) and set `capture_source:
+"Entire screen (monitor 1)"`.
+
+---
+
+## Features
+
+* **2-minute onboarding wizard** — `telemeetbot --wizard` (token, admins, Chromium detection, save, optional systemd/capture-test)
+* **Telegram dashboard** — home, sessions, settings, health, per-session control cards that refresh automatically
+* **Playback control** — pause/resume, mute/unmute, volume 0–100, speed 0.25–4×, seek ±(n)s, loop, restart
+* **Any link** — YouTube (`watch`/`youtu.be`/`shorts`/`live`), direct media (`.mp4 .m4v .webm .mkv .mov .ogv .mp3 .m4a .aac .flac .wav .opus .oga`), and generic pages via a built-in player
+* **Session store** — `state.json` history (max 50 records), survives restarts (corrupt file → kept aside as `*.corrupt-*`, fresh store)
+* **Health surface** — `/healthz` (JSON with sessions/uptime/browser/disk/config) + `/livez`; **no** remote control endpoints
+* **Diagnostics** — `--check` (doctor) and `--check --capture-test` verifies real `getDisplayMedia` capture: frame changes + audio track
+* **Operations** — Dockerfile + compose (healthcheck, shm), unit file, one-command installer, cross-arch release archives (`release.sh`)
+
+---
+
+## Quick start
+
+### Option A — Docker (recommended on servers)
+
+```bash
+git clone https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation
+cd TeleMeetBot-TeleMeetBot-implementation
+
+# first run: interactive wizard writes ./data/telemeetbot.yml
+docker compose run --rm telemeetbot --wizard --config /data/telemeetbot.yml
+
+docker compose up -d
+docker compose logs -f
+curl http://127.0.0.1:18080/healthz
+```
+
+> In Docker, answer `0.0.0.0:18080` as the health address so `/healthz` is reachable
+> from the mapped port. The compose file maps only `127.0.0.1` — put a reverse proxy
+> in front if you need it from elsewhere.
+
+### Option B — one-command install (bare metal)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/main/scripts/install.sh | bash
+```
+
+The installer detects arch (`amd64`/`arm64`/`arm v6, v7`/`386`), downloads + verifies the
+latest release archive, drops `/usr/local/bin/telemeetbot`, installs the systemd unit and
+launches the wizard.
+
+### Option C — build from source
+
+```bash
+go build -o telemeetbot ./cmd/telemeetbot   # Go 1.26+
+./telemeetbot --wizard                      # creates ./telemeetbot.yml
+./telemeetbot                               # run (also ./telemeetbot --run)
+```
+
+### Create the bot token
+
+1. Talk to [@BotFather](https://t.me/BotFather) in Telegram → `/newbot` → copy the token.
+2. Get your numeric user id: send `/id` to [@userinfobot](https://t.me/userinfobot) (or set
+   `first_start_claims_admin: true` and press `/start` first — the first user to do that becomes admin).
+
+### First run in Telegram
+
+```
+/start            → dashboard (Active sessions, uptime, keyboard)
+/new              → step 1/2: paste the Meet link
+                  → step 2/2: paste the media link
+                  → "Ready to launch" → 🚀 Launch
+```
+
+The bot then: launches Chromium → opens the media tab (title-locked) → opens Meet → joins as
+guest → clicks Present → shares the media tab → turns playback on → sends you a session card
+and keeps it live.
+
+---
+
+## Commands & inline buttons
+
+| Command | Meaning |
+|---|---|
+| `/start` | open the dashboard |
+| `/new` | start a new stream wizard |
+| `/new <meet> <media>` | one-shot: both links in one message (space separated) |
+| `/sessions` | list running sessions |
+| `/health` | health + doctor-style snapshot |
+| `/settings` | current config summary |
+| `/help` | usage overview |
+| `/stop <id>` | end a session |
+| `/cancel` | abort an open wizard |
+| `/id` | show your Telegram user id |
+| `/ping` | liveness probe |
+
+Per-session **inline card** (`act:<id>:…`):
+
+```
+⏸ Pause      ▶️ Resume       🔁 Restart
+🔇 Mute      🔊 Unmute       (toggle: first button is voluntary)
+🔉 Vol-      🔊 Vol+         (±10%)
+⏪ -10s      ⏩ +10s
+🔄 Refresh   🛑 Stop
+```
+
+The card header includes state emoji: 🟦 Guest · 🟪 Harness · 🟫 Streaming · 🟨 Paused ·
+🟩 Onboard · ⚪️ Ended · 🔴 Error (see `internal/bot/views.go` for exact scheme).
+
+---
+
+## Configuration reference
+
+`telemeetbot.yml` (created by the wizard; omitted keys keep defaults):
+
+```yaml
+telegram:
+  token: "123456789:AA..."            # required
+  admins: []                          # allow-list (fail-closed when empty)
+  first_start_claims_admin: true      # first /start wins if admins is empty
+  notify_chat_id: 0                   # 0 = notify the launching admin
+  poll_timeout_seconds: 30
+
+server:
+  health_addr: "127.0.0.1:18080"      # /healthz + /livez (bind 0.0.0.0 in docker)
+
+browser:
+  executable: ""                      # auto-detect, else rod downloads managed Chromium
+  headless: true                      # false needs a display (Xvfb) — set display
+  per_session: true                   # one Chromium per meeting (isolation)
+  display: ":99"                      # X display when headless=false
+  window_width: 1280
+  window_height: 800
+  lang: "en-US"                       # Meet UI language must be English
+  extra_args: []                      # raw chromium flags appended
+  user_agent: ""                      # empty = stock Chrome UA override
+  proxy: ""                           # e.g. socks5://127.0.0.1:9050
+
+media:
+  default_volume: 80
+  default_speed: 1.0                  # 0.25 .. 4
+  autoplay: true
+  mute_until_connected: true
+  seek_step_seconds: 10
+  loop: false
+
+meet:
+  guest_name: "TeleMeet Bot"
+  present_mode: "tab"                 # "tab" (headless-safe) | "screen" (Xvfb)
+  capture_source: "TeleMeet Media"    # tab title or "Entire screen (monitor 1)"
+  join_timeout_seconds: 120
+  present_timeout_seconds: 45
+  admit_wait_seconds: 300             # how long we wait for organizer admission
+
+limits:
+  max_sessions: 2
+
+logging:
+  level: "info"                       # debug|info|warn|error
+  file: ""                            # empty = stdout
+
+paths:
+  data_dir: "data"                    # state.json lives here
+```
+
+Validation is strict (`internal/config/config.go`): invalid token shape, no reachable admins
+(token set but `admins` empty and `first_start_claims_admin=false`) or `present_mode` outside
+`tab|screen` all abort startup with explicit errors.
+
+---
+
+## Diagnostics
+
+```bash
+./telemeetbot --config telemeetbot.yml --check              # doctor
+./telemeetbot --config telemeetbot.yml --check --capture-test  # + real capture self-test
+```
+
+Doctor checks: config parse/valid, Chromium presence + version, writable data dir +
+1.5 GiB free disk, health port free/bound, Telegram token via `getMe` (validates against api.telegram.org),ame, outbound
+HTTPS to `google.com`/`youtube.com` (skippable), `xvfb` for `screen` mode, and (with
+`--capture-test`) a real `getDisplayMedia` probe proving **video frames change and an
+audio track is present**.
+
+The capture probe result is printed as JSON: `{"granted":true,"video":true,"frames_changed":4, "audio":true, …}`
+
+### Common failures
+
+| Symptom | Cause / fix |
+|---|---|
+| Session stuck at `Guest` (`Waiting for admission`) | Meeting disables anonymous joins or host left. Enable guest joining in Meet settings, or use a meeting that allows bots. |
+| `admission timeout` | Same as above; reduce `admit_wait_seconds` if you want faster failures. |
+| `present can't start` | Chromium too old (use ≥ 118), or Meet UI changed language (we require `browse.lang: en-US`), or `capture_source` mismatch — run `--check --capture-test`. |
+| `media doesn't play` in a web page | The page may block embedding; log shows `playerProblem` hints; restart via button. |
+| `no such element` after a Meet redesign | Open an issue with `(meetctl)` debug logs — turn `log.level: debug`. |
+| Chromium keeps crashing | `--check` shows RAM; add `shm_size: "1gb"` in Docker and set `per_session: true`. |
+
+---
+
+## Testing
+
+```bash
+make test                # unit tests (no Chromium needed)
+make test-integration    # adds real-Chromium tests (title-lock, player doc, getDisplayMedia)
+```
+
+Integration tests automatically locate `${TELEMEETBOT_BROWSER}` or a PATH `chromium/chrome`,
+skip cleanly when absent, and are also run in CI (`browser-actions/setup-chrome`).
+
+`make check` runs the real `--check --capture-test` self-test against your installed Chromium.
+
+---
+
+## Security model
+
+* **Fail-closed admin allow-list**: every update authenticate against `telegram.admins`;
+  an empty list with `first_start_claims_admin: false` means nobody can use the bot.
+* The **only** HTTP surface is `GET /healthz` and `GET /livez` — no state, no writes —
+  bind it to `127.0.0.1` unless you front it with TLS/auth.
+* Config files with the bot token are written `0640` (wizard/`FirstStart` claim path).
+* Chromium profiles are per-session temp dirs removed at end; `--no-sandbox` is required
+  (standard for containers) — run the bot as a dedicated, low-privileged user.
+* `state.json` contains meeting URLs — cap history and protect the data dir like any secret.
+
+---
+
+## Development
+
+```
+cmd/        entrypoint, flags
+internal/
+  bot/      Telegram layer: updates, dashboard, wizard, session cards
+  engine/   CDP/rod engine: browser, sessions, media, meet, capture test
+  config/   YAML config + strict validation
+  store/    session history
+  setup/    interactive wizard, doctor (diagnostics)
+  health/   runtime health snapshot
+  web/      /healthz + /livez only
+deploy/     systemd unit example
+scripts/    install.sh, release.sh
+docs/       release notes
+.github/    CI (tests + real-Chromium integration, docker build)
+```
+
+Build a release:
+
+```bash
+VERSION=v1.0.0 make release     # dist/*.tar.gz for linux/amd64,arm64,armv6,armv7,386
+VERSION=v1.0.0 make publish     # + tag push + `gh release create`
+```
+
+---
+
+## Roadmap
+
+* Stream **to** meetings as presenter with configurable layout (camera compositing)
+* "Join with a Google account" mode (account password / user-data dir)
+* Scheduling: cron-like "join at HH:MM"
+* HTTP admin API (opt-in, token auth) alongside the Telegram dashboard
+
+## License
+
+MIT — see [LICENSE](LICENSE).
