@@ -38,41 +38,126 @@ func TestParseIDs(t *testing.T) {
 	}
 }
 
+// scriptedPrompter answers by question keyword, so tests do not depend on
+// prompt order (which changes with root/systemd/CI differences).
+type scriptedPrompter struct {
+	t       *testing.T
+	answers map[string][]string
+	bools   map[string]bool
+	choices map[string]int
+	asked   []string
+}
+
+func (p *scriptedPrompter) take(q string) (string, bool) {
+	for key, queue := range p.answers {
+		if !strings.Contains(q, key) || len(queue) == 0 {
+			continue
+		}
+		v := queue[0]
+		if len(queue) > 1 {
+			p.answers[key] = queue[1:]
+		}
+		return v, true
+	}
+	return "", false
+}
+
+func (p *scriptedPrompter) Ask(q, def string) (string, error) {
+	p.asked = append(p.asked, q)
+	if v, ok := p.take(q); ok {
+		if v == "" {
+			return def, nil
+		}
+		return v, nil
+	}
+	return def, nil
+}
+
+func (p *scriptedPrompter) AskRequired(q, def string) (string, error) {
+	p.asked = append(p.asked, q)
+	if v, ok := p.take(q); ok {
+		if strings.TrimSpace(v) == "" {
+			return "", errors.New("required answer missing")
+		}
+		return v, nil
+	}
+	if strings.TrimSpace(def) == "" {
+		return "", errors.New("required answer missing")
+	}
+	return def, nil
+}
+
+func (p *scriptedPrompter) Confirm(q string, def bool) (bool, error) {
+	p.asked = append(p.asked, q)
+	for key, v := range p.bools {
+		if strings.Contains(q, key) {
+			return v, nil
+		}
+	}
+	return def, nil
+}
+
+func (p *scriptedPrompter) Choose(q string, _ []string, def int) (int, error) {
+	p.asked = append(p.asked, q)
+	for key, v := range p.choices {
+		if strings.Contains(q, key) {
+			return v, nil
+		}
+	}
+	return def, nil
+}
+
 func TestInteractiveWizardWritesConfig(t *testing.T) {
-	// Keep PATH without chromium so the explicit path prompt appears
-	// deterministically on every machine/CI.
-	t.Setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
 	chrome := fakeChrome(t)
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yml")
 	dataDir := filepath.Join(dir, "data")
 
-	answers := []string{
-		cfgPath,                // config path
-		"123456:AAHtest_token", // token
-		"42,43",                // admins
-		chrome,                 // explicit chromium path (browser missing on PATH)
-		"1",                    // present mode: tab
-		"3",                    // max sessions
-		"55",                   // default volume
-		"127.0.0.1:18099",      // health address
-		dataDir,                // data dir
-		"y",                    // save
-		"n",                    // systemd
-		"n",                    // capture test
+	p := &scriptedPrompter{
+		t: t,
+		answers: map[string][]string{
+			"Config file path":        {cfgPath},
+			"Telegram bot token":      {"123456:AAHtest_token"},
+			"Admin Telegram user IDs": {"42,43"},
+			"Explicit chromium path":  {chrome},
+			"Max concurrent sessions": {"3"},
+			"Default volume":          {"55"},
+			"Health endpoint":         {"127.0.0.1:18099"},
+			"Data directory":          {dataDir},
+		},
+		bools: map[string]bool{
+			"Save this configuration": true,
+			"systemd service":         false,
+			"tab-capture test":        false,
+		},
+		choices: map[string]int{"How should Meet share": 0},
 	}
 	var out bytes.Buffer
 	cfg, err := Run(WizardOptions{
-		In:                 strings.NewReader(strings.Join(answers, "\n") + "\n"),
+		In:                 strings.NewReader(""),
 		Out:                &out,
+		Prompter:           p,
 		SkipBrowserInstall: true,
 		TokenValidator:     func(string) (string, error) { return "wizard_test_bot", nil },
 		Exec:               func(string, ...string) error { return nil },
+		FindBrowser:        browserNotFound,
 	})
 	if err != nil {
 		t.Fatalf("wizard failed: %v\noutput:\n%s", err, out.String())
 	}
 
+	for _, want := range []string{"Telegram bot token", "Admin Telegram user IDs", "Explicit chromium path", "Save this configuration"} {
+		found := false
+		for _, q := range p.asked {
+			if strings.Contains(q, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("wizard never asked %q; asked: %v", want, p.asked)
+		}
+	}
 	if cfg.Telegram.Token != "123456:AAHtest_token" {
 		t.Fatalf("token = %q", cfg.Telegram.Token)
 	}

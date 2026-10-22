@@ -23,6 +23,14 @@ type Prompter struct {
 	out io.Writer
 }
 
+// WizardPrompter is the question surface used by the wizard (injectable for tests).
+type WizardPrompter interface {
+	Ask(label, def string) (string, error)
+	AskRequired(label, def string) (string, error)
+	Confirm(label string, def bool) (bool, error)
+	Choose(label string, options []string, def int) (int, error)
+}
+
 // NewPrompter builds a Prompter.
 func NewPrompter(in io.Reader, out io.Writer) *Prompter {
 	return &Prompter{in: bufio.NewReader(in), out: out}
@@ -130,6 +138,8 @@ type WizardOptions struct {
 	Exec func(name string, args ...string) error
 	// FindBrowser overrides chromium detection (tests inject deterministic mocks).
 	FindBrowser func(bcfg engine.BrowserConfig) (string, error)
+	// Prompter overrides the interactive question surface (tests).
+	Prompter WizardPrompter
 }
 
 // Run executes the interactive setup and returns the saved config.
@@ -153,7 +163,10 @@ func Run(opts WizardOptions) (*config.Config, error) {
 			return u, nil
 		}
 	}
-	p := NewPrompter(opts.In, opts.Out)
+	var p WizardPrompter = NewPrompter(opts.In, opts.Out)
+	if opts.Prompter != nil {
+		p = opts.Prompter
+	}
 	out := opts.Out
 
 	cfg := config.Default()
