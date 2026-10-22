@@ -35,9 +35,10 @@ func main() {
 
 		// Live diagnosis: join-and-report against a real meeting link using
 		// the engine the bot itself uses. Does not enter the dashboard.
-		probeFlag     = flag.String("probe", "", "run a live one-shot probe against this Meet link and exit")
-		probeMedia    = flag.String("probe-media", "https://www.youtube.com/watch?v=jNQXAC9IVRw", "media link for --probe")
-		probeWaitSecs = flag.Int("probe-seconds", 90, "admit wait for --probe")
+		probeFlag      = flag.String("probe", "", "run a live one-shot probe against this Meet link and exit")
+		probeMedia     = flag.String("probe-media", "https://www.youtube.com/watch?v=jNQXAC9IVRw", "media link for --probe")
+		mediaProbeFlag = flag.String("media-probe", "", "diagnose one media link without a meeting (plays it and samples rendered pixels)")
+		probeWaitSecs  = flag.Int("probe-seconds", 90, "admit wait for --probe; sample seconds for --media-probe")
 	)
 	flag.Parse()
 
@@ -82,6 +83,21 @@ func main() {
 	}
 
 	logger = newLogger(cfg.Logging.Level, cfg.Logging.File)
+
+	// Media-only diagnosis: play the link on a tab exactly like the player tab,
+	// then sample playback + rendered pixels. Green/black/codec problems show
+	// here without needing a meeting.
+	if *mediaProbeFlag != "" {
+		secs := *probeWaitSecs
+		if secs < 10 {
+			secs = 10
+		}
+		if err := runMediaProbe(*mediaProbeFlag, secs, cfg, logger); err != nil {
+			logger.Errorf("media probe: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	// Live diagnosis probe: join the meeting as a guest with the same
 	// engine config the bot uses, stream the stage sequence to the log,

@@ -60,12 +60,47 @@ func mediaControlJS(action string, arg float64) string {
   const action = %s;
   try {
     switch (action) {
-      case "play": { const p = m.play(); if (p && p.catch) p.catch(() => {}); break; }
-      case "pause": m.pause(); break;
-      case "mute": m.muted = true; break;
-      case "unmute": m.muted = false; break;
-      case "volume": m.volume = Math.min(1, Math.max(0, arg / 100)); break;
-      case "rate": m.playbackRate = Math.min(4, Math.max(0.25, arg)); break;
+      case "play": {
+        const mp = document.querySelector('#movie_player');
+        if (mp && mp.playVideo) { try { mp.unMute(); mp.playVideo(); } catch (e) {} }
+        const unmute = document.querySelector('.ytp-unmute-inner, button[aria-label*="unmute"]');
+        if (unmute) { try { unmute.click(); } catch (e) {} }
+        const p = m.play(); if (p && p.catch) p.catch(() => {});
+        break;
+      }
+      case "pause": {
+        const mp = document.querySelector('#movie_player');
+        if (mp && mp.pauseVideo) { try { mp.pauseVideo(); } catch (e) {} }
+        window.__allowPause = true;
+        m.pause();
+        break;
+      }
+      case "mute": {
+        const mp = document.querySelector('#movie_player');
+        if (mp && mp.mute) { try { mp.mute(); } catch (e) {} }
+        m.muted = true;
+        break;
+      }
+      case "unmute": {
+        const mp = document.querySelector('#movie_player');
+        if (mp && mp.unMute) { try { mp.unMute(); } catch (e) {} }
+        const unmute = document.querySelector('.ytp-unmute-inner, button[aria-label*="unmute"]');
+        if (unmute) { try { unmute.click(); } catch (e) {} }
+        m.muted = false;
+        break;
+      }
+      case "volume": {
+        const mp = document.querySelector('#movie_player');
+        if (mp && mp.setVolume) { try { mp.setVolume(Math.round(arg)); } catch (e) {} }
+        m.volume = Math.min(1, Math.max(0, arg / 100));
+        break;
+      }
+      case "rate": {
+        const mp = document.querySelector('#movie_player');
+        if (mp && mp.setPlaybackRate) { try { mp.setPlaybackRate(Math.min(4, Math.max(0.25, arg))); } catch (e) {} }
+        m.playbackRate = Math.min(4, Math.max(0.25, arg));
+        break;
+      }
       case "seek": {
         const d = isFinite(m.duration) ? m.duration : 0;
         m.currentTime = Math.min(Math.max(0, m.currentTime + arg), d > 0 ? d : 1e9);
@@ -95,6 +130,15 @@ func mediaControlJS(action string, arg float64) string {
     const og = document.querySelector('meta[property="og:title"], meta[name="og:title"]');
     if (og && og.content) real = og.content;
   } catch (e) {}
+  if (!real) {
+    try {
+      const mp = document.querySelector('#movie_player');
+      if (mp && mp.getVideoData) {
+        const vd = mp.getVideoData();
+        if (vd && vd.title) real = vd.title;
+      }
+    } catch (e) {}
+  }
   if (!real) real = window.__tmOrigTitle || document.title || "";
   out.title = String(real).slice(0, 200);
   return JSON.stringify(out);

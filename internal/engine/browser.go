@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -25,6 +26,30 @@ type launchOptions struct {
 	userData string
 }
 
+// detectProxy finds an explicit or ambient SOCKS5 proxy (e.g. Tor on 127.0.0.1:9050 or
+// Docker bridge host 172.17.0.1:9050).
+func detectProxy(cfg BrowserConfig) string {
+	if p := strings.TrimSpace(cfg.Proxy); p != "" {
+		return p
+	}
+	if p := strings.TrimSpace(os.Getenv("TELEMEETBOT_PROXY")); p != "" {
+		return p
+	}
+	candidates := []string{
+		"127.0.0.1:9050",
+		"172.17.0.1:9050",
+		"host.docker.internal:9050",
+	}
+	for _, addr := range candidates {
+		conn, err := net.DialTimeout("tcp", addr, 250*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return "socks5://" + addr
+		}
+	}
+	return ""
+}
+
 // launchBrowser starts Chromium with the flags needed to join Meet and share a
 // tab automatically (no screen picker dialog, no user gesture). The returned
 // close function must be called exactly once (it is idempotent).
@@ -37,9 +62,14 @@ func launchBrowser(opts launchOptions, log Logger) (*rod.Browser, func(), error)
 
 	l := launcher.New().
 		Bin(bin).
-		Headless(cfg.Headless).
 		NoSandbox(true).
 		Leakless(true) // reaps the whole tree even if our process dies
+
+	if cfg.Headless {
+		l.Set("headless", "new")
+	} else {
+		l.Headless(false)
+	}
 
 	l.Set("disable-dev-shm-usage")
 	l.Set("disable-background-timer-throttling")
@@ -52,6 +82,10 @@ func launchBrowser(opts launchOptions, log Logger) (*rod.Browser, func(), error)
 	l.Set("use-fake-ui-for-media-stream")
 	l.Set("use-fake-device-for-media-stream")
 	l.Set("enable-usermedia-screen-capturing")
+	l.Set("enable-unsafe-swiftshader")
+	l.Set("use-gl", "angle")
+	l.Set("use-angle", "swiftshader")
+	l.Set("disable-gpu-sandbox")
 	l.Set("auto-select-desktop-capture-source", captureSource(cfg, opts.meet))
 	l.Set("window-size", fmt.Sprintf("%d,%d", widthOf(cfg), heightOf(cfg)))
 	// Headless Chrome exposes one virtual display; this sizes it so tab-capture
@@ -61,8 +95,10 @@ func launchBrowser(opts launchOptions, log Logger) (*rod.Browser, func(), error)
 	l.Set("accept-lang", languageOf(cfg))
 	l.Set("user-agent", userAgentOf(cfg))
 
-	if p := strings.TrimSpace(cfg.Proxy); p != "" {
-		l.Proxy(p)
+	if proxy := detectProxy(cfg); proxy != "" {
+		l.Proxy(proxy)
+		l.Set("proxy-bypass-list", "meet.google.com;*.google.com;accounts.google.com;localhost;127.0.0.1;<local>")
+		log.Infof("[PIPELINE:browser] media proxy enabled: %s (Meet bypassed)", proxy)
 	}
 	for _, a := range cfg.ExtraArgs {
 		name, vals, ok := splitArg(a)
@@ -200,12 +236,18 @@ func ResolveBrowser(cfg BrowserConfig, log Logger) (string, error) {
 		}
 		return path, nil
 	}
+	if env := strings.TrimSpace(os.Getenv("TELEMEETBOT_BROWSER")); env != "" {
+		if err := checkExecutable(env); err == nil {
+			return env, nil
+		}
+	}
 	if p, ok := launcher.LookPath(); ok {
 		return p, nil
 	}
 	for _, p := range []string{
 		"/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/lib/chromium/chromium",
 		"/usr/lib/chromium-browser/chromium-browser", "/snap/bin/chromium",
+		"/opt/chrome-for-testing/chrome-linux64/chrome",
 	} {
 		if err := checkExecutable(p); err == nil {
 			return p, nil
@@ -221,6 +263,12 @@ func newPage(b *rod.Browser, cfg BrowserConfig) (*rod.Page, error) {
 	if err != nil {
 		return nil, err
 	}
+	_, _ = p.EvalOnNewDocument(`
+		try {
+			Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+			window.chrome = window.chrome || { runtime: {} };
+		} catch (e) {}
+	`)
 	req := &proto.NetworkSetUserAgentOverride{
 		UserAgent:      userAgentOf(cfg),
 		AcceptLanguage: languageOf(cfg) + ",en;q=0.9",
