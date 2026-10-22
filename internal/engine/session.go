@@ -448,7 +448,7 @@ func (s *Session) startPresenting() error {
 		if ok, _ := s.presenting(); ok {
 			return nil
 		}
-		if p, _ := s.pages(); p != nil {
+		if _, p := s.pages(); p != nil { // meet tab
 			opened, label := s.clickPresentButton()
 			if opened {
 				s.log.Infof("session %s: opened present menu (%s)", s.ID, label)

@@ -10,19 +10,30 @@ import (
 // meetStage inspects the Meet page and classifies where the bot is.
 // Stages: meeting, lobby, prejoin, blocked, login, unknown.
 func (s *Session) meetStage() (string, string) {
-	meet, _ := s.pages()
+	_, meet := s.pages()
 	if meet == nil {
 		return "unknown", "no page"
 	}
 	res, err := meet.Timeout(5 * time.Second).Eval(`() => {
   const body = (((document.body || {}).innerText) || "").toLowerCase();
   const has = sel => { try { return !!document.querySelector(sel); } catch (e) { return false; } };
+  const vis = sel => {
+    try {
+      const el = document.querySelector(sel);
+      if (!el) return false;
+      const r = el.getBoundingClientRect();
+      if (r.width < 2 || r.height < 2) return false;
+      const cs = getComputedStyle(el);
+      return cs.visibility !== "hidden" && cs.display !== "none";
+    } catch (e) { return false; }
+  };
   const snippet = (re) => {
     const m = body.match(re);
     return m ? String(m[0]).slice(0, 120) : "";
   };
-  if (has('[aria-label="Present now"]') || has('[data-tooltip="Present now"]') ||
-      has('[aria-label="Stop presenting"]') || /you are presenting|you're presenting|stop presenting/.test(body)) {
+  if (vis('[aria-label="Present now"]') || vis('[data-tooltip="Present now"]') ||
+      vis('[aria-label="Stop presenting"]') || vis('[data-tooltip="Stop presenting"]') ||
+      /you are presenting|you're presenting|stop presenting/.test(body)) {
     return ["meeting", "meeting controls visible"];
   }
   if (/waiting for (the )?host|you.ll be able to join|someone will let you in|waiting to be admitted|you.ll join when someone lets you in/.test(body)) {
@@ -51,7 +62,7 @@ func (s *Session) meetStage() (string, string) {
 
 // fillGuestName types the configured guest name into the prejoin name field.
 func (s *Session) fillGuestName() bool {
-	meet, _ := s.pages()
+	_, meet := s.pages()
 	if meet == nil {
 		return false
 	}
@@ -84,7 +95,7 @@ func (s *Session) fillGuestName() bool {
 
 // clickJoin clicks "Join now" / "Ask to join" on the prejoin screen.
 func (s *Session) clickJoin() (bool, string) {
-	meet, _ := s.pages()
+	_, meet := s.pages()
 	if meet == nil {
 		return false, ""
 	}
@@ -116,7 +127,7 @@ func (s *Session) clickJoin() (bool, string) {
 
 // clickPresentButton opens Meet's "Present now" menu.
 func (s *Session) clickPresentButton() (bool, string) {
-	meet, _ := s.pages()
+	_, meet := s.pages()
 	if meet == nil {
 		return false, ""
 	}
@@ -148,7 +159,7 @@ func (s *Session) clickPresentButton() (bool, string) {
 
 // clickPresentSource picks "A tab" (default) or "Entire screen" in the menu.
 func (s *Session) clickPresentSource() (bool, string) {
-	meet, _ := s.pages()
+	_, meet := s.pages()
 	if meet == nil {
 		return false, ""
 	}
@@ -182,7 +193,7 @@ func (s *Session) clickPresentSource() (bool, string) {
 
 // presenting reports whether Meet shows an active presentation.
 func (s *Session) presenting() (bool, error) {
-	meet, _ := s.pages()
+	_, meet := s.pages()
 	if meet == nil {
 		return false, nil
 	}
@@ -197,4 +208,37 @@ func (s *Session) presenting() (bool, error) {
 		return false, err
 	}
 	return res.Value.Bool(), nil
+}
+
+// clickShareConfirm confirms the "Share" button some Meet versions show after a
+// capture source has been picked. It is a no-op when the share starts directly.
+func (s *Session) clickShareConfirm() (bool, string) {
+	_, meet := s.pages()
+	if meet == nil {
+		return false, ""
+	}
+	res, err := meet.Timeout(4 * time.Second).Eval(`() => {
+  const norm = x => (x || "").replace(/\s+/g, " ").trim().toLowerCase();
+  const visible = el => { const r = el.getBoundingClientRect(); return r.width > 2 && r.height > 2; };
+  const pick = sel => Array.from(document.querySelectorAll(sel));
+  const candidates = [
+    ...pick('[role=dialog] button, [role=dialog] [role=button]'),
+    ...pick('dialog button'),
+    ...pick('button[aria-label="Share"], button[aria-label="share"]'),
+  ];
+  for (const el of candidates) {
+    if (!visible(el)) continue;
+    const t = norm((el.getAttribute("aria-label") || "").trim() || (el.innerText || el.textContent || ""));
+    if (!(t === "share" || t === "share now" || t === "start sharing")) continue;
+    try { el.scrollIntoView({block: 'center'}); } catch (e) {}
+    el.click();
+    return t.slice(0, 40);
+  }
+  return "";
+}`)
+	if err != nil {
+		return false, ""
+	}
+	label := strings.TrimSpace(res.Value.Str())
+	return label != "", label
 }
