@@ -81,6 +81,10 @@ $SUDO install -d -m 0755 "$PREFIX/bin"
 $SUDO install -m 0755 "$TMP/telemeetbot" "$PREFIX/bin/telemeetbot"
 
 $SUDO install -d -m 0750 "$CONFIG_DIR"
+if [[ ! -f "$CONFIG_DIR/config.yml" && -f "$TMP/deploy/config.example.yml" ]]; then
+  $SUDO install -m 0640 "$TMP/deploy/config.example.yml" "$CONFIG_DIR/config.yml"
+  log "staged a template config at ${CONFIG_DIR}/config.yml — the wizard will edit it"
+fi
 if [[ -f "$TMP/deploy/telemeetbot.service" ]] && command -v systemctl >/dev/null; then
   if [[ "$SERVICE" -eq 1 ]]; then
     log "installing systemd unit"

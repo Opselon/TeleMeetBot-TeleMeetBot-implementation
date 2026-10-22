@@ -80,7 +80,7 @@ curl -fsSL https://raw.githubusercontent.com/Opselon/TeleMeetBot-TeleMeetBot-imp
 
 این اسکریپت معماری را تشخیص می‌دهد (`amd64`/`arm64`/`arm v6, v7`/`386`)، آخرین ریلیز را
 دانلود و با SHA256 چک می‌کند، باینری را در `/usr/local/bin` می‌گذارد، unit های systemd
-را نصب می‌کند و ویزارد را اجرا می‌کند.
+را نصب می‌کند، یک قالب کانفیگ در `/etc/telemeetbot/config.yml` می‌سازد و ویزارد را اجرا می‌کند.
 
 ### ج) بیلد از سورس
 

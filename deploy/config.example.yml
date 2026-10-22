@@ -1,0 +1,55 @@
+# TeleMeetBot example config for a systemd deployment.
+# Copy to /etc/telemeetbot/config.yml:
+#   sudo cp deploy/config.example.yml /etc/telemeetbot/config.yml
+# Then either run `sudo telemeetbot --wizard --config /etc/telemeetbot/config.yml`
+# or fill the values below yourself.
+telegram:
+  token: "PASTE-YOUR-BOTFATHER-TOKEN"
+  # Strict allow-list. An empty list means nobody can use the bot
+  # unless first_start_claims_admin is true (first /start wins).
+  admins: []
+  first_start_claims_admin: true
+  notify_chat_id: 0
+  poll_timeout_seconds: 30
+
+server:
+  # Keep the health surface local; reverse-proxy it if you need remote access.
+  health_addr: "127.0.0.1:18080"
+
+browser:
+  executable: ""        # empty = auto-detect (chromium/google-chrome on PATH)
+  headless: true
+  per_session: true
+  display: ":99"        # only used when headless: false (Xvfb)
+  window_width: 1280
+  window_height: 800
+  lang: "en-US"         # Google Meet UI language must be English
+  extra_args: []
+  user_agent: ""
+  proxy: ""
+
+media:
+  default_volume: 80
+  default_speed: 1.0
+  autoplay: true
+  mute_until_connected: true
+  seek_step_seconds: 10
+  loop: false
+
+meet:
+  guest_name: "TeleMeet Bot"
+  present_mode: "tab"               # tab (headless-safe) or screen (needs Xvfb)
+  capture_source: "TeleMeet Media"  # tab title / "Entire screen (monitor 1)"
+  join_timeout_seconds: 120
+  present_timeout_seconds: 45
+  admit_wait_seconds: 300
+
+limits:
+  max_sessions: 2
+
+logging:
+  level: "info"
+  file: ""              # empty = stdout (journald under systemd)
+
+paths:
+  data_dir: /var/lib/telemeetbot

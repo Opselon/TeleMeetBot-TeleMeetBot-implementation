@@ -33,4 +33,4 @@ docker compose run --rm telemeetbot --wizard --config /data/telemeetbot.yml
 docker compose up -d
 ```
 
-## Verification checksums are attached below (`SHA256SUMS`).
+SHA256 checksums for the archives are attached below (`SHA256SUMS`).

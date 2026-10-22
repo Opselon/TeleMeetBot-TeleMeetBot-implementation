@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -146,6 +147,7 @@ func TestIntegrationMediaControls(t *testing.T) {
 		switch r.URL.Path {
 		case "/tone.wav":
 			w.Header().Set("Content-Type", "audio/wav")
+			w.Header().Set("Content-Length", strconv.Itoa(len(wav)))
 			_, _ = w.Write(wav)
 		case "/page":
 			w.Header().Set("Content-Type", "text/html")
@@ -267,6 +269,8 @@ func TestIntegrationPlayerDocument(t *testing.T) {
 	wav := generateWAV(2, 44100, 330, 0.2)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "audio/wav")
+		w.Header().Set("Content-Length", strconv.Itoa(len(wav)))
+		w.Header().Set("Accept-Ranges", "bytes")
 		_, _ = w.Write(wav)
 	}))
 	defer srv.Close()
@@ -275,13 +279,18 @@ func TestIntegrationPlayerDocument(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc, err := PlayerDataURL(tgt, PlayerOptions{TabTitle: "TeleMeet Media", Autoplay: false, Volume: 70, Loop: true})
+	doc, err := PlayerHTML(tgt, PlayerOptions{TabTitle: "TeleMeet Media", Autoplay: false, Volume: 70, Loop: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Production loads the player from the loopback server, not a data: URL.
+	docURL, err := players.playerURL(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
 	b, closeFn := newTestBrowser(t)
 	defer closeFn()
-	page := openPage(t, b, doc)
+	page := openPage(t, b, docURL)
 
 	// The player locks its title and exposes exactly one media element.
 	if got := evaluate(t, page, `document.title`); got != "TeleMeet Media" {

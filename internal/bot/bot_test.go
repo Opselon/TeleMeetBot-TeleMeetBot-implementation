@@ -366,3 +366,22 @@ func TestCancelFlow(t *testing.T) {
 
 var _ = bytes.NewBuffer
 var _ = context.Background
+
+func TestNewWithInlineArguments(t *testing.T) {
+	h := newHarness(t, []int64{42}, 2)
+
+	h.message(42, "/new meet.google.com/abc-defg-hij https://youtu.be/dQw4w9WgXcQ")
+	if !strings.Contains(h.api.lastSent().text, "Ready to launch") {
+		t.Fatalf("inline args did not reach the confirm step: %q", h.api.lastSent().text)
+	}
+	h.callback(42, cbLaunch)
+	if len(h.eng.requests) != 1 {
+		t.Fatalf("engine not started: %+v", h.eng.requests)
+	}
+
+	// A single argument prefills the meeting and asks for the media link.
+	h.message(42, "/new abc-defg-hij")
+	if !strings.Contains(h.api.lastSent().text, "step 2/2") {
+		t.Fatalf("single arg did not prefill the meet link: %q", h.api.lastSent().text)
+	}
+}

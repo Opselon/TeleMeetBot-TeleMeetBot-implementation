@@ -330,11 +330,15 @@ func (s *Session) openMedia() error {
 
 	target := s.MediaURL
 	if s.MediaKind == MediaDirect {
-		doc, err := PlayerDataURL(MediaTarget{URL: s.MediaURL, Kind: s.MediaKind}, s.playerOpts)
+		doc, err := PlayerHTML(MediaTarget{URL: s.MediaURL, Kind: s.MediaKind}, s.playerOpts)
 		if err != nil {
 			return fmt.Errorf("build player: %w", err)
 		}
-		target = doc
+		// Loopback HTTP (not data:) so Chrome always allows the media fetch.
+		target, err = players.playerURL(doc)
+		if err != nil {
+			return fmt.Errorf("serve player: %w", err)
+		}
 	}
 	// The display surface headless Chrome captures is sized by the media tab's
 	// viewport; set it before loading so the share matches browser.window_*.

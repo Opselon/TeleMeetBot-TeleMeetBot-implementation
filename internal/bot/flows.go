@@ -100,7 +100,7 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 			b.clearFlow(userID)
 			b.sendMain(chatID)
 		case "new", "stream":
-			b.startFlow(chatID, userID)
+			b.startFlow(chatID, userID, m.CommandArguments())
 		case "sessions":
 			b.sendSessions(chatID)
 		case "health":
@@ -162,15 +162,41 @@ func (b *Bot) stepInput(chatID, userID int64, f *flow, text string) {
 	}
 }
 
-// startFlow begins the wizard.
-func (b *Bot) startFlow(chatID, userID int64) {
+// startFlow begins the wizard. args optionally carries "/new <meet> [media]"
+// so a session can be opened in a single message.
+func (b *Bot) startFlow(chatID, userID int64, args string) {
 	active := len(b.eng.Active())
 	if active >= b.cfg.Limits.MaxSessions {
 		b.sendText(chatID, fmt.Sprintf("⚠️ <b>Limit reached</b>\n\nActive sessions: %d/%d. Stop one first.", active, b.cfg.Limits.MaxSessions), sessionsKB(b.statuses()))
 		return
 	}
-	b.setFlow(userID, &flow{step: stepMeet})
-	b.sendText(chatID, flowText(stepMeet, ""), cancelKB())
+	f := &flow{step: stepMeet}
+	fields := strings.Fields(args)
+	if len(fields) >= 1 {
+		normalized, err := engine.NormalizeMeetURL(fields[0])
+		if err != nil {
+			b.setFlow(userID, f)
+			b.sendText(chatID, "❌ "+esc(err.Error())+"\n\n"+flowText(stepMeet, ""), cancelKB())
+			return
+		}
+		f.meet = normalized
+		f.step = stepMedia
+	}
+	if len(fields) >= 2 {
+		target, err := engine.ClassifyMedia(fields[1])
+		if err != nil {
+			b.setFlow(userID, f)
+			b.sendText(chatID, "❌ "+esc(err.Error())+"\n\n"+flowText(stepMedia, f.meet), cancelKB())
+			return
+		}
+		f.media = target.URL
+		f.step = stepNone
+		b.setFlow(userID, f)
+		b.sendText(chatID, confirmText(f.meet, f.media, target.Kind), confirmKB())
+		return
+	}
+	b.setFlow(userID, f)
+	b.sendText(chatID, flowText(f.step, f.meet), cancelKB())
 }
 
 // launch starts the engine for the pending wizard.
@@ -227,7 +253,7 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 		_ = b.api.Edit(chatID, msgID, b.mainText(), mainMenuKB())
 	case data == cbNew:
 		_ = b.api.AnswerCallback(q.ID, "new stream")
-		b.startFlow(chatID, userID)
+		b.startFlow(chatID, userID, "")
 	case data == cbSessions:
 		_ = b.api.AnswerCallback(q.ID, "")
 		_ = b.api.Edit(chatID, msgID, sessionsText(b.statuses()), sessionsKB(b.statuses()))

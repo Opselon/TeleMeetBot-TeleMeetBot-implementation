@@ -140,10 +140,10 @@ type PlayerOptions struct {
 	Speed    float64
 }
 
-// PlayerDataURL renders the embedded player document as a data: URL. The page
-// locks document.title to TabTitle because Chromium's screen-share auto-select
-// matches the source by tab title.
-func PlayerDataURL(t MediaTarget, o PlayerOptions) (string, error) {
+// PlayerHTML renders the embedded player document. The page locks
+// document.title to TabTitle because Chromium's screen-share auto-select
+// matches the capture source by tab title.
+func PlayerHTML(t MediaTarget, o PlayerOptions) (string, error) {
 	if o.TabTitle == "" {
 		o.TabTitle = "TeleMeet Media"
 	}
@@ -169,6 +169,15 @@ func PlayerDataURL(t MediaTarget, o PlayerOptions) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	doc := strings.Replace(string(html), "__TM_BOOTSTRAP__", string(boot), 1)
+	return strings.Replace(string(html), "__TM_BOOTSTRAP__", string(boot), 1), nil
+}
+
+// PlayerDataURL renders the player as a data: URL (kept for tests and callers
+// that cannot use the loopback server).
+func PlayerDataURL(t MediaTarget, o PlayerOptions) (string, error) {
+	doc, err := PlayerHTML(t, o)
+	if err != nil {
+		return "", err
+	}
 	return "data:text/html;base64," + base64.StdEncoding.EncodeToString([]byte(doc)), nil
 }

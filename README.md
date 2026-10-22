@@ -34,7 +34,8 @@ No desktop environment. No Python/Selenium. No external automation service. One 
 The bot launches one headless Chromium per session with capture flags
 (`--enable-usermedia-screen-capturing`, `--auto-select-desktop-capture-source=…`,
 `--autoplay-policy=no-user-gesture-required`) and a stock Chrome user agent.
-Two tabs are opened: the **media tab** (titled `TeleMeet Media`, see title-lock below) and the
+Two tabs are opened: the **media tab** (titled `TeleMeet Media`, served from a tiny loopback HTTP
+server so Chromium never blocks the media fetch, see title-lock below) and the
 **Meet tab** which is driven through the real UI — guest name fill, "Ask to join" / "Join now",
 ambient pop-ups dismissed — then *"Present now → A tab"*, auto-selected to the media tab, so
 whatever you streamed is what everyone in the call sees and hears.
@@ -85,8 +86,9 @@ curl -fsSL https://raw.githubusercontent.com/Opselon/TeleMeetBot-TeleMeetBot-imp
 ```
 
 The installer detects arch (`amd64`/`arm64`/`arm v6, v7`/`386`), downloads + verifies the
-latest release archive, drops `/usr/local/bin/telemeetbot`, installs the systemd unit and
-launches the wizard.
+latest release archive, drops `/usr/local/bin/telemeetbot`, installs the systemd unit,
+stages a template config at `/etc/telemeetbot/config.yml` (from
+`deploy/config.example.yml`) and launches the wizard.
 
 ### Option C — build from source
 

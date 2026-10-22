@@ -2,6 +2,8 @@ package engine
 
 import (
 	"encoding/base64"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -174,4 +176,53 @@ func decodeDataURL(t *testing.T, raw string) string {
 		t.Fatalf("decode: %v", err)
 	}
 	return string(dec)
+}
+
+func TestPlayerServerServesDocuments(t *testing.T) {
+	html, err := PlayerHTML(MediaTarget{URL: "https://example.com/a.mp4", Kind: MediaDirect}, PlayerOptions{TabTitle: "TeleMeet Media", Volume: 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	url, err := players.playerURL(html)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(url, "http://127.0.0.1:") {
+		t.Fatalf("player url = %q", url)
+	}
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || !strings.Contains(string(body), "https://example.com/a.mp4") {
+		t.Fatalf("player doc = %d %q", resp.StatusCode, string(body[:80]))
+	}
+	if resp.Header.Get("Content-Type") != "text/html; charset=utf-8" {
+		t.Fatalf("content-type = %q", resp.Header.Get("Content-Type"))
+	}
+	// Unknown ids must 404, never serve another session's document.
+	bad, err := http.Get(strings.TrimSuffix(url, url[len(url)-24:]) + "doesnotexist")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad.Body.Close()
+	if bad.StatusCode != 404 {
+		t.Fatalf("unknown doc = %d", bad.StatusCode)
+	}
+}
+
+func TestPlayerDocsAreBounded(t *testing.T) {
+	for i := 0; i < maxPlayerDocs+5; i++ {
+		if _, err := players.playerURL("<html>x</html>"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	players.mu.RLock()
+	n := len(players.docs)
+	players.mu.RUnlock()
+	if n > maxPlayerDocs {
+		t.Fatalf("docs = %d, want <= %d", n, maxPlayerDocs)
+	}
 }
