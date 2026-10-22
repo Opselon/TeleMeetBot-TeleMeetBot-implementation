@@ -255,7 +255,8 @@ func (s *Session) clickPresentButton() (bool, string) {
         tooltip.includes("audio") || tooltip.includes("microphone") || tooltip.includes("camera")) {
       continue;
     }
-    if (aria.includes("stop presenting") || aria.includes("stop sharing") || tooltip.includes("stop")) {
+    if (aria.includes("stop presenting") || aria.includes("stop sharing") || tooltip.includes("stop") ||
+        aria.includes("is starting") || text.includes("is starting") || tooltip.includes("is starting")) {
       continue;
     }
 
@@ -297,7 +298,7 @@ func (s *Session) clickPresentSource() (bool, string) {
 	if meet == nil {
 		return false, ""
 	}
-	pats := []string{"a tab", "a chrome tab", "chrome tab"}
+	pats := []string{"a tab", "a chrome tab", "chrome tab", "tab"}
 	if s.mgr.meetCfg.PresentMode == "screen" {
 		pats = []string{"entire screen", "your entire screen", "a screen"}
 	}
@@ -306,17 +307,28 @@ func (s *Session) clickPresentSource() (bool, string) {
   const pats = %s;
   const norm = x => (x || "").replace(/\s+/g, " ").trim().toLowerCase();
   const els = Array.from(document.querySelectorAll('[role=menuitem], [role=button], button, li, div[aria-label]'));
+  let best = null;
+  let bestText = "";
   for (const el of els) {
     if (el.querySelector('[role=menuitem]')) continue;
     const t = norm((el.getAttribute('aria-label') || "") + " " + (el.innerText || el.textContent || ""));
     if (!pats.some(p => t === p || t.startsWith(p) || t.includes(p))) continue;
+    // "presentation is starting..." status text must not be clicked.
+    if (t.includes("is starting") || t.includes("starting")) continue;
     const r = el.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) continue;
-    try { el.scrollIntoView({block: 'center'}); } catch (e) {}
-    el.click();
-    return t.slice(0, 40);
+    // Prefer real menu items over generic divs.
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    const isItem = role === 'menuitem' || el.tagName === 'BUTTON' || el.tagName === 'LI';
+    if (!best || (isItem && !(best.getAttribute('role') || '').toLowerCase() === 'menuitem')) {
+      best = el;
+      bestText = t;
+    }
   }
-  return "";
+  if (!best) return "";
+  try { best.scrollIntoView({block: 'center'}); } catch (e) {}
+  best.click();
+  return bestText.slice(0, 40);
 }`, jsPats)
 	res, err := meet.Timeout(4 * time.Second).Eval(js)
 	if err != nil {
@@ -343,6 +355,36 @@ func (s *Session) presenting() (bool, error) {
 		return false, err
 	}
 	return res.Value.Bool(), nil
+}
+
+// dumpPresentMenu logs the visible present-menu DOM so the exact labels of
+// Meet's picker (which vary between Meet versions) can be diagnosed from logs.
+func (s *Session) dumpPresentMenu() {
+	meet := s.meetTab()
+	if meet == nil {
+		return
+	}
+	res, err := meet.Timeout(4 * time.Second).Eval(`() => {
+  const norm = x => (x || "").replace(/\s+/g, " ").trim();
+  const out = [];
+  const sel = '[role=menuitem], [role=menuitemradio], [role=button], button, li, [aria-label]';
+  for (const el of document.querySelectorAll(sel)) {
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) continue;
+    const aria = norm(el.getAttribute('aria-label') || "");
+    if (!aria && !el.innerText) continue;
+    const t = norm(el.innerText || el.textContent || "");
+    if (t.length > 80) continue;
+    out.push((el.tagName + "[" + (el.getAttribute('role') || "") + "]") +
+      " aria=" + JSON.stringify(aria) + " text=" + JSON.stringify(t));
+  }
+  return out.slice(0, 60).join("\n");
+}`)
+	if err != nil {
+		s.log.Warnf("[PIPELINE:present] session %s: menu dump failed: %v", s.ID, err)
+		return
+	}
+	s.log.Warnf("[PIPELINE:present] session %s: visible present-menu elements:\n%s", s.ID, res.Value.Str())
 }
 
 // clickShareConfirm confirms the "Share" button some Meet versions show after a

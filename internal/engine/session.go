@@ -614,7 +614,12 @@ func (s *Session) startPresenting() error {
 				s.log.Infof("[PIPELINE:present] session %s: opened present menu (%s)", s.ID, label)
 				s.setState(StateSharing, "[5/6] Opened present menu: selecting tab")
 				time.Sleep(900 * time.Millisecond)
-				if clicked, item := s.clickPresentSource(); clicked {
+				clicked, item := s.clickPresentSource()
+				if !clicked {
+					s.log.Warnf("[PIPELINE:present] session %s: present menu item not found (label=%q); dumping menu DOM", s.ID, item)
+					s.dumpPresentMenu()
+				}
+				if clicked {
 					s.log.Infof("[PIPELINE:present] session %s: clicked share source %q", s.ID, item)
 					s.setState(StateSharing, fmt.Sprintf("[5/6] Selected tab source %q", item))
 					time.Sleep(1200 * time.Millisecond)
