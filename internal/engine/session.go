@@ -290,6 +290,7 @@ func (s *Session) watch() {
 	presentTries := 0
 	lastPresentCheck := time.Now()
 	lastLog := time.Now()
+	deadPolls := 0
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -346,12 +347,22 @@ func (s *Session) watch() {
 			}
 		}
 
-		// A closed browser means there is nothing left to monitor.
+		// A closed browser means there is nothing left to monitor. rod's Eval
+		// requires function-form JS; a raw expression makes rod call
+		// (1).apply and "disconnects" a perfectly healthy session. One transient
+		// CDP hiccup must not kill a live stream either, so require consecutive
+		// failures before giving up.
 		if meet := s.meetTab(); meet != nil {
-			if _, err := meet.Eval("1"); err != nil {
-				s.setDetail("browser disconnected")
-				s.setError(fmt.Errorf("browser disconnected: %w", err))
-				return
+			if _, err := meet.Timeout(5 * time.Second).Eval(tabAliveJS()); err != nil {
+				deadPolls++
+				s.log.Warnf("[PIPELINE:stream] session %s: meet tab eval failed (%d/3): %v", s.ID, deadPolls, err)
+				if deadPolls >= 3 {
+					s.setDetail("browser disconnected")
+					s.setError(fmt.Errorf("browser disconnected: %w", err))
+					return
+				}
+			} else {
+				deadPolls = 0
 			}
 		}
 	}

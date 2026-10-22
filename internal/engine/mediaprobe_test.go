@@ -12,6 +12,7 @@ func TestMediaProbeScriptShape(t *testing.T) {
 		"pixelSampleJS":   pixelSampleJS(),
 		"codecSupportJS":  codecSupportJS(),
 		"playerProblemJS": playerProblemJS(),
+		"tabAliveJS":      tabAliveJS(),
 	} {
 		if !strings.HasPrefix(js, "() => {") {
 			t.Errorf("%s must be function form for rod Eval", name)

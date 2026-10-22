@@ -166,6 +166,13 @@ func titleLockJS(title string) string {
 }`, t)
 }
 
+// tabAliveJS is the watchdog liveness probe for the meet tab. rod requires
+// function-form JS: a bare expression ("1") makes rod evaluate (1).apply and
+// report a healthy browser as disconnected.
+func tabAliveJS() string {
+	return `() => { return 1; }`
+}
+
 // playerProblemJS scans visible text for known fatal player errors.
 func playerProblemJS() string {
 	return `() => {
