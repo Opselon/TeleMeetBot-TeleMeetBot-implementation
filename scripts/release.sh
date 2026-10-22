@@ -47,7 +47,7 @@ build() {
     rm -rf "$stage"
   done
 
-  ( cd "$DIST" && sha256sum ./*.tar.gz > SHA256SUMS )
+  ( cd "$DIST" && sha256sum telemeetbot-linux-*.tar.gz > SHA256SUMS )
   log "artifacts:"
   ls -lh "$DIST"
 }

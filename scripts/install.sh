@@ -56,8 +56,11 @@ fi
 
 if [[ "$VERSION" == "latest" ]]; then
   log "resolving the latest release"
-  VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-    | grep -m1 '"tag_name"' | sed -E 's/.*"tag_name": *"([^"]+)".*/\1/')"
+  # Read the whole body first: piping into an early-exiting grep trips SIGPIPE
+  # under `set -o pipefail` and aborts the installer.
+  latest_json="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")" \
+    || die "cannot reach the GitHub API"
+  VERSION="$(printf '%s' "$latest_json" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
   [[ -n "$VERSION" ]] || die "could not resolve the latest release"
 fi
 
@@ -71,7 +74,8 @@ curl -fL --retry 3 -o "$TMP/$FILE" "$BASE/$FILE"
 curl -fL --retry 3 -o "$TMP/SHA256SUMS" "$BASE/SHA256SUMS"
 
 log "verifying checksum"
-( cd "$TMP" && grep " $FILE\$" SHA256SUMS | sha256sum -c - ) || die "checksum mismatch — aborting"
+# SHA256SUMS lines carry bare names (older releases used a ./ prefix).
+( cd "$TMP" && grep -E " \.?/${FILE}\$" SHA256SUMS | sha256sum -c - ) || die "checksum mismatch — aborting"
 
 tar -C "$TMP" -xzf "$TMP/$FILE"
 [[ -x "$TMP/telemeetbot" ]] || die "archive does not contain the binary"
