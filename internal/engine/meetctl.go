@@ -19,12 +19,15 @@ func meetStageJS() string {
   const body = (((document.body || {}).innerText) || "").toLowerCase();
   const vis = sel => {
     try {
-      const el = document.querySelector(sel);
-      if (!el) return false;
-      const r = el.getBoundingClientRect();
-      if (r.width < 2 || r.height < 2) return false;
-      const cs = getComputedStyle(el);
-      return cs.visibility !== "hidden" && cs.display !== "none";
+      const els = document.querySelectorAll(sel);
+      for (const el of els) {
+        const r = el.getBoundingClientRect();
+        if (r.width >= 2 && r.height >= 2) {
+          const cs = getComputedStyle(el);
+          if (cs.visibility !== "hidden" && cs.display !== "none") return true;
+        }
+      }
+      return false;
     } catch (e) { return false; }
   };
   const snippet = (re) => {
@@ -32,24 +35,40 @@ func meetStageJS() string {
     return m ? String(m[0]).slice(0, 120) : "";
   };
   const excerpt = body.replace(/\s+/g, " ").trim().slice(0, 240);
-  if (vis('[aria-label="Present now"]') || vis('[data-tooltip="Present now"]') ||
-      vis('[aria-label="Stop presenting"]') || vis('[data-tooltip="Stop presenting"]') ||
-      /you are presenting|you're presenting|stop presenting/.test(body)) {
+
+  // In-meeting controls that only exist once the call is active:
+  const inMeeting = vis('[aria-label*="Leave call" i]') ||
+                    vis('[data-tooltip*="Leave call" i]') ||
+                    vis('[aria-label*="Present" i]') ||
+                    vis('[data-tooltip*="Present" i]') ||
+                    vis('[aria-label*="Share screen" i]') ||
+                    vis('[aria-label*="Share your screen" i]') ||
+                    vis('[aria-label*="Stop presenting" i]') ||
+                    vis('[data-tooltip*="Stop presenting" i]') ||
+                    vis('[aria-label*="Stop sharing" i]') ||
+                    vis('[data-tooltip*="Stop sharing" i]') ||
+                    vis('[aria-label*="Raise hand" i]') ||
+                    vis('[aria-label*="People" i]') ||
+                    vis('[aria-label*="Chat with everyone" i]') ||
+                    vis('[aria-label*="Meeting details" i]') ||
+                    /you are presenting|you're presenting|stop presenting|you are sharing|you're sharing|stop sharing/.test(body);
+
+  if (inMeeting) {
     return ["meeting", "meeting controls visible"];
   }
-  if (/waiting for (the )?host|you.ll be able to join|someone will let you in|waiting to be admitted|you.ll join when someone lets you in/.test(body)) {
+  if (/waiting for (the )?host|you.ll be able to join|someone will let you in|waiting to be admitted|you.ll join when someone lets you in|asking to join/.test(body)) {
     return ["lobby", "in the lobby, host must admit"];
   }
   if (/meeting is full|you can.t join this (video )?call|this meeting has ended|the call has ended|invalid meeting|check your meeting code|no one can join|ask the host|needs permission/.test(body)) {
     return ["blocked", excerpt];
   }
-  if (/join now|ask to join|ready to join/.test(body)) {
+  if (/join now|ask to join|ready to join/.test(body) || vis('input[placeholder*="name" i]') || vis('input[aria-label*="name" i]')) {
     return ["prejoin", "prejoin screen"];
   }
   if (/sign in|use a personal account|join with a google account/.test(body)) {
     return ["login", snippet(/sign in|use a personal account|join with a google account/)];
   }
-  return ["unknown", ""];
+  return ["unknown", excerpt.slice(0, 80)];
 }`
 }
 
@@ -157,6 +176,60 @@ func (s *Session) clickJoin() (bool, string) {
 	return label != "", label
 }
 
+// mutePrejoinDevices turns off camera and microphone on the prejoin screen,
+// ensuring the bot does not join Google Meet with an active green fake-camera.
+func (s *Session) mutePrejoinDevices() {
+	meet := s.meetTab()
+	if meet == nil {
+		return
+	}
+	res, err := meet.Timeout(4 * time.Second).Eval(`() => {
+  const norm = x => (x || "").toLowerCase().trim();
+  const btns = Array.from(document.querySelectorAll('button, [role=button], div[role=button]'));
+  let camOff = false;
+  let micOff = false;
+  for (const b of btns) {
+    const label = norm((b.getAttribute('aria-label') || "") + " " + (b.getAttribute('data-tooltip') || ""));
+    if (!camOff && (label.includes("turn off camera") || label.includes("turn off video"))) {
+      try { b.click(); camOff = true; } catch (e) {}
+    }
+    if (!micOff && (label.includes("turn off microphone") || label.includes("turn off mic"))) {
+      try { b.click(); micOff = true; } catch (e) {}
+    }
+  }
+  // Keyboard shortcut fallback: Ctrl+E (camera), Ctrl+D (mic)
+  if (!camOff) {
+    window.dispatchEvent(new KeyboardEvent('keydown', {key: 'e', code: 'KeyE', keyCode: 69, which: 69, ctrlKey: true, bubbles: true}));
+    window.dispatchEvent(new KeyboardEvent('keyup', {key: 'e', code: 'KeyE', keyCode: 69, which: 69, ctrlKey: true, bubbles: true}));
+  }
+  return JSON.stringify({cam: camOff, mic: micOff});
+}`)
+	if err != nil {
+		s.log.Debugf("session %s: mute prejoin devices: %v", s.ID, err)
+	} else {
+		s.log.Infof("session %s: muted prejoin devices: %s", s.ID, res.Value.Str())
+	}
+}
+
+// turnOffMeetingCamera turns off the camera inside the meeting call.
+func (s *Session) turnOffMeetingCamera() {
+	meet := s.meetTab()
+	if meet == nil {
+		return
+	}
+	_, _ = meet.Timeout(3 * time.Second).Eval(`() => {
+  const norm = x => (x || "").toLowerCase().trim();
+  const btns = Array.from(document.querySelectorAll('button, [role=button]'));
+  for (const b of btns) {
+    const label = norm((b.getAttribute('aria-label') || "") + " " + (b.getAttribute('data-tooltip') || ""));
+    if (label.includes("turn off camera") || label.includes("turn off video")) {
+      try { b.click(); return true; } catch (e) {}
+    }
+  }
+  return false;
+}`)
+}
+
 // clickPresentButton opens Meet's "Present now" menu.
 func (s *Session) clickPresentButton() (bool, string) {
 	meet := s.meetTab()
@@ -169,8 +242,8 @@ func (s *Session) clickPresentButton() (bool, string) {
   let best = null;
   for (const el of els) {
     const t = norm((el.getAttribute('aria-label') || "") + " " + (el.innerText || el.textContent || ""));
-    if (!t.includes("present")) continue;
-    if (t.includes("stop presenting")) continue;
+    if (!t.includes("present") && !t.includes("share screen") && !t.includes("share your screen") && !t.includes("share now")) continue;
+    if (t.includes("stop presenting") || t.includes("stop sharing")) continue;
     const r = el.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) continue;
     best = el;
@@ -231,9 +304,9 @@ func (s *Session) presenting() (bool, error) {
 	}
 	res, err := meet.Timeout(4 * time.Second).Eval(`() => {
   try {
-    if (document.querySelector('[aria-label="Stop presenting"], [data-tooltip="Stop presenting"]')) return true;
+    if (document.querySelector('[aria-label*="Stop presenting" i], [data-tooltip*="Stop presenting" i], [aria-label*="Stop sharing" i], [data-tooltip*="Stop sharing" i]')) return true;
     const t = ((document.body || {}).innerText || "").toLowerCase();
-    return /you are presenting|you're presenting|stop presenting/.test(t);
+    return /you are presenting|you're presenting|stop presenting|you are sharing|you're sharing|stop sharing/.test(t);
   } catch (e) { return false; }
 }`)
 	if err != nil {

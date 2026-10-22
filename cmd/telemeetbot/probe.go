@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -12,6 +13,26 @@ import (
 	"github.com/Opselon/TeleMeetBot/internal/health"
 	"github.com/Opselon/TeleMeetBot/internal/web"
 )
+
+// runMediaProbe is the media-side diagnosis mode (--media-probe <link>): it
+// opens the link through the same pipeline the player tab uses and samples
+// playback + rendered pixels, without touching a meeting.
+func runMediaProbe(mediaLink string, seconds int, cfg *config.Config, log *slogLogger) error {
+	bCfg, _, _ := engine.FromConfig(cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(seconds+75)*time.Second)
+	defer cancel()
+
+	rep, err := engine.ProbeMedia(ctx, bCfg, mediaLink, seconds, log)
+	if err != nil {
+		return err
+	}
+	out, _ := json.MarshalIndent(rep, "", "  ")
+	fmt.Println(string(out))
+	if rep.Progressed && !rep.GreenFrames && !rep.BlackFrames && rep.PageProblem == "" && rep.PlayerErr == "" {
+		return nil
+	}
+	return fmt.Errorf("media verdict: %s", rep.Verdict)
+}
 
 // runProbe is the live diagnosis mode (--probe <meet-link>): one session, the
 // same engine the bot runs, no Telegram, no dashboard — events flow straight

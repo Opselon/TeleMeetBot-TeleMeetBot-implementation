@@ -175,12 +175,13 @@ func (s *Session) meetTab() *rod.Page {
 
 // run is the session state machine.
 func (s *Session) run() {
-	defer close(s.done)
 	defer s.cleanup()
+	s.setState(StateStarting, "[1/6] Launching Chromium")
+	s.log.Infof("[PIPELINE:session] [STEP 1/6] session %s: starting Chromium browser...", s.ID)
 
 	b, release, err := s.mgr.acquireBrowser()
 	if err != nil {
-		s.setError(fmt.Errorf("cannot launch chromium: %w", err))
+		s.setError(fmt.Errorf("start chromium: %w", err))
 		return
 	}
 	defer release()
@@ -188,8 +189,10 @@ func (s *Session) run() {
 	s.browser = b
 	s.mu.Unlock()
 
-	s.setState(StateStarting, "chromium ready")
+	s.log.Infof("[PIPELINE:session] [STEP 1/6] session %s: Chromium ready", s.ID)
 
+	s.setState(StateJoining, "[2/6] Loading media")
+	s.log.Infof("[PIPELINE:session] [STEP 2/6] session %s: opening media tab (url=%s kind=%s)...", s.ID, s.MediaURL, s.MediaKind)
 	if err := s.openMedia(); err != nil {
 		if s.ctx.Err() == nil {
 			s.setError(err)
@@ -199,7 +202,13 @@ func (s *Session) run() {
 	if s.ctx.Err() != nil {
 		return
 	}
+	s.mu.Lock()
+	mediaTitle, mediaDur := s.title, s.dur
+	s.mu.Unlock()
+	s.log.Infof("[PIPELINE:session] [STEP 2/6] session %s: media ready (title=%q dur=%.1fs)", s.ID, mediaTitle, mediaDur)
 
+	s.setState(StateJoining, "[3/6] Opening Google Meet")
+	s.log.Infof("[PIPELINE:session] [STEP 3/6] session %s: opening Meet tab (url=%s)...", s.ID, s.MeetURL)
 	if err := s.openMeet(); err != nil {
 		if s.ctx.Err() == nil {
 			s.setError(err)
@@ -209,7 +218,10 @@ func (s *Session) run() {
 	if s.ctx.Err() != nil {
 		return
 	}
+	s.log.Infof("[PIPELINE:session] [STEP 3/6] session %s: Meet tab loaded", s.ID)
 
+	s.setState(StateJoining, "[4/6] Joining meeting")
+	s.log.Infof("[PIPELINE:session] [STEP 4/6] session %s: handling prejoin and host gate...", s.ID)
 	if err := s.joinMeeting(); err != nil {
 		if s.ctx.Err() == nil {
 			s.setError(err)
@@ -219,10 +231,11 @@ func (s *Session) run() {
 	s.mu.Lock()
 	s.joined = time.Now()
 	s.mu.Unlock()
-	s.log.Infof("session %s: joined the meeting after %s", s.ID, s.joined.Sub(s.created).Round(time.Second))
+	s.log.Infof("[PIPELINE:session] [STEP 4/6] session %s: joined the meeting after %s", s.ID, s.joined.Sub(s.created).Round(time.Second))
 	s.emit(EventJoined, "joined the meeting")
 
-	s.setState(StateSharing, "starting screen share")
+	s.setState(StateSharing, "[5/6] Starting screen share")
+	s.log.Infof("[PIPELINE:session] [STEP 5/6] session %s: presenting tab %q...", s.ID, s.TabTitle)
 	if err := s.startPresenting(); err != nil {
 		if s.ctx.Err() == nil {
 			s.setError(err)
@@ -230,13 +243,18 @@ func (s *Session) run() {
 		return
 	}
 	s.emit(EventSharing, "screen share is live")
+	s.log.Infof("[PIPELINE:session] [STEP 5/6] session %s: screen share is active!", s.ID)
 
+	s.setState(StateStreaming, "[6/6] Starting media playback")
+	s.log.Infof("[PIPELINE:session] [STEP 6/6] session %s: unmuting & playing media...", s.ID)
 	if err := s.playMedia(); err != nil {
-		s.log.Warnf("session %s: media play failed after share: %v", s.ID, err)
-		s.setDetail("sharing, media did not start: " + err.Error())
+		s.log.Warnf("[PIPELINE:session] [STEP 6/6] session %s: media play failed after share: %v", s.ID, err)
+		s.setDetail("[6/6] Sharing, media start retry: " + err.Error())
+	} else {
+		s.setDetail("[6/6] Streaming live")
 	}
-	s.setState(StateStreaming, "streaming")
-	s.log.Infof("session %s: stream is live (share up, media playing)", s.ID)
+	s.setState(StateStreaming, "[6/6] Streaming live")
+	s.log.Infof("[PIPELINE:session] [STEP 6/6] session %s: stream is live (share up, media playing)", s.ID)
 	s.emit(EventStreaming, "stream is live")
 
 	s.watch()
@@ -271,6 +289,7 @@ func (s *Session) watch() {
 	defer ticker.Stop()
 	presentTries := 0
 	lastPresentCheck := time.Now()
+	lastLog := time.Now()
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -296,6 +315,15 @@ func (s *Session) watch() {
 			if st.Error != "" {
 				s.setDetail("player error: " + st.Error)
 			}
+		}
+
+		// Heartbeat log every 10 seconds for real-time diagnostics
+		if time.Since(lastLog) >= 10*time.Second {
+			lastLog = time.Now()
+			s.mu.RLock()
+			s.log.Infof("[PIPELINE:stream] session %s: [heartbeat] cur=%.1fs/%.1fs paused=%v muted=%v vol=%d%% title=%q",
+				s.ID, s.cur, s.dur, s.paused, s.muted, s.volume, s.title)
+			s.mu.RUnlock()
 		}
 
 		// Verify the presentation is still up; re-present a bounded number of
@@ -359,13 +387,30 @@ func (s *Session) openMedia() error {
 	}); err != nil {
 		s.log.Warnf("session %s: set viewport: %v", s.ID, err)
 	}
-	s.setState(StateJoining, "loading media")
+
+	// Neutralize background tab throttling & YouTube auto-pause on headless browser
+	_, _ = p.EvalOnNewDocument(`
+		Object.defineProperty(document, 'hidden', { value: false, writable: false });
+		Object.defineProperty(document, 'visibilityState', { value: 'visible', writable: false });
+		window.addEventListener('visibilitychange', e => e.stopImmediatePropagation(), true);
+
+		window.__allowPause = false;
+		const origPause = HTMLMediaElement.prototype.pause;
+		HTMLMediaElement.prototype.pause = function() {
+			if (!window.__allowPause) return;
+			return origPause.apply(this, arguments);
+		};
+	`)
+
+	s.setState(StateJoining, "[2/6] Loading media")
+	s.log.Infof("[PIPELINE:media] session %s: navigating to target %s...", s.ID, target)
 	if err := p.Timeout(50 * time.Second).Navigate(target); err != nil {
 		return fmt.Errorf("load media %s: %w", s.MediaURL, err)
 	}
 	_ = p.WaitLoad()
 
 	// Consent/interstitial walls (YouTube in the EU, etc.).
+	s.log.Infof("[PIPELINE:media] session %s: clearing interstitials...", s.ID)
 	if err := s.clearMediaInterstitials(p); err != nil {
 		return err
 	}
@@ -375,6 +420,8 @@ func (s *Session) openMedia() error {
 		s.log.Debugf("session %s: title lock failed: %v", s.ID, err)
 	}
 
+	s.setState(StateJoining, "[2/6] Waiting for playable video")
+	s.log.Infof("[PIPELINE:media] session %s: waiting for playable media element...", s.ID)
 	if err := s.waitMedia(35 * time.Second); err != nil {
 		if prob := s.playerProblem(); prob != "" {
 			return fmt.Errorf("media unavailable: %s", prob)
@@ -459,10 +506,12 @@ func (s *Session) joinMeeting() error {
 		}
 		switch stage {
 		case "meeting":
+			s.log.Infof("[PIPELINE:meet] session %s: joined the meeting (meeting stage detected)", s.ID)
+			s.turnOffMeetingCamera()
 			return nil
 		case "lobby":
 			extendWaitForHost()
-			s.setState(StateAdmitting, "waiting for the host to admit the bot")
+			s.setState(StateAdmitting, "[4/6] Waiting for host to admit bot")
 		case "blocked":
 			if phrase := blockedFatalPhrase(info); phrase != "" {
 				return fmt.Errorf("cannot join this meeting: %s", phrase)
@@ -472,10 +521,10 @@ func (s *Session) joinMeeting() error {
 			// after ~60 s, so re-request entry on a bounded cadence until the
 			// gate lifts.
 			extendWaitForHost()
-			s.setState(StateAdmitting, "host-restricted meeting: no one can join until the host starts it; retrying")
+			reloadCount++
+			s.setState(StateAdmitting, fmt.Sprintf("[4/6] Host-restricted meeting (attempt %d): waiting for host", reloadCount))
 			if time.Since(s.lastMeetLoad) > 30*time.Second {
-				reloadCount++
-				s.log.Infof("session %s: host-restricted meeting, re-requesting entry (attempt %d)", s.ID, reloadCount)
+				s.log.Infof("[PIPELINE:meet] session %s: host-restricted meeting, re-requesting entry (attempt %d)", s.ID, reloadCount)
 				if err := s.reopenMeet(); err != nil {
 					return fmt.Errorf("reload the meeting page: %w", err)
 				}
@@ -483,10 +532,11 @@ func (s *Session) joinMeeting() error {
 		case "login":
 			return errors.New("this meeting requires a signed-in Google account; TeleMeetBot joins as a guest only")
 		case "prejoin":
-			s.setState(StateJoining, "accepting the prejoin screen")
+			s.setState(StateJoining, "[4/6] Prejoin screen: muting camera/mic & entering")
 			s.fillGuestName()
+			s.mutePrejoinDevices()
 			if clicked, label := s.clickJoin(); clicked {
-				s.log.Infof("session %s: clicked %q", s.ID, label)
+				s.log.Infof("[PIPELINE:meet] session %s: clicked %q", s.ID, label)
 				time.Sleep(1500 * time.Millisecond)
 			}
 		default:
@@ -545,12 +595,19 @@ func (s *Session) startPresenting() error {
 		if s.meetTab() != nil {
 			opened, label := s.clickPresentButton()
 			if opened {
-				s.log.Infof("session %s: opened present menu (%s)", s.ID, label)
+				s.log.Infof("[PIPELINE:present] session %s: opened present menu (%s)", s.ID, label)
+				s.setState(StateSharing, "[5/6] Opened present menu: selecting tab")
 				time.Sleep(900 * time.Millisecond)
 				if clicked, item := s.clickPresentSource(); clicked {
-					s.log.Infof("session %s: clicked share source %q", s.ID, item)
-					time.Sleep(1500 * time.Millisecond)
+					s.log.Infof("[PIPELINE:present] session %s: clicked share source %q", s.ID, item)
+					s.setState(StateSharing, fmt.Sprintf("[5/6] Selected tab source %q", item))
+					time.Sleep(1200 * time.Millisecond)
+					if confirmed, clabel := s.clickShareConfirm(); confirmed {
+						s.log.Infof("[PIPELINE:present] session %s: confirmed share dialog %q", s.ID, clabel)
+						time.Sleep(1200 * time.Millisecond)
+					}
 					if ok, _ := s.presenting(); ok {
+						s.log.Infof("[PIPELINE:present] session %s: presenting confirmed active", s.ID)
 						return nil
 					}
 				}
@@ -561,27 +618,54 @@ func (s *Session) startPresenting() error {
 	return errors.New("could not start screen sharing in Google Meet (present flow timed out); the bot is in the meeting — retry from the dashboard")
 }
 
-// playMedia starts playback after the share is live.
+// playMedia starts playback after the share is live, retrying a few times
+// because YouTube's player sometimes swallows the first startPrompt while it
+// is still wiring up its own autoplay logic.
 func (s *Session) playMedia() error {
-	if _, err := s.mediaAction("unmute", 0); err != nil {
-		return err
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if _, err := s.mediaAction("unmute", 0); err != nil {
+			lastErr = err
+		}
+		st, err := s.mediaAction("play", 0)
+		if err != nil {
+			lastErr = err
+		} else {
+			s.mu.Lock()
+			s.paused = st.Paused
+			s.muted = st.Muted
+			s.volume = int(st.Volume*100 + 0.5)
+			s.rate = st.PlaybackRate
+			if st.Title != "" {
+				s.title = st.Title
+			}
+			s.cur = st.CurrentTime
+			s.dur = st.Duration
+			s.mu.Unlock()
+			if !st.Paused {
+				if attempt > 1 {
+					s.log.Infof("[PIPELINE:media] session %s: media playing on attempt %d", s.ID, attempt)
+				}
+				return nil
+			}
+			lastErr = fmt.Errorf("player still paused (pos=%.1fs)", st.CurrentTime)
+		}
+		s.log.Warnf("[PIPELINE:media] session %s: play attempt %d/3 failed: %v", s.ID, attempt, lastErr)
+		if err := s.ctxSleep(2 * time.Second); err != nil {
+			return err
+		}
 	}
-	st, err := s.mediaAction("play", 0)
-	if err != nil {
-		return err
+	return lastErr
+}
+
+// ctxSleep sleeps for d, aborting early if the session is cancelled.
+func (s *Session) ctxSleep(d time.Duration) error {
+	select {
+	case <-s.ctx.Done():
+		return s.ctx.Err()
+	case <-time.After(d):
+		return nil
 	}
-	s.mu.Lock()
-	s.paused = st.Paused
-	s.muted = st.Muted
-	s.volume = int(st.Volume*100 + 0.5)
-	s.rate = st.PlaybackRate
-	if st.Title != "" {
-		s.title = st.Title
-	}
-	s.cur = st.CurrentTime
-	s.dur = st.Duration
-	s.mu.Unlock()
-	return nil
 }
 
 // Pause pauses playback.
@@ -732,23 +816,47 @@ func (s *Session) queryMedia() (mediaStatus, error) {
 func (s *Session) waitMedia(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var last string
+	found := false
 	for time.Now().Before(deadline) {
 		if s.ctx.Err() != nil {
 			return s.ctx.Err()
 		}
 		st, err := s.queryMedia()
 		if err == nil && st.Count > 0 {
-			return nil
+			if !found {
+				found = true
+				s.log.Infof("[PIPELINE:media] session %s: media element found (dur=%.1fs paused=%t src=%s)",
+					s.ID, st.Duration, st.Paused, truncateStr(st.Src, 60))
+			}
+			// A <video> tag shows up before the stream is buffered. Waiting for a
+			// known duration (or an element already playing) means the first
+			// play() lands on real media instead of an empty frame — the
+			// difference between a green share and a real one.
+			if st.Duration > 0 || !st.Paused {
+				return nil
+			}
 		}
 		if err != nil {
 			last = err.Error()
 		}
 		time.Sleep(700 * time.Millisecond)
 	}
+	if found {
+		s.log.Warnf("[PIPELINE:media] session %s: media element present but never buffered (last=%q); continuing", s.ID, last)
+		return nil
+	}
 	if last == "" {
 		last = "timeout"
 	}
 	return errors.New(last)
+}
+
+// truncateStr shortens s for log lines.
+func truncateStr(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // mediaAction evaluates a media-control script and decodes its result.
@@ -783,16 +891,28 @@ func (s *Session) playerProblem() string {
 
 // clearMediaInterstitials dismisses consent dialogs for YouTube/Google.
 func (s *Session) clearMediaInterstitials(p *rod.Page) error {
-	if !strings.Contains(strings.ToLower(p.MustInfo().URL), "consent.") {
-		return nil
-	}
-	for i := 0; i < 3; i++ {
-		if clicked, _ := clickByText(p, []string{"accept all", "i agree", "agree to all"}, 2*time.Second); clicked {
-			time.Sleep(1500 * time.Millisecond)
+	url := strings.ToLower(p.MustInfo().URL)
+	if strings.Contains(url, "consent.") {
+		for i := 0; i < 3; i++ {
+			if clicked, _ := clickByText(p, []string{"accept all", "i agree", "agree to all"}, 2*time.Second); clicked {
+				time.Sleep(1500 * time.Millisecond)
+			}
+			if !strings.Contains(strings.ToLower(p.MustInfo().URL), "consent.") {
+				break
+			}
 		}
-		if !strings.Contains(strings.ToLower(p.MustInfo().URL), "consent.") {
-			return nil
-		}
 	}
+	// YouTube in-page consent / cookie buttons
+	_, _ = p.Timeout(3 * time.Second).Eval(`() => {
+		const norm = x => (x || "").toLowerCase().trim();
+		const btns = Array.from(document.querySelectorAll('button, [role=button]'));
+		for (const b of btns) {
+			const t = norm((b.getAttribute('aria-label') || "") + " " + (b.innerText || ""));
+			if (t === "accept all" || t === "reject all" || t === "i agree" || t === "agree to all" || t.includes("accept the use of cookies") || t === "reject") {
+				try { b.click(); return t; } catch (e) {}
+			}
+		}
+		return "";
+	}`)
 	return nil
 }
