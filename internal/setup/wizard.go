@@ -128,6 +128,8 @@ type WizardOptions struct {
 	TokenValidator func(string) (string, error)
 	// Exec runs commands; defaults to runCmd (tests can stub it).
 	Exec func(name string, args ...string) error
+	// FindBrowser overrides chromium detection (tests inject deterministic mocks).
+	FindBrowser func(bcfg engine.BrowserConfig) (string, error)
 }
 
 // Run executes the interactive setup and returns the saved config.
@@ -235,7 +237,13 @@ func Run(opts WizardOptions) (*config.Config, error) {
 	// ---- 3. Chromium -----------------------------------------------------
 	fmt.Fprintln(out, "\nBrowser check:")
 	bcfg, _, _ := engine.FromConfig(cfg)
-	bin, err := engine.ResolveBrowser(bcfg, opts.Log)
+	detect := opts.FindBrowser
+	if detect == nil {
+		detect = func(bcfg engine.BrowserConfig) (string, error) {
+			return engine.ResolveBrowser(bcfg, opts.Log)
+		}
+	}
+	bin, err := detect(bcfg)
 	if err != nil {
 		fmt.Fprintf(out, "  ⚠️  %v\n", err)
 		if !opts.SkipBrowserInstall {
@@ -252,7 +260,7 @@ func Run(opts WizardOptions) (*config.Config, error) {
 				if ierr := opts.Exec("apt-get", "install", "-y", "chromium"); ierr != nil {
 					fmt.Fprintf(out, "  ❌ install failed: %v\n", ierr)
 					fmt.Fprintln(out, "     Use the Docker image instead: docker compose up -d  (see README)")
-				} else if p2, err := engine.ResolveBrowser(bcfg, opts.Log); err == nil {
+				} else if p2, err := detect(bcfg); err == nil {
 					fmt.Fprintf(out, "  ✅ chromium installed at %s\n", p2)
 					cfg.Browser.Executable = p2
 				}

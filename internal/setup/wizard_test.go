@@ -2,12 +2,14 @@ package setup
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Opselon/TeleMeetBot/internal/config"
+	"github.com/Opselon/TeleMeetBot/internal/engine"
 )
 
 // fakeChrome writes a fake chrome executable for tests (never launched).
@@ -198,6 +200,7 @@ func TestWizardReportsInvalidToken(t *testing.T) {
 	var out bytes.Buffer
 	calls := 0
 	_, err := Run(WizardOptions{
+		FindBrowser: browserNotFound,
 		In: strings.NewReader(strings.Join([]string{
 			filepath.Join(dir, "c.yml"),
 			"1:bad",
@@ -240,3 +243,7 @@ var errTestRejected = errString("telegram rejected the token")
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+var browserNotFound = func(engine.BrowserConfig) (string, error) {
+	return "", errors.New("no chromium found on this system")
+}
