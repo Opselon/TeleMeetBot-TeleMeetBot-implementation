@@ -4,7 +4,9 @@ package setup
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -105,7 +107,13 @@ func Doctor(cfg *config.Config, cfgPath string, opts DoctorOptions) Report {
 
 	// 5. Health port
 	if err := portFree(cfg.Server.HealthAddr); err != nil {
-		r.Checks = append(r.Checks, Check{"health port", false, err.Error()})
+		if homeowner := healthServing(cfg.Server.HealthAddr); homeowner {
+			// A running TeleMeetBot instance (often the very container we
+			// are checking from) already owns the port — that is success.
+			r.Checks = append(r.Checks, Check{"health port", true, cfg.Server.HealthAddr + " is served by a running TeleMeetBot instance"})
+		} else {
+			r.Checks = append(r.Checks, Check{"health port", false, err.Error()})
+		}
 	} else {
 		r.Checks = append(r.Checks, Check{"health port", true, cfg.Server.HealthAddr + " is free"})
 	}
@@ -196,6 +204,25 @@ func portFree(addr string) error {
 		return fmt.Errorf("cannot bind %s: %v", addr, err)
 	}
 	return ln.Close()
+}
+
+// healthServing reports whether something already answers
+// http://addr/livez like a TeleMeetBot health endpoint ("ok\n").
+func healthServing(addr string) bool {
+	if addr == "" {
+		return false
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://" + addr + "/livez")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64))
+	return err == nil && strings.TrimSpace(string(body)) == "ok"
 }
 
 // checkNetwork verifies outbound TLS to Telegram and Meet.
