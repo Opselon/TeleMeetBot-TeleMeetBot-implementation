@@ -32,6 +32,12 @@ func main() {
 		checkFlag   = flag.Bool("check", false, "run doctor diagnostics and exit")
 		captureFlag = flag.Bool("capture-test", false, "with --check: run a real tab-capture probe (starts Chromium)")
 		versionFlag = flag.Bool("version", false, "print version and exit")
+
+		// Live diagnosis: join-and-report against a real meeting link using
+		// the engine the bot itself uses. Does not enter the dashboard.
+		probeFlag     = flag.String("probe", "", "run a live one-shot probe against this Meet link and exit")
+		probeMedia    = flag.String("probe-media", "https://www.youtube.com/watch?v=jNQXAC9IVRw", "media link for --probe")
+		probeWaitSecs = flag.Int("probe-seconds", 90, "admit wait for --probe")
 	)
 	flag.Parse()
 
@@ -76,6 +82,20 @@ func main() {
 	}
 
 	logger = newLogger(cfg.Logging.Level, cfg.Logging.File)
+
+	// Live diagnosis probe: join the meeting as a guest with the same
+	// engine config the bot uses, stream the stage sequence to the log,
+	// and exit. Diagnostics only — no dashboard, no Telegram traffic.
+	if *probeFlag != "" {
+		if *probeWaitSecs < 10 {
+			*probeWaitSecs = 10
+		}
+		if err := runProbe(*probeFlag, *probeMedia, *probeWaitSecs, cfg, logger); err != nil {
+			logger.Errorf("probe: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *checkFlag {
 		report := setup.Doctor(cfg, cfgPath, setup.DoctorOptions{CaptureTest: *captureFlag, Log: logger})

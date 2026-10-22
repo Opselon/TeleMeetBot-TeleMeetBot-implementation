@@ -6,6 +6,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"time"
 
@@ -67,6 +68,23 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 	s.log.Infof("health endpoint listening on http://%s/healthz", s.addr)
 	if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
+}
+
+// ServeOn serves on an already-bound listener until ctx is cancelled. Used by
+// the --probe diagnosis mode, which owns its binding.
+func (s *Server) ServeOn(l net.Listener, ctx context.Context) error {
+	s.server = &http.Server{Handler: s.handler(), ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		<-ctx.Done()
+		sh, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = s.server.Shutdown(sh)
+	}()
+	s.log.Infof("health endpoint listening on http://%s/healthz", l.Addr())
+	if err := s.server.Serve(l); err != nil && err != http.ErrServerClosed {
 		return err
 	}
 	return nil
