@@ -45,18 +45,28 @@ func runProbe(meetLink, mediaLink string, probeSeconds int, cfg *config.Config, 
 	}
 	log.Infof("probe: meet=%s media=%s admit_wait=%ds", meetLink, mediaLink, probeSeconds)
 
+	cancelCtx, stopProbe := context.WithCancel(context.Background())
+	defer stopProbe()
+
 	eng := engine.NewManager(bCfg, mCfg, meetCfg, log)
-	defer eng.StopAll()
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for ev := range eng.Events() {
-			switch ev.Kind {
-			case engine.EventError:
-				log.Errorf("probe event: session=%s kind=%s text=%s", ev.Session, ev.Kind, ev.Text)
-			default:
-				log.Infof("probe event: session=%s kind=%s text=%s", ev.Session, ev.Kind, ev.Text)
+		for {
+			select {
+			case ev, ok := <-eng.Events():
+				if !ok {
+					return
+				}
+				switch ev.Kind {
+				case engine.EventError:
+					log.Errorf("probe event: session=%s kind=%s text=%s", ev.Session, ev.Kind, ev.Text)
+				default:
+					log.Infof("probe event: session=%s kind=%s text=%s", ev.Session, ev.Kind, ev.Text)
+				}
+			case <-cancelCtx.Done():
+				return
 			}
 		}
 	}()
@@ -67,7 +77,8 @@ func runProbe(meetLink, mediaLink string, probeSeconds int, cfg *config.Config, 
 		TabTitle:  meetCfg.CaptureSource,
 	})
 	if err != nil {
-		cancel()
+		stopProbe()
+		eng.StopAll()
 		<-done
 		log.Errorf("probe start failed: %v", err)
 		return err
@@ -75,7 +86,9 @@ func runProbe(meetLink, mediaLink string, probeSeconds int, cfg *config.Config, 
 
 	select {
 	case <-s.Done():
-		<-time.After(500 * time.Millisecond) // let the final events drain
+		stopProbe()
+		eng.StopAll()
+		<-done
 		st := s.Snapshot()
 		log.Infof("probe finished: state=%s detail=%q error=%q", st.State, st.Detail, st.Error)
 		if st.State == engine.StateError {
@@ -83,7 +96,8 @@ func runProbe(meetLink, mediaLink string, probeSeconds int, cfg *config.Config, 
 		}
 		return nil
 	case <-time.After(time.Duration(probeSeconds+45) * time.Second):
-		cancel()
+		stopProbe()
+		eng.StopAll()
 		<-done
 		return fmt.Errorf("probe did not finish within %ds — killing it", probeSeconds+45)
 	}
