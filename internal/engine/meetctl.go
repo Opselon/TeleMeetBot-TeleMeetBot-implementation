@@ -238,22 +238,51 @@ func (s *Session) clickPresentButton() (bool, string) {
 	}
 	res, err := meet.Timeout(4 * time.Second).Eval(`() => {
   const norm = x => (x || "").replace(/\s+/g, " ").trim().toLowerCase();
-  const els = Array.from(document.querySelectorAll('[role=button], button, [aria-label]'));
+  // Target leaf button elements only; never match large toolbar containers.
+  const els = Array.from(document.querySelectorAll('button, [role=button]'));
   let best = null;
+  let bestScore = 0;
   for (const el of els) {
-    const t = norm((el.getAttribute('aria-label') || "") + " " + (el.innerText || el.textContent || ""));
-    if (!t.includes("present") && !t.includes("share screen") && !t.includes("share your screen") && !t.includes("share now")) continue;
-    if (t.includes("stop presenting") || t.includes("stop sharing")) continue;
+    if (el.querySelector('button, [role=button]')) continue;
+
+    const aria = norm(el.getAttribute('aria-label') || "");
+    const tooltip = norm(el.getAttribute('data-tooltip') || "");
+    const text = norm(el.innerText || el.textContent || "");
+
+    // Exclude unrelated controls (audio settings arrow, mic, camera, leave call)
+    if (aria.includes("audio") || aria.includes("microphone") || aria.includes("video") ||
+        aria.includes("camera") || aria.includes("leave") || aria.includes("settings") ||
+        tooltip.includes("audio") || tooltip.includes("microphone") || tooltip.includes("camera")) {
+      continue;
+    }
+    if (aria.includes("stop presenting") || aria.includes("stop sharing") || tooltip.includes("stop")) {
+      continue;
+    }
+
+    let score = 0;
+    if (aria.includes("present now") || tooltip.includes("present now")) score = 100;
+    else if (aria.includes("share screen") || tooltip.includes("share screen")) score = 90;
+    else if (aria.includes("share your screen") || tooltip.includes("share your screen")) score = 90;
+    else if (aria.includes("present") || tooltip.includes("present")) score = 80;
+    else if (text === "present now" || text === "share screen") score = 75;
+    else if (text.includes("present now") || text.includes("share screen")) score = 70;
+    else if (text.includes("present") && text.length < 30) score = 60;
+
+    if (score <= 0) continue;
+
     const r = el.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) continue;
-    best = el;
-    break;
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = el;
+    }
   }
   if (!best) return "";
   const label = norm((best.getAttribute('aria-label') || "") + " " + (best.innerText || ""));
   try { best.scrollIntoView({block: 'center'}); } catch (e) {}
   best.click();
-  return label.slice(0, 40);
+  return (label || "present").slice(0, 40);
 }`)
 	if err != nil {
 		return false, ""
@@ -278,8 +307,9 @@ func (s *Session) clickPresentSource() (bool, string) {
   const norm = x => (x || "").replace(/\s+/g, " ").trim().toLowerCase();
   const els = Array.from(document.querySelectorAll('[role=menuitem], [role=button], button, li, div[aria-label]'));
   for (const el of els) {
+    if (el.querySelector('[role=menuitem]')) continue;
     const t = norm((el.getAttribute('aria-label') || "") + " " + (el.innerText || el.textContent || ""));
-    if (!pats.some(p => t === p || t.startsWith(p))) continue;
+    if (!pats.some(p => t === p || t.startsWith(p) || t.includes(p))) continue;
     const r = el.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) continue;
     try { el.scrollIntoView({block: 'center'}); } catch (e) {}
