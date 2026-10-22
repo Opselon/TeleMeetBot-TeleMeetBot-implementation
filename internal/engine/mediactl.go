@@ -154,14 +154,33 @@ func titleLockJS(title string) string {
   try {
     if (!window.__tmOrigTitle) window.__tmOrigTitle = document.title;
   } catch (e) {}
+
+  // Override document.title setter/getter so single-page apps like YouTube
+  // cannot mutate the tab title away from T.
+  try {
+    Object.defineProperty(document, 'title', {
+      configurable: true,
+      enumerable: true,
+      get: () => T,
+      set: () => {}
+    });
+  } catch (e) {}
+
   const lock = () => {
     try {
-      if (document.title !== T) document.title = T;
+      if (document.title !== T) {
+        Object.defineProperty(document, 'title', {
+          configurable: true,
+          enumerable: true,
+          get: () => T,
+          set: () => {}
+        });
+      }
     } catch (e) {}
   };
   lock();
   try { if (window.__tmTitleLock) clearInterval(window.__tmTitleLock); } catch (e) {}
-  window.__tmTitleLock = setInterval(lock, 800);
+  window.__tmTitleLock = setInterval(lock, 250);
   return document.title;
 }`, t)
 }

@@ -431,6 +431,11 @@ func (s *Session) openMedia() error {
 		s.log.Debugf("session %s: title lock failed: %v", s.ID, err)
 	}
 
+	// Double-check tab title after lock.
+	if curTitle, err := p.Eval(`() => document.title`); err == nil {
+		s.log.Infof("[PIPELINE:media] session %s: media tab title locked to %q (current=%v)", s.ID, s.TabTitle, curTitle.Value)
+	}
+
 	s.setState(StateJoining, "[2/6] Waiting for playable video")
 	s.log.Infof("[PIPELINE:media] session %s: waiting for playable media element...", s.ID)
 	if err := s.waitMedia(35 * time.Second); err != nil {
