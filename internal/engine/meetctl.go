@@ -7,16 +7,16 @@ import (
 	"time"
 )
 
-// meetStage inspects the Meet page and classifies where the bot is.
-// Stages: meeting, lobby, prejoin, blocked, login, unknown.
-func (s *Session) meetStage() (string, string) {
-	_, meet := s.pages()
-	if meet == nil {
-		return "unknown", "no page"
-	}
-	res, err := meet.Timeout(5 * time.Second).Eval(`() => {
+// meetStageJS is the page script classifying where the bot is. It must stay in
+// function form (no IIFE wrap) for rod's Eval, and it returns [stage, detail] —
+// stages: meeting, lobby, blocked, prejoin, login, unknown. For "blocked" the
+// detail is the page's own (lowercased) excerpt so the Go side can tell
+// terminal blocks from host-gated waits.
+//
+// Stage classification is body-text based (see references/meet-guest-flow.md).
+func meetStageJS() string {
+	return `() => {
   const body = (((document.body || {}).innerText) || "").toLowerCase();
-  const has = sel => { try { return !!document.querySelector(sel); } catch (e) { return false; } };
   const vis = sel => {
     try {
       const el = document.querySelector(sel);
@@ -31,6 +31,7 @@ func (s *Session) meetStage() (string, string) {
     const m = body.match(re);
     return m ? String(m[0]).slice(0, 120) : "";
   };
+  const excerpt = body.replace(/\s+/g, " ").trim().slice(0, 240);
   if (vis('[aria-label="Present now"]') || vis('[data-tooltip="Present now"]') ||
       vis('[aria-label="Stop presenting"]') || vis('[data-tooltip="Stop presenting"]') ||
       /you are presenting|you're presenting|stop presenting/.test(body)) {
@@ -39,8 +40,8 @@ func (s *Session) meetStage() (string, string) {
   if (/waiting for (the )?host|you.ll be able to join|someone will let you in|waiting to be admitted|you.ll join when someone lets you in/.test(body)) {
     return ["lobby", "in the lobby, host must admit"];
   }
-  if (/meeting is full|you can.t join this call|this meeting has ended|invalid meeting|check your meeting code|no one can join/.test(body)) {
-    return ["blocked", snippet(/meeting is full|you can.t join this call|this meeting has ended|invalid meeting|check your meeting code|no one can join/)];
+  if (/meeting is full|you can.t join this (video )?call|this meeting has ended|the call has ended|invalid meeting|check your meeting code|no one can join|ask the host|needs permission/.test(body)) {
+    return ["blocked", excerpt];
   }
   if (/join now|ask to join|ready to join/.test(body)) {
     return ["prejoin", "prejoin screen"];
@@ -49,7 +50,38 @@ func (s *Session) meetStage() (string, string) {
     return ["login", snippet(/sign in|use a personal account|join with a google account/)];
   }
   return ["unknown", ""];
-}`)
+}`
+}
+
+// blockedFatalPhrase reports the terminal-rejection phrase hidden in a
+// "blocked" stage detail, or "" when the block is host-gated and worth waiting
+// out: Google withholds host-restricted meetings ("no one can join a meeting
+// unless invited or admitted by the host") until the first host joins — after
+// that the same link goes to the normal prejoin/lobby flow.
+func blockedFatalPhrase(detail string) string {
+	d := strings.ToLower(detail)
+	for _, phrase := range []string{
+		"meeting is full",
+		"this meeting has ended",
+		"the call has ended",
+		"invalid meeting",
+		"check your meeting code",
+	} {
+		if strings.Contains(d, phrase) {
+			return phrase
+		}
+	}
+	return ""
+}
+
+// meetStage inspects the Meet page and classifies where the bot is.
+// Stages: meeting, lobby, prejoin, blocked, login, unknown.
+func (s *Session) meetStage() (string, string) {
+	meet := s.meetTab()
+	if meet == nil {
+		return "unknown", "no page"
+	}
+	res, err := meet.Timeout(5 * time.Second).Eval(meetStageJS())
 	if err != nil {
 		return "unknown", err.Error()
 	}
@@ -62,7 +94,7 @@ func (s *Session) meetStage() (string, string) {
 
 // fillGuestName types the configured guest name into the prejoin name field.
 func (s *Session) fillGuestName() bool {
-	_, meet := s.pages()
+	meet := s.meetTab()
 	if meet == nil {
 		return false
 	}
@@ -95,7 +127,7 @@ func (s *Session) fillGuestName() bool {
 
 // clickJoin clicks "Join now" / "Ask to join" on the prejoin screen.
 func (s *Session) clickJoin() (bool, string) {
-	_, meet := s.pages()
+	meet := s.meetTab()
 	if meet == nil {
 		return false, ""
 	}
@@ -127,7 +159,7 @@ func (s *Session) clickJoin() (bool, string) {
 
 // clickPresentButton opens Meet's "Present now" menu.
 func (s *Session) clickPresentButton() (bool, string) {
-	_, meet := s.pages()
+	meet := s.meetTab()
 	if meet == nil {
 		return false, ""
 	}
@@ -159,7 +191,7 @@ func (s *Session) clickPresentButton() (bool, string) {
 
 // clickPresentSource picks "A tab" (default) or "Entire screen" in the menu.
 func (s *Session) clickPresentSource() (bool, string) {
-	_, meet := s.pages()
+	meet := s.meetTab()
 	if meet == nil {
 		return false, ""
 	}
@@ -193,7 +225,7 @@ func (s *Session) clickPresentSource() (bool, string) {
 
 // presenting reports whether Meet shows an active presentation.
 func (s *Session) presenting() (bool, error) {
-	_, meet := s.pages()
+	meet := s.meetTab()
 	if meet == nil {
 		return false, nil
 	}
@@ -213,7 +245,7 @@ func (s *Session) presenting() (bool, error) {
 // clickShareConfirm confirms the "Share" button some Meet versions show after a
 // capture source has been picked. It is a no-op when the share starts directly.
 func (s *Session) clickShareConfirm() (bool, string) {
-	_, meet := s.pages()
+	meet := s.meetTab()
 	if meet == nil {
 		return false, ""
 	}

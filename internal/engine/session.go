@@ -48,6 +48,8 @@ type Session struct {
 	ended    time.Time
 	mediaErr string
 
+	lastMeetLoad time.Time
+
 	browser   *rod.Browser
 	mediaPage *rod.Page
 	meetPage  *rod.Page
@@ -157,10 +159,18 @@ func (s *Session) emit(kind EventKind, text string) {
 	s.mgr.emit(Event{Session: s.ID, Kind: kind, Text: text})
 }
 
-func (s *Session) pages() (media, meet *rod.Page) {
+// mediaTab returns the media page (nil until the tab exists).
+func (s *Session) mediaTab() *rod.Page {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.mediaPage, s.meetPage
+	return s.mediaPage
+}
+
+// meetTab returns the meet page (nil until the tab exists).
+func (s *Session) meetTab() *rod.Page {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.meetPage
 }
 
 // run is the session state machine.
@@ -209,6 +219,7 @@ func (s *Session) run() {
 	s.mu.Lock()
 	s.joined = time.Now()
 	s.mu.Unlock()
+	s.log.Infof("session %s: joined the meeting after %s", s.ID, s.joined.Sub(s.created).Round(time.Second))
 	s.emit(EventJoined, "joined the meeting")
 
 	s.setState(StateSharing, "starting screen share")
@@ -225,6 +236,7 @@ func (s *Session) run() {
 		s.setDetail("sharing, media did not start: " + err.Error())
 	}
 	s.setState(StateStreaming, "streaming")
+	s.log.Infof("session %s: stream is live (share up, media playing)", s.ID)
 	s.emit(EventStreaming, "stream is live")
 
 	s.watch()
@@ -232,7 +244,7 @@ func (s *Session) run() {
 
 // cleanup releases pages and finalises the state.
 func (s *Session) cleanup() {
-	media, meet := s.pages()
+	media, meet := s.mediaTab(), s.meetTab()
 	if media != nil {
 		_ = media.Close()
 	}
@@ -307,7 +319,7 @@ func (s *Session) watch() {
 		}
 
 		// A closed browser means there is nothing left to monitor.
-		if _, meet := s.pages(); meet != nil {
+		if meet := s.meetTab(); meet != nil {
 			if _, err := meet.Eval("1"); err != nil {
 				s.setDetail("browser disconnected")
 				s.setError(fmt.Errorf("browser disconnected: %w", err))
@@ -390,19 +402,44 @@ func (s *Session) openMeet() error {
 		return fmt.Errorf("load meet link: %w", err)
 	}
 	_ = p.WaitLoad()
+	s.setLastMeetLoad()
 	// Meet is a SPA: give it a beat to render the prejoin screen.
 	time.Sleep(1200 * time.Millisecond)
 	return nil
 }
 
-// joinMeeting drives the prejoin screen and lobby.
+// joinMeeting drives the prejoin screen and lobby, and waits out Google Meet's
+// host-restricted access: when the host has not joined yet, Meet refuses
+// everyone ("no one can join a meeting unless invited or admitted by the
+// host") — that block clears once the host starts the meeting, so it is
+// handled as a waitable state rather than a terminal error.
 func (s *Session) joinMeeting() error {
 	timeout := time.Duration(s.mgr.meetCfg.JoinTimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = 2 * time.Minute
 	}
 	deadline := time.Now().Add(timeout)
+
+	// Lobby and host-gate both clear only when a host is in the meeting; the
+	// configured admit wait (default 5 min) bounds that patience instead of
+	// the plain join timeout.
+	admitWait := time.Duration(s.mgr.meetCfg.AdmitWaitSeconds) * time.Second
+	if admitWait <= 0 {
+		admitWait = 5 * time.Minute
+	}
+	var hostWaitStarted time.Time
+	extendWaitForHost := func() {
+		if hostWaitStarted.IsZero() {
+			hostWaitStarted = time.Now()
+		}
+		if d := hostWaitStarted.Add(admitWait); d.After(deadline) {
+			deadline = d
+		}
+	}
+
 	var lastStage string
+	hostWaitLogged := false
+	reloadCount := 0
 	for time.Now().Before(deadline) {
 		if s.ctx.Err() != nil {
 			return s.ctx.Err()
@@ -410,15 +447,39 @@ func (s *Session) joinMeeting() error {
 		stage, info := s.meetStage()
 		if stage != lastStage {
 			lastStage = stage
-			s.log.Infof("session %s: meet stage=%s %s", s.ID, stage, info)
+			s.log.Infof("session %s: meet stage=%s %q", s.ID, stage, info)
+		} else if stage == "blocked" || stage == "lobby" {
+			// Diagnostics: the gate can only be debugged from the log, so
+			// keep a bounded heartbeat while waiting on a host.
+			if !hostWaitLogged {
+				hostWaitLogged = true
+				s.log.Debugf("session %s: still %s after %s (detail=%q)", s.ID, stage,
+					time.Since(hostWaitStarted).Round(time.Second), info)
+			}
 		}
 		switch stage {
 		case "meeting":
 			return nil
 		case "lobby":
+			extendWaitForHost()
 			s.setState(StateAdmitting, "waiting for the host to admit the bot")
 		case "blocked":
-			return fmt.Errorf("cannot join this meeting: %s", info)
+			if phrase := blockedFatalPhrase(info); phrase != "" {
+				return fmt.Errorf("cannot join this meeting: %s", phrase)
+			}
+			// Host-gated: Meet only lets people in after the first host has
+			// joined. The blocked page also bounces back to Meet's home screen
+			// after ~60 s, so re-request entry on a bounded cadence until the
+			// gate lifts.
+			extendWaitForHost()
+			s.setState(StateAdmitting, "host-restricted meeting: no one can join until the host starts it; retrying")
+			if time.Since(s.lastMeetLoad) > 30*time.Second {
+				reloadCount++
+				s.log.Infof("session %s: host-restricted meeting, re-requesting entry (attempt %d)", s.ID, reloadCount)
+				if err := s.reopenMeet(); err != nil {
+					return fmt.Errorf("reload the meeting page: %w", err)
+				}
+			}
 		case "login":
 			return errors.New("this meeting requires a signed-in Google account; TeleMeetBot joins as a guest only")
 		case "prejoin":
@@ -433,7 +494,36 @@ func (s *Session) joinMeeting() error {
 		}
 		time.Sleep(800 * time.Millisecond)
 	}
+	if !hostWaitStarted.IsZero() {
+		return fmt.Errorf("waited %s for a host-restricted meeting: no host ever started it (google: no one can join unless invited or admitted by the host). if the link is wrong or expired, Meet shows this same page — verify the meeting code with the host", deadline.Sub(hostWaitStarted).Round(time.Second))
+	}
 	return fmt.Errorf("meet join timed out after %s (stage=%s)", timeout, lastStage)
+}
+
+// reopenMeet reloads the meeting link on the existing tab (never a new one), so
+// Chromium keeps the same tab identity Meet shares from.
+func (s *Session) reopenMeet() error {
+	meet := s.meetTab()
+	if meet == nil {
+		return errors.New("meet page is not available")
+	}
+	if err := meet.Timeout(60 * time.Second).Navigate(s.MeetURL); err != nil {
+		return err
+	}
+	_ = meet.WaitLoad()
+	s.setState(StateJoining, "re-requesting entry to the meeting")
+	s.setLastMeetLoad()
+	// Meet is a SPA: give it a beat to render the prejoin or gate screen.
+	time.Sleep(1200 * time.Millisecond)
+	return nil
+}
+
+// setLastMeetLoad records when the meet tab was (re)loaded, used to pace the
+// re-entry attempts against a host-restricted meeting.
+func (s *Session) setLastMeetLoad() {
+	s.mu.Lock()
+	s.lastMeetLoad = time.Now()
+	s.mu.Unlock()
 }
 
 // startPresenting clicks through Meet's "Present now" flow. Chromium's
@@ -452,7 +542,7 @@ func (s *Session) startPresenting() error {
 		if ok, _ := s.presenting(); ok {
 			return nil
 		}
-		if _, p := s.pages(); p != nil { // meet tab
+		if s.meetTab() != nil {
 			opened, label := s.clickPresentButton()
 			if opened {
 				s.log.Infof("session %s: opened present menu (%s)", s.ID, label)
@@ -592,7 +682,7 @@ func (s *Session) Seek(delta int) error {
 // RestartMedia reloads the media tab from the beginning (keeps the share up,
 // Chromium's tab capture follows the same tab).
 func (s *Session) RestartMedia() error {
-	media, _ := s.pages()
+	media := s.mediaTab()
 	if media == nil {
 		return errors.New("media page is not available")
 	}
@@ -609,17 +699,21 @@ func (s *Session) RestartMedia() error {
 
 // reopenMedia navigates the media tab again.
 func (s *Session) reopenMedia() error {
-	media, _ := s.pages()
+	media := s.mediaTab()
 	if media == nil {
 		return errors.New("media page is not available")
 	}
 	target := s.MediaURL
 	if s.MediaKind == MediaDirect {
-		doc, err := PlayerDataURL(MediaTarget{URL: s.MediaURL, Kind: s.MediaKind}, s.playerOpts)
+		// Loopback HTTP (not data:) so Chrome always allows the media fetch.
+		doc, err := PlayerHTML(MediaTarget{URL: s.MediaURL, Kind: s.MediaKind}, s.playerOpts)
 		if err != nil {
 			return err
 		}
-		target = doc
+		target, err = players.playerURL(doc)
+		if err != nil {
+			return fmt.Errorf("serve player: %w", err)
+		}
 	}
 	if err := media.Timeout(45 * time.Second).Navigate(target); err != nil {
 		return err
@@ -659,7 +753,7 @@ func (s *Session) waitMedia(timeout time.Duration) error {
 
 // mediaAction evaluates a media-control script and decodes its result.
 func (s *Session) mediaAction(action string, arg float64) (mediaStatus, error) {
-	media, _ := s.pages()
+	media := s.mediaTab()
 	if media == nil {
 		return mediaStatus{}, errors.New("media page is not available")
 	}
@@ -676,7 +770,7 @@ func (s *Session) mediaAction(action string, arg float64) (mediaStatus, error) {
 
 // playerProblem reports a visible playback blocker, if any.
 func (s *Session) playerProblem() string {
-	media, _ := s.pages()
+	media := s.mediaTab()
 	if media == nil {
 		return ""
 	}
