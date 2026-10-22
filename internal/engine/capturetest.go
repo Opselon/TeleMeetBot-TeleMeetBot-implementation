@@ -20,6 +20,7 @@ type CaptureReport struct {
 	Frames   int     `json:"frames"`
 	Variance float64 `json:"variance"`
 	Label    string  `json:"label"`
+	Px       string  `json:"px"`
 	Error    string  `json:"error"`
 }
 
@@ -95,6 +96,19 @@ func TestTabCapture(ctx context.Context, browserCfg BrowserConfig, meet MeetOpti
   const v = stream.getVideoTracks()[0];
   out.video = !!v && v.readyState === "live";
   out.label = v ? (v.label || "") : "";
+  try {
+    const e0 = document.createElement("video");
+    e0.srcObject = new MediaStream([v]);
+    e0.muted = true;
+    await e0.play();
+    await new Promise(r => setTimeout(r, 700));
+    const c0 = document.createElement("canvas");
+    c0.width = 32; c0.height = 18;
+    const x0 = c0.getContext("2d");
+    x0.drawImage(e0, 0, 0, 32, 18);
+    const d0 = x0.getImageData(16, 9, 1, 1).data;
+    out.px = d0[0] + "," + d0[1] + "," + d0[2];
+  } catch (e) { out.px = "err"; }
   out.audio = stream.getAudioTracks().length > 0;
   if (!v) { resolve(JSON.stringify(out)); return; }
 

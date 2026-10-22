@@ -79,7 +79,12 @@ func launchBrowser(opts launchOptions, log Logger) (*rod.Browser, func(), error)
 	l.Set("disable-crash-reporter")
 	l.Set("disable-blink-features", "AutomationControlled")
 	l.Set("autoplay-policy", "no-user-gesture-required")
-	l.Set("use-fake-ui-for-media-stream")
+	// Do NOT set use-fake-device-for-media-stream or use-fake-ui-for-media-stream.
+	// fake-device replaces every capture with Chromium's green test pattern, and
+	// fake-ui makes getDisplayMedia auto-pick a *screen* source that either fails
+	// to start (NotReadableError) or falls back to that same green pattern —
+	// both end up presenting a green rectangle instead of the media tab.
+	// Camera/mic permissions are granted through CDP instead (see grantMedia).
 	l.Set("enable-usermedia-screen-capturing")
 	l.Set("enable-unsafe-swiftshader")
 	l.Set("use-gl", "angle")
@@ -132,6 +137,7 @@ func launchBrowser(opts launchOptions, log Logger) (*rod.Browser, func(), error)
 		l.Kill()
 		return nil, nil, fmt.Errorf("connect to chromium: %w", err)
 	}
+	grantMedia(b, log)
 
 	var closeOnce sync.Once
 	closeFn := func() {
@@ -154,6 +160,24 @@ func launchBrowser(opts launchOptions, log Logger) (*rod.Browser, func(), error)
 		})
 	}
 	return b, closeFn, nil
+}
+
+// grantMedia pre-authorizes camera/microphone for Meet via CDP. The old
+// --use-fake-ui-for-media-stream switch did this too, but it also hijacked
+// getDisplayMedia into choosing a screen source, which broke tab sharing.
+func grantMedia(b *rod.Browser, log Logger) {
+	err := proto.BrowserGrantPermissions{
+		Origin: "https://meet.google.com",
+		Permissions: []proto.BrowserPermissionType{
+			proto.BrowserPermissionTypeAudioCapture,
+			proto.BrowserPermissionTypeVideoCapture,
+		},
+	}.Call(b)
+	if err != nil {
+		log.Warnf("[PIPELINE:browser] grant camera/mic permission: %v", err)
+		return
+	}
+	log.Infof("[PIPELINE:browser] camera/mic permission granted for meet.google.com")
 }
 
 // captureSource picks the auto-select value Chromium uses to answer
