@@ -152,6 +152,31 @@ The card header includes state emoji: 🟦 Guest · 🟪 Harness · 🟫 Streami
 
 ---
 
+## Sizing & resource use
+
+One session is one Chromium (media tab + Meet tab) decoding the media and
+re-encoding the shared tab for the call. Measured on a 2 vCPU / 3.8 GB VPS
+(Debian bookworm Chromium 155, 1280x800 tab, 720p30 H.264 source):
+
+| What | CPU (of one core) | Private RAM |
+|---|---|---|
+| idle bot, no session | ~0.1 % | ~10 MB |
+| one session, tab share (current defaults) | ~14 % | ~230 MB |
+| one session, tab share with `gpu: swiftshader` (pre-1.2 default) | ~84 % | ~300 MB |
+| host-gated join wait, before pacing fix | ~1.2 DOM polls/s → card edit per poll | — |
+| host-gated join wait, after pacing fix | 0.2 polls/s, stable card, 1 reload/30 s | — |
+
+Practical guidance:
+
+- **`limits.max_sessions: 1` on a 2-core VPS.** Two concurrent sessions need
+  two browsers plus two Meet encodes and will saturate both cores.
+- Keep **`browser.gpu: "off"`** (the default) unless the host has a real GPU;
+  SwiftShader software GL costs ~6x the CPU for the same frames.
+- `GOMEMLIMIT` (256 MiB in the image) bounds the Go heap; the browser, not the
+  bot, is the memory consumer. Give the container a generous `/dev/shm`
+  (`shm_size: "1gb"`).
+- `logging.level: debug` writes a line per pipeline step; use `info` in production.
+
 ## Configuration reference
 
 `telemeetbot.yml` (created by the wizard; omitted keys keep defaults):
@@ -175,6 +200,8 @@ browser:
   window_width: 1280
   window_height: 800
   lang: "en-US"                       # Meet UI language must be English
+  gpu: "off"                          # off (software compositing, default in headless)
+                                      # | swiftshader | auto (real GPU host)
   extra_args: []                      # raw chromium flags appended
   user_agent: ""                      # empty = stock Chrome UA override
   proxy: ""                           # e.g. socks5://127.0.0.1:9050

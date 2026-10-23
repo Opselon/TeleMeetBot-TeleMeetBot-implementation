@@ -15,6 +15,7 @@ func FromConfig(c *config.Config) (BrowserConfig, MediaOptions, MeetOptions) {
 		ExtraArgs:    c.Browser.ExtraArgs,
 		UserAgent:    c.Browser.UserAgent,
 		Proxy:        c.Browser.Proxy,
+		GPU:          c.Browser.GPU,
 	}
 	m := MediaOptions{
 		DefaultVolume:      c.Media.DefaultVolume,

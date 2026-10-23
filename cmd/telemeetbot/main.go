@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"syscall"
 	"time"
@@ -151,6 +152,15 @@ func run(cfg *config.Config, cfgPath string, log *slogLogger) error {
 	}
 
 	eng := engine.NewManager(bCfg, mCfg, meetCfg, log)
+	// Hard fence at the engine level: the dashboard also checks, but a session
+	// must never be able to start past limits.max_sessions.
+	eng.SetMaxSessions(cfg.Limits.MaxSessions)
+	// Keep the Go heap bounded on a small VPS: GOMEMLIMIT makes the GC work
+	// harder instead of letting the heap grow with browser JSON payloads.
+	// An explicit operator setting always wins.
+	if os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(256 << 20)
+	}
 
 	api, err := bot.NewTelegramAPI(cfg.Telegram.Token)
 	if err != nil {

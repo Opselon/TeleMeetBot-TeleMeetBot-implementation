@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -32,6 +33,11 @@ type BrowserConfig struct {
 	ExtraArgs    []string
 	UserAgent    string
 	Proxy        string
+	// GPU selects the compositing backend: "off" (software compositing,
+	// default in headless — 6x less host CPU than SwiftShader for the same
+	// frames), "swiftshader" (ANGLE/SwiftShader software GL) or "auto" (leave
+	// the choice to Chromium, for real-GPU hosts).
+	GPU string
 }
 
 // MediaOptions is the media-side configuration.
@@ -124,12 +130,19 @@ type Manager struct {
 	log        Logger
 	events     chan Event
 
+	maxSessions int
+
 	mu       sync.RWMutex
 	sessions map[SessionID]*Session
 
 	sharedMu sync.Mutex
 	shared   *sharedBrowser
 }
+
+// maxFinishedSessions bounds how many ended sessions stay in the map. They are
+// kept so the dashboard/history can still render them, but the map must not
+// grow for the lifetime of the process.
+const maxFinishedSessions = 10
 
 type sharedBrowser struct {
 	browser *rod.Browser
@@ -144,13 +157,31 @@ func NewManager(browser BrowserConfig, media MediaOptions, meet MeetOptions, log
 		log = noopLogger{}
 	}
 	return &Manager{
-		browserCfg: browser,
-		mediaCfg:   media,
-		meetCfg:    meet,
-		log:        log,
-		events:     make(chan Event, 128),
-		sessions:   map[SessionID]*Session{},
+		browserCfg:  browser,
+		mediaCfg:    media,
+		meetCfg:     meet,
+		log:         log,
+		events:      make(chan Event, 128),
+		sessions:    map[SessionID]*Session{},
+		maxSessions: 1,
 	}
+}
+
+// SetMaxSessions caps concurrent sessions. The engine enforces the limit as a
+// hard fence so a session cannot be started past it even if a caller forgets to
+// check (the dashboard also checks; this is the backstop). A value <= 0 means
+// "no engine-side cap" (the config validator forbids that in practice).
+func (m *Manager) SetMaxSessions(n int) {
+	m.mu.Lock()
+	m.maxSessions = n
+	m.mu.Unlock()
+}
+
+// MaxSessions reports the configured cap.
+func (m *Manager) MaxSessions() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.maxSessions
 }
 
 // Events exposes lifecycle events (single consumer: the bot).
@@ -271,11 +302,51 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (*Session, error)
 	s.done = make(chan struct{})
 
 	m.mu.Lock()
+	// Enforce the concurrent-session cap and keep the finished-session map
+	// bounded, atomically with the insert: two simultaneous Start calls must
+	// not both pass a "check then insert" fence.
+	active := 0
+	for _, other := range m.sessions {
+		if st := other.snapshotState(); st != StateEnded && st != StateError {
+			active++
+		}
+	}
+	if m.maxSessions > 0 && active >= m.maxSessions {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("session limit reached: %d of %d already running (limits.max_sessions)", active, m.maxSessions)
+	}
+	m.pruneFinishedLocked()
 	m.sessions[id] = s
 	m.mu.Unlock()
 
 	go s.run()
 	return s, nil
+}
+
+// pruneFinishedLocked drops the oldest finished sessions once more than
+// maxFinishedSessions are retained. Caller holds m.mu.
+func (m *Manager) pruneFinishedLocked() {
+	if len(m.sessions) <= maxFinishedSessions {
+		return
+	}
+	type finished struct {
+		id      SessionID
+		created time.Time
+	}
+	var done []finished
+	for id, s := range m.sessions {
+		st := s.snapshotState()
+		if st == StateEnded || st == StateError {
+			done = append(done, finished{id: id, created: s.created})
+		}
+	}
+	if len(done) <= maxFinishedSessions {
+		return
+	}
+	sort.Slice(done, func(i, j int) bool { return done[i].created.Before(done[j].created) })
+	for _, f := range done[:len(done)-maxFinishedSessions] {
+		delete(m.sessions, f.id)
+	}
 }
 
 // acquireBrowser returns a browser for a session plus a release function.
