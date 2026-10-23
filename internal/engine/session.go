@@ -592,15 +592,29 @@ func (s *Session) setLastMeetLoad() {
 	s.mu.Unlock()
 }
 
-// startPresenting clicks through Meet's "Present now" flow. Chromium's
-// auto-select-desktop-capture-source answers the picker synchronously, so a
-// successful click ends with an active share.
+// startPresenting drives Meet's share flow. Two shapes exist: builds that open a
+// source menu ("A tab" / "A window" / "Entire screen") and builds that call
+// getDisplayMedia straight from the toolbar button and show "Presentation is
+// starting..." until the capture stream is live. Either way Chromium answers the
+// picker through --auto-select-tab-capture-source-by-title, which only matches a
+// tab whose browser-side title is the configured capture source.
 func (s *Session) startPresenting() error {
 	timeout := time.Duration(s.mgr.meetCfg.PresentTimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = 45 * time.Second
 	}
+	// The capture matcher works on Chromium's own tab titles; prove the media tab
+	// is visible there before clicking, otherwise getDisplayMedia waits for a
+	// picker that headless cannot show.
+	if err := s.ensureCaptureTitle(s.TabTitle); err != nil {
+		s.log.Warnf("[PIPELINE:present] session %s: capture tab title check: %v", s.ID, err)
+	} else {
+		s.log.Infof("[PIPELINE:present] session %s: chromium sees capture tab %q", s.ID, s.TabTitle)
+	}
 	deadline := time.Now().Add(timeout)
+	startingSince := time.Time{}
+	lastState := ""
+	lastNote := time.Time{}
 	for time.Now().Before(deadline) {
 		if s.ctx.Err() != nil {
 			return s.ctx.Err()
@@ -608,16 +622,49 @@ func (s *Session) startPresenting() error {
 		if ok, _ := s.presenting(); ok {
 			return nil
 		}
+		// Meet is already starting the capture (getDisplayMedia in flight): wait
+		// for the stream instead of hammering the toolbar again.
+		if state := s.presentControlState(); strings.Contains(state, "starting") {
+			if startingSince.IsZero() {
+				startingSince = time.Now()
+				s.log.Infof("[PIPELINE:present] session %s: Meet is starting the capture (%q), waiting for the stream", s.ID, state)
+			}
+			lastState = state
+			if time.Since(lastNote) >= 10*time.Second {
+				lastNote = time.Now()
+				s.log.Infof("[PIPELINE:present] session %s: still starting the capture after %s (control=%q, chromium tabs=%v)",
+					s.ID, time.Since(startingSince).Round(time.Second), state, s.captureTabTitles())
+			}
+			s.setState(StateSharing, "[5/6] Waiting for Meet to start the capture")
+			time.Sleep(700 * time.Millisecond)
+			continue
+		}
+		startingSince = time.Time{}
 		if s.meetTab() != nil {
 			opened, label := s.clickPresentButton()
 			if opened {
+				lastState = label
 				s.log.Infof("[PIPELINE:present] session %s: opened present menu (%s)", s.ID, label)
 				s.setState(StateSharing, "[5/6] Opened present menu: selecting tab")
 				time.Sleep(900 * time.Millisecond)
+				// The click may already have started the capture (Meet builds
+				// without a source menu): re-check before hunting for a menu.
+				if ok, _ := s.presenting(); ok {
+					s.log.Infof("[PIPELINE:present] session %s: presenting confirmed active", s.ID)
+					return nil
+				}
 				clicked, item := s.clickPresentSource()
 				if !clicked {
-					s.log.Warnf("[PIPELINE:present] session %s: present menu item not found (label=%q); dumping menu DOM", s.ID, item)
-					s.dumpPresentMenu()
+					// No source menu is normal on builds that start the capture
+					// straight from the toolbar button; only dump the DOM when
+					// nothing is starting either.
+					st := s.presentControlState()
+					if strings.Contains(st, "starting") || strings.Contains(st, "stop") {
+						s.log.Infof("[PIPELINE:present] session %s: no source menu (build starts the capture directly)", s.ID)
+					} else {
+						s.log.Warnf("[PIPELINE:present] session %s: present menu item not found (label=%q); dumping menu DOM", s.ID, item)
+						s.dumpPresentMenu()
+					}
 				}
 				if clicked {
 					s.log.Infof("[PIPELINE:present] session %s: clicked share source %q", s.ID, item)
@@ -636,7 +683,8 @@ func (s *Session) startPresenting() error {
 		}
 		time.Sleep(900 * time.Millisecond)
 	}
-	return errors.New("could not start screen sharing in Google Meet (present flow timed out); the bot is in the meeting — retry from the dashboard")
+	return fmt.Errorf("could not start screen sharing in Google Meet (present flow timed out after %s; present control=%q; chromium tabs=%v); the bot is in the meeting — retry from the dashboard",
+		timeout, lastState, s.captureTabTitles())
 }
 
 // playMedia starts playback after the share is live, retrying a few times

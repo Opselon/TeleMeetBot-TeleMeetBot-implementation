@@ -2,9 +2,12 @@ package engine
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/go-rod/rod/lib/proto"
 )
 
 // meetStageJS is the page script classifying where the bot is. It must stay in
@@ -355,6 +358,86 @@ func (s *Session) presenting() (bool, error) {
 		return false, err
 	}
 	return res.Value.Bool(), nil
+}
+
+// captureTabTitles lists the page titles Chromium currently knows about. This is
+// the browser-side (WebContents) title, which is what
+// --auto-select-tab-capture-source-by-title matches against.
+func (s *Session) captureTabTitles() []string {
+	if s.browser == nil {
+		return nil
+	}
+	infos, err := proto.TargetGetTargets{}.Call(s.browser)
+	if err != nil {
+		return nil
+	}
+	var titles []string
+	for _, ti := range infos.TargetInfos {
+		if ti.Type != proto.TargetTargetInfoTypePage {
+			continue
+		}
+		titles = append(titles, ti.Title)
+	}
+	return titles
+}
+
+// ensureCaptureTitle makes sure Chromium sees a tab named `title` — the
+// precondition for the auto-select capture matcher to answer getDisplayMedia
+// without a picker. It re-applies the title lock on the media tab until the
+// browser-side title shows up (or the attempt budget runs out).
+func (s *Session) ensureCaptureTitle(title string) error {
+	media := s.mediaTab()
+	if media == nil {
+		return errors.New("media tab is gone")
+	}
+	deadline := time.Now().Add(6 * time.Second)
+	for {
+		titles := s.captureTabTitles()
+		for _, t := range titles {
+			if t == title {
+				return nil
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("chromium has no tab titled %q (open tabs: %v)", title, titles)
+		}
+		if _, err := media.Eval(titleLockJS(title)); err != nil {
+			s.log.Debugf("session %s: re-lock capture title: %v", s.ID, err)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// presentControlState returns the visible present/share control's label. Some
+// Meet builds open a source menu ("A tab" / "A window" / "Entire screen"),
+// others call getDisplayMedia straight from the toolbar button and show
+// "Presentation is starting..." until the capture stream is live — the label
+// tells those two apart.
+func (s *Session) presentControlState() string {
+	meet := s.meetTab()
+	if meet == nil {
+		return ""
+	}
+	res, err := meet.Timeout(4 * time.Second).Eval(`() => {
+  const norm = x => (x || "").replace(/\s+/g, " ").trim().toLowerCase();
+  for (const el of document.querySelectorAll("button, [role=button]")) {
+    if (el.querySelector("button, [role=button]")) continue;
+    const aria = norm(el.getAttribute("aria-label") || "");
+    const tip = norm(el.getAttribute("data-tooltip") || "");
+    const label = aria + " " + tip;
+    if (!label.includes("present") && !label.includes("share")) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) continue;
+    const cs = getComputedStyle(el);
+    if (cs.visibility === "hidden" || cs.display === "none") continue;
+    return norm(label).slice(0, 80);
+  }
+  return "";
+}`)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(res.Value.Str())
 }
 
 // dumpPresentMenu logs the visible present-menu DOM so the exact labels of
