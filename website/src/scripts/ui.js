@@ -100,6 +100,13 @@ function loadEntries() {
       .catch(() => {
         entries = [];
         return entries;
+      })
+      .then((loaded) => {
+        // A slow index must not leave the user staring at "No results" for a query
+        // they already typed: re-render whatever is in the box once entries arrive.
+        const query = input?.value.trim();
+        if (query) renderResults(parseTerms(query));
+        return loaded;
       });
   }
   return entriesPromise;

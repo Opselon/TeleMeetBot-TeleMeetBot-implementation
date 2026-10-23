@@ -1,7 +1,7 @@
 {
   "live": true,
   "source": "api",
-  "fetchedAt": "2026-10-23T02:37:24.314Z",
+  "fetchedAt": "2026-10-23T02:52:18.152Z",
   "repo": {
     "stars": 0,
     "forks": 1,
@@ -10,9 +10,57 @@
     "language": "Go",
     "license": "MIT",
     "defaultBranch": "main",
-    "pushedAt": "2026-10-23T01:29:22Z"
+    "pushedAt": "2026-10-23T02:47:36Z"
   },
   "releases": [
+    {
+      "tag": "v1.1.0",
+      "name": "TeleMeetBot v1.1.0",
+      "publishedAt": "2026-10-23T02:47:40Z",
+      "createdAt": "2026-10-23T02:47:35Z",
+      "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/tag/v1.1.0",
+      "prerelease": false,
+      "draft": false,
+      "body": "# TeleMeetBot v1.1.0 — presenting that actually works\n\n**A reliability release for the two things that broke in real meetings: Meet refusing to start the\nshare, and YouTube showing a consent wall or green frames instead of the clip.**\n\nThis is a minor bump over v1.0.0 because it adds two diagnostic entry points (`--probe`,\n`--media-probe`) and a new consent-handling module. No configuration key was removed or renamed.\n\n## Why upgrade\n\nv1.0.0 could join a meeting and click Present, but three failures were reproducibly fatal:\n\n1. **“Presentation is starting…” forever.** Chromium's auto-select capture matches the\n   browser-side tab title. The old title lock used a getter with a no-op setter, so the native\n   title never changed and no tab matched. Headless Chromium has no picker to fall back on.\n2. **Participants saw “Before you continue to YouTube”** instead of the video: the media tab was\n   shared while the consent lightbox owned the page. The old matcher required an exact\n   `reject all` label, and real buttons carry full sentences in the visitor's language.\n3. **Green or black frames.** Fake media devices plus a software renderer without the right flags\n   produced uninitialised YUV buffers, and nothing verified that the shared surface was painting.\n\nAll three are fixed and covered by tests that use a real Chromium and a real `getDisplayMedia`\ngrant, not mocks.\n\n## Highlights\n\n### Presenting\n\n- **Leaf-button matcher** for Meet's Present control: the toolbar container is skipped, so the\n  click lands on the actual button.\n- **Real tab title.** The player document is served over loopback and the tab title is set through\n  the native setter, so `--auto-select-tab-capture-source-by-title` matches `TeleMeet Media` —\n  including the title Meet reports.\n- **No fake devices.** `use-fake-device-for-media-stream` and `use-fake-ui-for-media-stream` were\n  removed so tab capture shares the real tab; camera and microphone are muted on prejoin instead.\n- **No present-menu reopen loop.** A failed menu open now dumps the menu DOM and fails with a\n  diagnosable error instead of re-clicking in a loop.\n- **Survives CDP hiccups.** A transient protocol error no longer kills a live stream.\n\n### Consent and playback\n\n- New `internal/engine/consent.go`: structural detection (consent hosts, DOM markers in light DOM\n  *and* shadow roots, visible-only heuristics, text hints), locale phrase tables with reject\n  preferred over accept, blocked decoys (`Customize`, `More options`, `Learn more`), one\n  normalisation path for both sides (NFD, all combining marks dropped — required for kana),\n  and a click ladder: JS → physical mouse → keyboard, then the other action family.\n- The wall is also dismissed **after** the watch page reports a buffered video, because YouTube\n  mounts it a few seconds late.\n- Playback is now *verified*, not assumed: position must advance and sampled pixels must be\n  neither black nor decoder-green. The report carries the surface, the URL and the attempt list.\n- `recoverMedia` repairs a tab (consent → refit → replay) **without** re-clicking Share Screen:\n  the capture track is bound to that tab.\n- The watch loop self-heals a consent wall, a stall or a black surface every 10 s, bounded to five\n  attempts, and only re-presents after two consecutive misses.\n\n### Networking\n\n- Media traffic can use a proxy (`browser.proxy`, e.g. SOCKS5) while Google Meet traffic bypasses\n  it, so WebRTC latency is unaffected and datacenter bot checks apply only to media hosts.\n- Headless rendering uses `--headless=new` with SwiftShader ANGLE flags to avoid green frames.\n\n### Joining\n\n- **Host-gated lobbies are waitable.** “No one can join unless invited or admitted by the host”\n  keeps the session in `admitting` and re-requests entry every 30 s until\n  `meet.admit_wait_seconds` expires. Meeting-full, ended and invalid-code screens still fail fast.\n- Debug-grade telemetry: stage, elapsed time and attempt count while gated; explicit joined and\n  stream-live milestones; `[STEP n/6]` pipeline logs.\n\n### Diagnostics\n\n- `telemeetbot --probe <meet-url> [--probe-media <url>] [--probe-seconds N]` runs one live session\n  through the real engine, streams every stage to the log, serves `/livez` for the window and exits\n  without touching Telegram.\n- `telemeetbot --media-probe <url>` plays a link in the same player and reports consent state,\n  viewport, `overlayFree`, `readyState`, position advance, mean RGB, a verification verdict and a\n  human-readable failure. No meeting required.\n- The doctor now accepts a health port already served by a live TeleMeetBot instead of reporting a\n  conflict.\n\n### Fixes\n\n- Probe event-draining goroutine deadlock on session end.\n- `scripts/install.sh`: SIGPIPE on the latest-release lookup, and checksum lines prefixed with\n  `./` are handled.\n- `scripts/release.sh` writes bare archive names into `SHA256SUMS`.\n- Corrected the Docker first-run command in `README.md`, `README.fa.md` and `docker-compose.yml`:\n  the compose entrypoint is `tini`, so the binary name is required —\n  `docker compose run --rm telemeetbot telemeetbot --wizard --config /data/telemeetbot.yml`.\n\n## New documentation site\n\n`website/` builds a static Astro site (search, dark and light themes, mobile-first layout) that\ngenerates its facts from the Go source at build time: CLI flags, bot commands, config keys, states,\nhealth fields, media extensions, test counts and release targets. Enabled by default:\n`https://opselon.github.io/TeleMeetBot-TeleMeetBot-implementation/`.\n\n## Upgrade\n\nArchives are attached below with `SHA256SUMS`. No config migration is needed.\n\n```bash\nVERSION=v1.1.0\ncurl -fsSLO \"https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/$VERSION/telemeetbot-linux-amd64.tar.gz\"\ncurl -fsSLO \"https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/$VERSION/SHA256SUMS\"\nsha256sum -c SHA256SUMS --ignore-missing\ntar -xzf telemeetbot-linux-amd64.tar.gz\nsudo install -m 0755 telemeetbot /usr/local/bin/telemeetbot\nsudo systemctl restart telemeetbot\n```\n\nDocker:\n\n```bash\ngit pull\ndocker compose build\ndocker compose up -d\n```\n\nThen verify the real capture path on the host, not just the version string:\n\n```bash\ntelemeetbot --config /etc/telemeetbot/config.yml --check --capture-test\ntelemeetbot --config /etc/telemeetbot/config.yml --media-probe \"<a link you use>\" --probe-seconds 15\n```\n\n## Behaviour changes to know about\n\n- A host-gated lobby now waits instead of failing on the first restrictive screen. If nobody admits\n  the bot, the error arrives after `meet.admit_wait_seconds` (default 5 minutes; `0` waits forever) with both likely\n  causes named.\n- The bot refuses to present a tab whose consent wall will not clear, and says which controls it\n  tried. That is a hard failure by design: presenting the wall is worse than not presenting.\n- Media hosts may now resolve through `browser.proxy`; Meet hosts always connect directly.\n\n## Tests\n\n- `go test ./...` — 53 unit tests across config, bot, engine, store, setup, web, health.\n- `go test ./internal/engine -run TestIntegration` — 13 real-Chromium tests, including 16 consent\n  variants across 13 locales (text-only, shadow DOM, no accept button, no wall, inert wall) and an\n  end-to-end case where the wall mounts *after* the share is live and the same capture track keeps\n  delivering non-black frames.\n- Opt-in live checks (`TELEMEETBOT_YOUTUBE_URL`, `TELEMEETBOT_PROXY`) are never required by CI.\n- CI runs gofmt, `go vet`, the unit suite, the Chromium integration suite, a Docker build, and the\n  website build with its SEO, contrast and Playwright audits.\n\n## Known limitations\n\n- Guest join only; meetings that require a Google sign-in cannot be joined.\n- Meet's UI must be English (`browser.lang: en-US`).\n- One presenter per session; two sessions in one meeting compete for the role.\n- `media.autoplay`, `media.loop` and `telegram.notify_chat_id` are parsed but not read. Playback\n  starts after the share is confirmed, the player always loops, notifications go to the launching\n  chat.\n- No control API: `/healthz` and `/livez` are read-only, and control is Telegram-only.\n- Playback still depends on the source: pages that require a login, block framing or refuse\n  automated browsers will not play, and there is no credential injection.\n\n## Changes since v1.0.0\n\n- #1 host gate waitable, `--probe`, richer logging\n- #2 YouTube green screen, proxy routing, step logs, media probe\n- #3 real capture tab title\n- #4 consent wall dismissal and verified playback\n\nFull commit list: `git log v1.0.0..v1.1.0 --oneline`.\n",
+      "assets": [
+        {
+          "name": "SHA256SUMS",
+          "size": 483,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.1.0/SHA256SUMS"
+        },
+        {
+          "name": "telemeetbot-linux-386.tar.gz",
+          "size": 5687901,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.1.0/telemeetbot-linux-386.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-amd64.tar.gz",
+          "size": 5807269,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.1.0/telemeetbot-linux-amd64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm64.tar.gz",
+          "size": 5434715,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.1.0/telemeetbot-linux-arm64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-armv6.tar.gz",
+          "size": 5646881,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.1.0/telemeetbot-linux-armv6.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-armv7.tar.gz",
+          "size": 5646163,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.1.0/telemeetbot-linux-armv7.tar.gz"
+        }
+      ]
+    },
     {
       "tag": "v1.0.0",
       "name": "TeleMeetBot v1.0.0",

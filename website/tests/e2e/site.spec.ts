@@ -148,3 +148,15 @@ test('code blocks, tap targets and text sizes hold up', async ({ page }) => {
     expect(report, `${path || '/'} at ${page.viewportSize()?.width}px`).toEqual({ clipped: 0, smallTargets: 0, tiny: 0 });
   }
 });
+
+test('search still answers when the index arrives late', async ({ page }) => {
+  await page.route('**/search.json', async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await route.continue();
+  });
+  await page.goto('');
+  await page.locator('[data-search-open]').first().click();
+  await page.locator('#search-input').fill('consent');
+  // No further keystrokes: the pending query must resolve on its own.
+  await expect(page.locator('[data-search-result]').first()).toBeVisible({ timeout: 10_000 });
+});
