@@ -71,7 +71,7 @@ func WatchMeet(ctx context.Context, browserCfg BrowserConfig, meet MeetOptions, 
 		name = "TeleMeet Viewer"
 	}
 	rep := WatchReport{}
-	b, closeFn, err := launchBrowser(launchOptions{browser: browserCfg, meet: meet}, log)
+	b, closeFn, err := launchBrowser(launchOptions{browser: browserCfg, meet: meet, forMeet: true}, log)
 	if err != nil {
 		return rep, err
 	}

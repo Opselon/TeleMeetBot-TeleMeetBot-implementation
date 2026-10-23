@@ -40,7 +40,7 @@ func TestTabCapture(ctx context.Context, browserCfg BrowserConfig, meet MeetOpti
 	if log == nil {
 		log = noopLogger{}
 	}
-	b, closeFn, err := launchBrowser(launchOptions{browser: browserCfg, meet: meet}, log)
+	b, closeFn, err := launchBrowser(launchOptions{browser: browserCfg, meet: meet, forMeet: true}, log)
 	if err != nil {
 		return CaptureReport{}, err
 	}

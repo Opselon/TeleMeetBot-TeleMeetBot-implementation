@@ -119,7 +119,7 @@ func PublishProbe(ctx context.Context, browserCfg BrowserConfig, meet MeetOption
 		opt.Seconds = 3
 	}
 	rep := PublishReport{Media: "canvas-fixture"}
-	b, closeFn, err := launchBrowser(launchOptions{browser: browserCfg, meet: meet}, log)
+	b, closeFn, err := launchBrowser(launchOptions{browser: browserCfg, meet: meet, forMeet: true}, log)
 	if err != nil {
 		return rep, err
 	}
