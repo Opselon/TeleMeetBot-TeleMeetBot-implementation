@@ -689,11 +689,13 @@ func TestIntegrationRealYouTubeAudioTrackLive(t *testing.T) {
 	}
 	_ = page.WaitLoad()
 
+	_, _ = dismissConsent(page, testLogger{t}, 20*time.Second)
 	st, err := waitMediaReady(page, testLogger{t}, 35*time.Second)
 	if err != nil {
 		t.Fatalf("media ready failed: %v", err)
 	}
 	t.Logf("media ready: %s", st.describe())
+	_, _ = ensurePlayback(page, testLogger{t}, 1.0, 20*time.Second)
 
 	rep, err := ensureOriginalAudioTrack(page, MediaYouTube, testLogger{t})
 	if err != nil {

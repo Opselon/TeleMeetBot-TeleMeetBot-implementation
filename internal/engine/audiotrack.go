@@ -296,7 +296,7 @@ func audioTracksJS(reqLang string, apply bool) string {
       if (b64 && typeof atob === "function") {
         const dec = atob(b64);
         if (dec.includes("original")) res.orig = true;
-        if (dec.includes("dubbed-auto")) res.autodub = true;
+        if (dec.includes("dubbed")) res.autodub = true;
         const match = dec.match(/lang\x12([a-zA-Z0-9_-]+)/);
         if (match && match[1]) res.lang = match[1];
       }
@@ -352,8 +352,8 @@ func audioTracksJS(reqLang string, apply bool) string {
 
     // 4. Protobuf metadata inside rawId
     const proto = decodeProto(rawId);
-    if (proto.orig) isOriginal = true;
     if (proto.autodub) isAutoDubbed = true;
+    if (proto.orig) isOriginal = true;
 
     lang = normalizeLangCode(langCode || finalId, name, proto.lang);
 
@@ -365,9 +365,15 @@ func audioTracksJS(reqLang string, apply bool) string {
     if (isOrigText(name) || isOrigText(finalId)) {
       isOriginal = true;
     }
-    if (!isAutoDubbed && isDefault) {
-      isOriginal = true;
-    }
+
+    // A track carrying the "dubbed" marker can never be the creator's original.
+    if (isAutoDubbed && !proto.orig) isOriginal = false;
+
+    // NOTE: isDefault is NOT sufficient to claim originality. YouTube marks the
+    // viewer-locale audio (often an auto-dub) as default, so a dubbed default
+    // must never be promoted to original. Originality comes from the protobuf
+    // "original" marker, an explicit "original" label, or the player's
+    // defaultAudioTrackIndex resolution done below.
 
     return {
       id: finalId,
@@ -585,11 +591,20 @@ func audioTracksJS(reqLang string, apply bool) string {
   }
 
   // 6) Identify Creator's Original Audio Track
-  let original = tracks.find((t) => t.isOriginal) ||
-                 tracks.find((t) => !t.isAutoDubbed && t.isDefault) ||
-                 tracks.find((t) => authoritativeOrigId && (t.id === authoritativeOrigId || t.id.startsWith(authoritativeOrigId))) ||
-                 tracks.find((t) => authoritativeVideoLang && t.lang === authoritativeVideoLang) ||
-                 null;
+  // Priority 1: Explicitly marked original (proto.orig or name contains "original")
+  let original = tracks.find((t) => t.isOriginal && !t.isAutoDubbed);
+  // Priority 2: Authoritative original from player captions metadata
+  if (!original && authoritativeOrigId) {
+    original = tracks.find((t) => !t.isAutoDubbed && (t.id === authoritativeOrigId || t.id.startsWith(authoritativeOrigId)));
+  }
+  // Priority 3: Authoritative video language from videoDetails
+  if (!original && authoritativeVideoLang) {
+    original = tracks.find((t) => !t.isAutoDubbed && t.lang === authoritativeVideoLang);
+  }
+  // Priority 4: Default non-dubbed track only if no explicit original marker existed
+  if (!original) {
+    original = tracks.find((t) => !t.isAutoDubbed && t.isDefault);
+  }
 
   if (original) {
     out.originalId = original.id;
@@ -658,8 +673,8 @@ func audioTracksJS(reqLang string, apply bool) string {
       target = original;
       step("target-original");
     } else {
-      target = tracks[0];
-      fallback = "no original audio marker identified; defaulted to source track";
+      target = active || tracks[0];
+      fallback = "retaining current track: no original audio marker found among available tracks";
       step("target-original-unresolved");
     }
   } else if (REQ_LANG === "auto") {
