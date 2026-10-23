@@ -66,6 +66,9 @@ type Session struct {
 	browser   *rod.Browser
 	mediaPage *rod.Page
 	meetPage  *rod.Page
+
+	// pub tracks Meet's own publication counters between samples.
+	pub publishTracker
 }
 
 // Status is a dashboard-friendly snapshot.
@@ -410,6 +413,12 @@ func (s *Session) watch() {
 		// needless Share Screen click.
 		if time.Since(lastPresentCheck) > 8*time.Second {
 			lastPresentCheck = time.Now()
+			// Meet's own encoder first: "presenting" is a DOM claim, the
+			// outbound-rtp counters are what participants actually receive.
+			if problem := s.logMeetPublish(); problem != "" {
+				s.log.Warnf("[PIPELINE:publish] session %s: %s", s.ID, problem)
+				s.setDetail("[6/6] Share problem: " + problem)
+			}
 			if ok, _ := s.presenting(); ok {
 				presentMisses = 0
 			} else {
@@ -541,6 +550,12 @@ func (s *Session) openMeet() error {
 	s.meetPage = p
 	s.mu.Unlock()
 	s.setState(StateJoining, "loading meet")
+	// Record Meet's own peer connections and capture stream before the app
+	// boots: without that, a share that is "presenting" but encoding nothing is
+	// indistinguishable from a healthy one from inside the page.
+	if _, err := p.EvalOnNewDocument(meetPeerHookJS()); err != nil {
+		s.log.Warnf("[PIPELINE:publish] session %s: install publisher hook: %v", s.ID, err)
+	}
 	if err := p.Timeout(60 * time.Second).Navigate(s.MeetURL); err != nil {
 		return fmt.Errorf("load meet link: %w", err)
 	}

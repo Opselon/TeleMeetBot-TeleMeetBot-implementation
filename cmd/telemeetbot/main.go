@@ -36,10 +36,12 @@ func main() {
 
 		// Live diagnosis: join-and-report against a real meeting link using
 		// the engine the bot itself uses. Does not enter the dashboard.
-		probeFlag      = flag.String("probe", "", "run a live one-shot probe against this Meet link and exit")
-		probeMedia     = flag.String("probe-media", "https://www.youtube.com/watch?v=jNQXAC9IVRw", "media link for --probe")
-		mediaProbeFlag = flag.String("media-probe", "", "diagnose one media link without a meeting (plays it and samples rendered pixels)")
-		probeWaitSecs  = flag.Int("probe-seconds", 90, "admit wait for --probe; sample seconds for --media-probe")
+		probeFlag        = flag.String("probe", "", "run a live one-shot probe against this Meet link and exit")
+		probeMedia       = flag.String("probe-media", "https://www.youtube.com/watch?v=jNQXAC9IVRw", "media link for --probe")
+		mediaProbeFlag   = flag.String("media-probe", "", "diagnose one media link without a meeting (plays it and samples rendered pixels)")
+		publishProbeFlag = flag.String("publish-probe", "", "capture a real media link and publish it through a WebRTC loopback (measures encoder/RTP/decoder, no meeting needed)")
+		watchProbeFlag   = flag.String("watch-probe", "", "join this Meet link as a silent guest and measure the presentation remote participants see")
+		probeWaitSecs    = flag.Int("probe-seconds", 90, "admit wait for --probe; sample seconds for --media-probe")
 	)
 	flag.Parse()
 
@@ -95,6 +97,36 @@ func main() {
 		}
 		if err := runMediaProbe(*mediaProbeFlag, secs, cfg, logger); err != nil {
 			logger.Errorf("media probe: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Publish pipeline diagnosis: capture a real media tab and push it through a
+	// real WebRTC publication (encoder -> RTP -> decode). This is the instrument
+	// that separates "the tab paints pixels" from "participants see video".
+	if *publishProbeFlag != "" {
+		secs := *probeWaitSecs
+		if secs < 3 {
+			secs = 3
+		}
+		if err := runPublishProbe(*publishProbeFlag, secs, cfg, logger); err != nil {
+			logger.Errorf("publish probe: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Remote-viewer diagnosis: join a meeting as a silent guest and measure
+	// what remote participants actually receive (inbound video frames and
+	// screenshot motion in the center of the call).
+	if *watchProbeFlag != "" {
+		secs := *probeWaitSecs
+		if secs < 5 {
+			secs = 5
+		}
+		if err := runWatchProbe(*watchProbeFlag, secs, cfg, logger); err != nil {
+			logger.Errorf("watch probe: %v", err)
 			os.Exit(1)
 		}
 		return
