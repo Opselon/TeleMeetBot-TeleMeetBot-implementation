@@ -709,6 +709,18 @@ func (s *Session) prepareMedia(p *rod.Page) error {
 		return err
 	}
 	s.log.Infof("[PIPELINE:media] media ready: %s", st.describe())
+
+	audioRep, atErr := ensureAudioTrack(p, s.MediaKind, s.AudioLang, s.log)
+	if atErr != nil {
+		s.log.Warnf("[PIPELINE:audio-track] session %s: requested_lang=%s: %v", s.ID, s.AudioLang, atErr)
+		return fmt.Errorf("select audio track (%s): %w", s.AudioLang, atErr)
+	}
+	s.mu.Lock()
+	s.audioRep = audioRep
+	s.mu.Unlock()
+	if s.MediaKind == MediaYouTube {
+		s.log.Infof("[PIPELINE:audio-track] session %s: %s", s.ID, audioRep.describe())
+	}
 	return nil
 }
 
@@ -793,6 +805,17 @@ func (s *Session) recoverMedia(reason string) error {
 		s.log.Warnf("[PIPELINE:recovery] video not ready (%v); reloading the media tab (the share follows the tab)", err)
 		if rerr := s.reopenMedia(); rerr != nil {
 			return fmt.Errorf("recover media: %w (reload also failed: %v)", err, rerr)
+		}
+	} else {
+		if atRep, atErr := ensureAudioTrack(media, s.MediaKind, s.AudioLang, s.log); atErr != nil {
+			s.log.Warnf("[PIPELINE:audio-track] session %s recovery: requested_lang=%s: %v", s.ID, s.AudioLang, atErr)
+		} else {
+			s.mu.Lock()
+			s.audioRep = atRep
+			s.mu.Unlock()
+			if s.MediaKind == MediaYouTube {
+				s.log.Infof("[PIPELINE:audio-track] session %s recovery: %s", s.ID, atRep.describe())
+			}
 		}
 	}
 

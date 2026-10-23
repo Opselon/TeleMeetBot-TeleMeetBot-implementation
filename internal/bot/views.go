@@ -13,16 +13,21 @@ import (
 
 // Callback data prefixes.
 const (
-	cbHome     = "menu:home"
-	cbNew      = "menu:new"
-	cbSessions = "menu:sessions"
-	cbHealth   = "menu:health"
-	cbHelp     = "menu:help"
-	cbSettings = "menu:settings"
-	cbLaunch   = "flow:launch"
-	cbCancel   = "flow:cancel"
-	cbAgain    = "flow:again"
-	cbRefresh  = "menu:refresh"
+	cbHome      = "menu:home"
+	cbNew       = "menu:new"
+	cbSessions  = "menu:sessions"
+	cbHealth    = "menu:health"
+	cbHelp      = "menu:help"
+	cbSettings  = "menu:settings"
+	cbAudioLang = "menu:audiolang"
+	cbLaunch    = "flow:launch"
+	cbCancel    = "flow:cancel"
+	cbAgain     = "flow:again"
+	cbRefresh   = "menu:refresh"
+	cbLangFa    = "lang:fa"
+	cbLangEn    = "lang:en"
+	cbLangOrig  = "lang:orig"
+	cbLangAuto  = "lang:auto"
 )
 
 // stateEmoji maps engine states to dashboard emoji.
@@ -86,12 +91,58 @@ func mainMenuKB() *tgbotapi.InlineKeyboardMarkup {
 			tgbotapi.NewInlineKeyboardButtonData("➕ New stream", cbNew),
 		},
 		{
+			tgbotapi.NewInlineKeyboardButtonData("🌐 Audio Language", cbAudioLang),
 			tgbotapi.NewInlineKeyboardButtonData("📋 Sessions", cbSessions),
-			tgbotapi.NewInlineKeyboardButtonData("🩺 Health", cbHealth),
 		},
 		{
+			tgbotapi.NewInlineKeyboardButtonData("🩺 Health", cbHealth),
 			tgbotapi.NewInlineKeyboardButtonData("⚙️ Settings", cbSettings),
+		},
+		{
 			tgbotapi.NewInlineKeyboardButtonData("ℹ️ Help", cbHelp),
+		},
+	}}
+}
+
+// audioLangText renders the language preference selection screen.
+func audioLangText(currentLang string) string {
+	norm := engine.NormalizeAudioLang(currentLang)
+	var sb strings.Builder
+	sb.WriteString("🌐 <b>Audio Track Language</b>\n\n")
+	sb.WriteString(fmt.Sprintf("Current preference: <b>%s</b>\n\n", esc(engine.AudioLangDisplayName(norm))))
+	sb.WriteString("Select your preferred audio language for YouTube playback:\n\n")
+	sb.WriteString("• <b>🇮🇷 فارسی (default)</b>\nPlays Persian track if available. If unavailable, falls back to the creator's <i>Original audio</i> (never auto-dubbed English).\n\n")
+	sb.WriteString("• <b>🇬🇧 English</b>\nPlays English audio (creator's original if in English, or English track).\n\n")
+	sb.WriteString("• <b>🌐 Original audio</b>\nPlays the creator's original audio track, strictly avoiding auto-dubs.\n\n")
+	sb.WriteString("• <b>🔄 Auto / best available</b>\nAutomatically selects Persian if present, else original audio.\n\n")
+	sb.WriteString("<i>Your selection is saved persistently across bot restarts and applied to all future streams.</i>")
+	return sb.String()
+}
+
+// audioLangKB provides inline buttons for language selection.
+func audioLangKB(currentLang string) *tgbotapi.InlineKeyboardMarkup {
+	norm := engine.NormalizeAudioLang(currentLang)
+	mark := func(code, label string) string {
+		if norm == code {
+			return "✅ " + label
+		}
+		return label
+	}
+	return &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{
+		{
+			tgbotapi.NewInlineKeyboardButtonData(mark("fa", "🇮🇷 فارسی (default)"), cbLangFa),
+		},
+		{
+			tgbotapi.NewInlineKeyboardButtonData(mark("en", "🇬🇧 English"), cbLangEn),
+		},
+		{
+			tgbotapi.NewInlineKeyboardButtonData(mark("orig", "🌐 Original audio"), cbLangOrig),
+		},
+		{
+			tgbotapi.NewInlineKeyboardButtonData(mark("auto", "🔄 Auto / best available"), cbLangAuto),
+		},
+		{
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ Dashboard", cbHome),
 		},
 	}}
 }
@@ -127,6 +178,16 @@ func sessionCardText(st engine.Status) string {
 		sb.WriteString(" — " + esc(truncate(st.Detail, 120)))
 	}
 	sb.WriteString("\n")
+	if st.AudioTrack != "" {
+		sb.WriteString(fmt.Sprintf("🎵 Audio: <b>%s</b>", esc(st.AudioTrack)))
+		if st.AudioLang != "" {
+			sb.WriteString(fmt.Sprintf(" (pref: %s)", esc(engine.NormalizeAudioLang(st.AudioLang))))
+		}
+		sb.WriteString("\n")
+	}
+	if st.FallbackReason != "" {
+		sb.WriteString(fmt.Sprintf("ℹ️ <i>%s</i>\n", esc(st.FallbackReason)))
+	}
 	sb.WriteString(fmt.Sprintf("⏳ Elapsed: %s", health.FormatUptime(st.Elapsed())))
 	if st.Error != "" {
 		sb.WriteString("\n\n🔴 <b>Error:</b> " + esc(truncate(st.Error, 300)))
@@ -252,6 +313,11 @@ func settingsText(c *config.Config) string {
 	sb.WriteString(fmt.Sprintf("Max sessions: %d\n", c.Limits.MaxSessions))
 	sb.WriteString(fmt.Sprintf("Headless: %t · per-session browser: %t\n", c.Browser.Headless, c.Browser.PerSession))
 	sb.WriteString(fmt.Sprintf("Default volume: %d%% · speed %.2gx\n", c.Media.DefaultVolume, c.Media.DefaultSpeed))
+	defLang := c.Media.DefaultAudioLang
+	if defLang == "" {
+		defLang = "fa"
+	}
+	sb.WriteString(fmt.Sprintf("Default audio: <code>%s</code> (%s)\n", esc(defLang), esc(engine.AudioLangDisplayName(defLang))))
 	sb.WriteString(fmt.Sprintf("Data dir: <code>%s</code>\n", esc(c.Paths.DataDir)))
 	sb.WriteString("\nChange values in <code>telemeetbot.yml</code> and restart the service. Re-run <code>telemeetbot --wizard</code> for a guided edit.")
 	return sb.String()
@@ -314,7 +380,7 @@ func cancelKB() *tgbotapi.InlineKeyboardMarkup {
 }
 
 // confirmText summarises the pending stream.
-func confirmText(meetLink, mediaLink string, kind engine.MediaKind) string {
+func confirmText(meetLink, mediaLink string, kind engine.MediaKind, userAudioLang string) string {
 	kindLabel := "web page"
 	switch kind {
 	case engine.MediaYouTube:
@@ -322,18 +388,26 @@ func confirmText(meetLink, mediaLink string, kind engine.MediaKind) string {
 	case engine.MediaDirect:
 		kindLabel = "direct media file"
 	}
-	return fmt.Sprintf(`✅ <b>Ready to launch</b>
-
-Meet: <code>%s</code>
-Media (<i>%s</i>): <code>%s</code>
-
-The bot will open Chromium, join as a guest, share a tab and play the media.`, esc(meetLink), esc(kindLabel), esc(truncate(mediaLink, 120)))
+	var sb strings.Builder
+	sb.WriteString("✅ <b>Ready to launch</b>\n\n")
+	sb.WriteString(fmt.Sprintf("Meet: <code>%s</code>\n", esc(meetLink)))
+	sb.WriteString(fmt.Sprintf("Media (<i>%s</i>): <code>%s</code>\n", esc(kindLabel), esc(truncate(mediaLink, 120))))
+	if kind == engine.MediaYouTube {
+		norm := engine.NormalizeAudioLang(userAudioLang)
+		sb.WriteString(fmt.Sprintf("🎵 Audio track: <b>%s</b>\n", esc(engine.AudioLangDisplayName(norm))))
+	}
+	sb.WriteString("\nThe bot will open Chromium, join as a guest, share a tab and play the media.")
+	return sb.String()
 }
 
 // confirmKB offers launch/cancel for a pending stream.
-func confirmKB() *tgbotapi.InlineKeyboardMarkup {
+func confirmKB(userAudioLang string) *tgbotapi.InlineKeyboardMarkup {
+	norm := engine.NormalizeAudioLang(userAudioLang)
 	return &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{
 		{tgbotapi.NewInlineKeyboardButtonData("🚀 Launch", cbLaunch)},
+		{
+			tgbotapi.NewInlineKeyboardButtonData("🎵 Audio: "+engine.AudioLangDisplayName(norm), cbAudioLang),
+		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData("✏️ Change links", cbAgain),
 			tgbotapi.NewInlineKeyboardButtonData("✖️ Cancel", cbCancel),

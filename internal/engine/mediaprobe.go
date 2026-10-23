@@ -45,6 +45,10 @@ type MediaProbeReport struct {
 	ReadyState     int     `json:"readyState"`
 	Advance        float64 `json:"advance"`
 	Verification   string  `json:"verification"`
+	AudioTrack     string  `json:"audioTrack,omitempty"`
+	RequestedLang  string  `json:"requestedLang,omitempty"`
+	SelectedTrack  string  `json:"selectedTrack,omitempty"`
+	FallbackReason string  `json:"fallbackReason,omitempty"`
 }
 
 // codecSupportJS reports which codecs this page's browser can decode via MSE —
@@ -116,6 +120,11 @@ func youtubeStateJS() string {
 // answers, WITHOUT a meeting: does the media actually play, and does it paint
 // real frames (not the decoder-failure green or black)?
 func ProbeMedia(ctx context.Context, browserCfg BrowserConfig, link string, seconds int, log Logger) (MediaProbeReport, error) {
+	return ProbeMediaWithLang(ctx, browserCfg, link, seconds, "fa", log)
+}
+
+// ProbeMediaWithLang runs the probe enforcing the requested audio language ("fa", "en", "orig", "auto").
+func ProbeMediaWithLang(ctx context.Context, browserCfg BrowserConfig, link string, seconds int, reqLang string, log Logger) (MediaProbeReport, error) {
 	if log == nil {
 		log = noopLogger{}
 	}
@@ -133,7 +142,7 @@ func ProbeMedia(ctx context.Context, browserCfg BrowserConfig, link string, seco
 	}
 	defer closeFn()
 
-	log.Infof("[PIPELINE:media-probe] browser=%s url=%s kind=%s", browserCfg.Executable, target, mt.Kind)
+	log.Infof("[PIPELINE:media-probe] browser=%s url=%s kind=%s reqLang=%s", browserCfg.Executable, target, mt.Kind, reqLang)
 
 	p, err := newPage(b, browserCfg)
 	if err != nil {
@@ -188,6 +197,19 @@ func ProbeMedia(ctx context.Context, browserCfg BrowserConfig, link string, seco
 	} else {
 		rep.ReadyState = st.Ready
 		log.Infof("[PIPELINE:media-probe] video ready: %s", st.describe())
+	}
+
+	rep.RequestedLang = NormalizeAudioLang(reqLang)
+	if atRep, atErr := ensureAudioTrack(p, mt.Kind, reqLang, log); atErr != nil {
+		rep.AudioTrack = "error: " + atErr.Error()
+		log.Warnf("[PIPELINE:media-probe] audio track: %v", atErr)
+	} else {
+		rep.AudioTrack = atRep.describe()
+		rep.SelectedTrack = atRep.SelectedTrackLabel()
+		rep.FallbackReason = atRep.FallbackReason
+		if atRep.Original != nil || atRep.Available > 1 {
+			log.Infof("[PIPELINE:media-probe] audio track %s", atRep.describe())
+		}
 	}
 
 	// What did YouTube's own player decide? playabilityStatus names the real

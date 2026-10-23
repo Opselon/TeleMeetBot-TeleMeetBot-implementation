@@ -47,6 +47,7 @@ type MediaOptions struct {
 	Autoplay           bool
 	MuteUntilConnected bool
 	SeekStepSeconds    int
+	DefaultAudioLang   string
 }
 
 // MeetOptions is the Google Meet configuration.
@@ -120,6 +121,7 @@ type StartRequest struct {
 	MeetLink  string
 	MediaLink string
 	TabTitle  string
+	AudioLang string
 }
 
 // Manager owns browsers and sessions.
@@ -276,6 +278,15 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (*Session, error)
 		tabTitle = m.meetCfg.CaptureSource
 	}
 
+	audioLang := NormalizeAudioLang(req.AudioLang)
+	if strings.TrimSpace(req.AudioLang) == "" {
+		if m.mediaCfg.DefaultAudioLang != "" {
+			audioLang = NormalizeAudioLang(m.mediaCfg.DefaultAudioLang)
+		} else {
+			audioLang = "fa"
+		}
+	}
+
 	id := newSessionID()
 	s := &Session{
 		ID:        id,
@@ -283,6 +294,7 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (*Session, error)
 		MediaURL:  media.URL,
 		MediaKind: media.Kind,
 		TabTitle:  tabTitle,
+		AudioLang: audioLang,
 		state:     StateStarting,
 		detail:    "allocated",
 		created:   time.Now(),

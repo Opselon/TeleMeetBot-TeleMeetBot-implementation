@@ -72,3 +72,82 @@ func TestCorruptFileSurvives(t *testing.T) {
 		t.Fatal("corrupt file was not preserved for forensics")
 	}
 }
+
+func TestUserPreferencesPersistAndIsolate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	st := Load(path)
+
+	// Defaults to "fa" (Persian)
+	if got := st.AudioLang(1001); got != "fa" {
+		t.Fatalf("expected default audio lang 'fa', got %q", got)
+	}
+
+	// Set English for user 1001
+	if err := st.SetAudioLang(1001, "en"); err != nil {
+		t.Fatalf("set audio lang: %v", err)
+	}
+
+	// Set Original for user 1002
+	if err := st.SetAudioLang(1002, "orig"); err != nil {
+		t.Fatalf("set audio lang: %v", err)
+	}
+
+	// User 1003 is unset, must still be default "fa"
+	if got := st.AudioLang(1003); got != "fa" {
+		t.Fatalf("user 1003 should be 'fa', got %q", got)
+	}
+
+	if got := st.AudioLang(1001); got != "en" {
+		t.Fatalf("user 1001 should be 'en', got %q", got)
+	}
+	if got := st.AudioLang(1002); got != "orig" {
+		t.Fatalf("user 1002 should be 'orig', got %q", got)
+	}
+
+	// Reload from disk and verify persistence across bot restart
+	st2 := Load(path)
+	if got := st2.AudioLang(1001); got != "en" {
+		t.Fatalf("after reload, user 1001 should be 'en', got %q", got)
+	}
+	if got := st2.AudioLang(1002); got != "orig" {
+		t.Fatalf("after reload, user 1002 should be 'orig', got %q", got)
+	}
+	if got := st2.AudioLang(1003); got != "fa" {
+		t.Fatalf("after reload, user 1003 should be 'fa', got %q", got)
+	}
+}
+
+func TestLegacyArrayStateMigratesCleanly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	legacyJSON := `[{"id":"s-old","meet_url":"https://meet.google.com/xyz","media_url":"https://x","title":"T","state":"ended","created_at":"2026-01-01T00:00:00Z"}]`
+	if err := os.WriteFile(path, []byte(legacyJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	st := Load(path)
+	recs := st.Records()
+	if len(recs) != 1 || recs[0].ID != "s-old" {
+		t.Fatalf("legacy records not loaded: %+v", recs)
+	}
+
+	// Audio language defaults to Persian
+	if got := st.AudioLang(555); got != "fa" {
+		t.Fatalf("expected 'fa', got %q", got)
+	}
+
+	// Saving a preference migrates file to object format cleanly
+	if err := st.SetAudioLang(555, "fa"); err != nil {
+		t.Fatalf("set audio lang: %v", err)
+	}
+	st.Add(Record{ID: "s-new", State: "starting"})
+
+	st2 := Load(path)
+	if len(st2.Records()) != 2 {
+		t.Fatalf("expected 2 records after migration, got %d", len(st2.Records()))
+	}
+	if got := st2.AudioLang(555); got != "fa" {
+		t.Fatalf("expected 'fa' on st2, got %q", got)
+	}
+}
