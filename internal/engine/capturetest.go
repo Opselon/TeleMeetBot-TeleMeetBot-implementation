@@ -9,9 +9,12 @@ import (
 	"github.com/go-rod/rod/lib/proto"
 )
 
-// captureProbeURL is the secure-context page that requests getDisplayMedia
-// (mediaDevices is unavailable on about:blank/data: pages). Overridable in tests.
-var captureProbeURL = "https://example.com/"
+// captureProbeURL optionally overrides the page that requests getDisplayMedia.
+// When empty (the default) the requester is served over loopback, so the
+// doctor neither needs internet egress nor fights the media proxy: a page that
+// cannot be loaded reports ERR_CONNECTION_CLOSED and hides real capture
+// failures.
+var captureProbeURL = ""
 
 // CaptureReport is the outcome of a real tab-capture probe.
 type CaptureReport struct {
@@ -39,11 +42,18 @@ func TestTabCapture(ctx context.Context, browserCfg BrowserConfig, meet MeetOpti
 	defer closeFn()
 
 	// 1) The media tab: animated canvas + a web-audio oscillator + pinned title.
+	// Served over loopback (secure context, no egress): a data: document is an
+	// opaque origin and its title is fine, but the capture target must behave
+	// like the real media tab.
 	mediaPage, err := newPage(b, browserCfg)
 	if err != nil {
 		return CaptureReport{}, err
 	}
-	if err := mediaPage.Timeout(30 * time.Second).Navigate(captureTestDoc()); err != nil {
+	mediaTarget, err := players.playerURL(captureTestDoc())
+	if err != nil {
+		return CaptureReport{}, fmt.Errorf("serve capture test page: %w", err)
+	}
+	if err := mediaPage.Timeout(30 * time.Second).Navigate(mediaTarget); err != nil {
 		return CaptureReport{}, fmt.Errorf("open capture test page: %w", err)
 	}
 	if err := mediaPage.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
@@ -62,7 +72,14 @@ func TestTabCapture(ctx context.Context, browserCfg BrowserConfig, meet MeetOpti
 		return CaptureReport{}, err
 	}
 	defer func() { _ = probe.Close() }()
-	if err := probe.Timeout(30 * time.Second).Navigate(captureProbeURL); err != nil {
+	probeTarget := captureProbeURL
+	if probeTarget == "" {
+		probeTarget, err = players.playerURL(`<!doctype html><html><head><meta charset="utf-8"><title>meet probe</title></head><body>probe</body></html>`)
+		if err != nil {
+			return CaptureReport{}, fmt.Errorf("serve capture probe page: %w", err)
+		}
+	}
+	if err := probe.Timeout(30 * time.Second).Navigate(probeTarget); err != nil {
 		return CaptureReport{}, err
 	}
 	select {
@@ -195,22 +212,5 @@ func captureTestDoc() string {
   lock(); setInterval(lock, 700);
 })();
 </script></body></html>`
-	return "data:text/html;charset=utf-8," + escapeDataURL(doc)
-}
-
-// escapeDataURL percent-encodes a document for a data: URL.
-func escapeDataURL(s string) string {
-	const hex = "0123456789ABCDEF"
-	var b []byte
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
-			c == '-', c == '_', c == '.', c == '!', c == '~', c == '*', c == '\'', c == '(', c == ')':
-			b = append(b, c)
-		default:
-			b = append(b, '%', hex[c>>4], hex[c&15])
-		}
-	}
-	return string(b)
+	return doc
 }

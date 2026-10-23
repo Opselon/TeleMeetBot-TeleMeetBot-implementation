@@ -145,8 +145,14 @@ func mediaControlJS(action string, arg float64) string {
 }`, argJS, act)
 }
 
-// titleLockJS keeps document.title pinned so Chromium's
-// auto-select-desktop-capture-source always finds the media tab by name.
+// titleLockJS keeps the tab titled `title` so Chromium's
+// auto-select-tab-capture-source-by-title finds the media tab. The lock must go
+// through the NATIVE document.title setter: the value Chromium matches on is the
+// browser-side (WebContents) title, which only changes when the native setter
+// runs. A JS-only override (getter returns T, setter is a no-op) leaves the tab
+// named after the real page — YouTube's title — so nothing matches, Chromium's
+// picker waits for a user that headless cannot provide, and Meet sits on
+// "Presentation is starting..." until the share flow times out.
 func titleLockJS(title string) string {
 	t, _ := json.Marshal(title)
 	return fmt.Sprintf(`() => {
@@ -155,33 +161,32 @@ func titleLockJS(title string) string {
     if (!window.__tmOrigTitle) window.__tmOrigTitle = document.title;
   } catch (e) {}
 
-  // Override document.title setter/getter so single-page apps like YouTube
-  // cannot mutate the tab title away from T.
+  const desc = Object.getOwnPropertyDescriptor(Document.prototype, "title");
+  const nativeSet = desc && desc.set;
+  const nativeGet = desc && desc.get;
+  const applyNative = () => {
+    try {
+      if (nativeSet) nativeSet.call(document, T);
+      else document.title = T;
+    } catch (e) {}
+  };
+
+  // SPA title writes (YouTube updates its title constantly) are redirected to
+  // the locked title instead of being swallowed.
   try {
-    Object.defineProperty(document, 'title', {
+    Object.defineProperty(document, "title", {
       configurable: true,
       enumerable: true,
       get: () => T,
-      set: () => {}
+      set: () => { applyNative(); }
     });
   } catch (e) {}
 
-  const lock = () => {
-    try {
-      if (document.title !== T) {
-        Object.defineProperty(document, 'title', {
-          configurable: true,
-          enumerable: true,
-          get: () => T,
-          set: () => {}
-        });
-      }
-    } catch (e) {}
-  };
-  lock();
+  applyNative();
+  const lock = () => { applyNative(); };
   try { if (window.__tmTitleLock) clearInterval(window.__tmTitleLock); } catch (e) {}
-  window.__tmTitleLock = setInterval(lock, 250);
-  return document.title;
+  window.__tmTitleLock = setInterval(lock, 500);
+  try { return nativeGet ? nativeGet.call(document) : T; } catch (e) { return T; }
 }`, t)
 }
 
