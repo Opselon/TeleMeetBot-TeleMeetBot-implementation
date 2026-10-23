@@ -11,26 +11,10 @@ import (
 )
 
 // MediaProbeSample is one periodic reading of the media tab: playback position
-// plus the actual painted pixels of the media element. The pixel means are
-// what decides "green screen" vs "really rendering" — the same thing meeting
-// participants see on the share.
-type MediaProbeSample struct {
-	Current     float64 `json:"cur"`
-	Duration    float64 `json:"dur"`
-	Paused      bool    `json:"paused"`
-	Muted       bool    `json:"muted"`
-	Ready       int     `json:"ready"`
-	Width       int     `json:"w"`
-	Height      int     `json:"h"`
-	MeanR       float64 `json:"r"`
-	MeanG       float64 `json:"g"`
-	MeanB       float64 `json:"b"`
-	Painted     bool    `json:"painted"`
-	DrawErr     string  `json:"drawErr"`
-	ElementErr  string  `json:"elementErr"`
-	Src         string  `json:"src"`
-	PlayerTitle string  `json:"title"`
-}
+// plus the actual painted pixels of the media element. It is the same sample the
+// session uses to gate streaming (playback.go), so the probe and the live path
+// can never disagree about what "playing" means.
+type MediaProbeSample = PlaybackSample
 
 // MediaProbeReport is the verdict of ProbeMedia.
 type MediaProbeReport struct {
@@ -52,70 +36,15 @@ type MediaProbeReport struct {
 	BodyText      string    `json:"bodyText"`
 	YTPlayerState string    `json:"ytState"`
 	Verdict       string    `json:"verdict"`
-}
 
-// pixelSampleJS finds the best media element and reports status + rendered
-// pixel colours. Must stay in function form (no IIFE wrap) for rod's Eval —
-// guarded by TestMediaProbeScriptShape.
-func pixelSampleJS() string {
-	return `() => {
-  const out = {cur: 0, dur: 0, paused: true, muted: true, ready: 0, w: 0, h: 0,
-               r: 0, g: 0, b: 0, painted: false, drawErr: "", elementErr: "",
-               src: "", title: ""};
-  const items = [];
-  const walk = (doc, depth) => {
-    if (!doc || depth > 6) return;
-    let vids = [];
-    try { vids = Array.from(doc.querySelectorAll('video,audio')); } catch (e) { return; }
-    for (const v of vids) {
-      let r = {width: 0, height: 0};
-      try { r = v.getBoundingClientRect(); } catch (e) {}
-      const area = Math.max(0, r.width | 0) * Math.max(0, r.height | 0);
-      const dur = isFinite(v.duration) ? v.duration : 0;
-      let score = area + (dur > 0 ? 500000 : 0) + (v.paused ? 0 : 250000);
-      if (v.ended) score -= 1000;
-      items.push({v, score});
-    }
-    let frames = [];
-    try { frames = Array.from(doc.querySelectorAll('iframe')); } catch (e) {}
-    for (const f of frames) {
-      try { walk(f.contentDocument, depth + 1); } catch (e) {}
-    }
-  };
-  walk(document, 0);
-  if (!items.length) { out.drawErr = "no media element"; return JSON.stringify(out); }
-  items.sort((a, b) => b.score - a.score);
-  const v = items[0].v;
-  const r = v.getBoundingClientRect();
-  out.w = Math.round(r.width); out.h = Math.round(r.height);
-  out.paused = !!v.paused; out.muted = !!v.muted;
-  out.cur = v.currentTime || 0;
-  out.dur = isFinite(v.duration) ? v.duration : 0;
-  out.ready = v.readyState || 0;
-  out.src = String(v.currentSrc || v.src || "").slice(0, 200);
-  if (v.error) out.elementErr = "media error " + (v.error.code || "?") + " " + (v.error.message || "");
-  try {
-    const og = document.querySelector('meta[property="og:title"], meta[name="og:title"]');
-    out.title = (og && og.content) || window.__tmOrigTitle || document.title || "";
-  } catch (e) {}
-  try {
-    const c = document.createElement("canvas");
-    c.width = 96; c.height = 54;
-    const ctx = c.getContext("2d", {willReadFrequently: true});
-    if (v.readyState < 2) {
-      out.drawErr = "readyState " + v.readyState + " (not enough data)";
-    } else {
-      ctx.drawImage(v, 0, 0, c.width, c.height);
-      const d = ctx.getImageData(0, 0, c.width, c.height).data;
-      let rs = 0, gs = 0, bs = 0;
-      for (let p = 0; p < d.length; p += 4) { rs += d[p]; gs += d[p+1]; bs += d[p+2]; }
-      const n = d.length / 4;
-      out.r = rs / n; out.g = gs / n; out.b = bs / n;
-      out.painted = n > 0;
-    }
-  } catch (e) { out.drawErr = String(e).slice(0, 160); }
-  return JSON.stringify(out);
-}`
+	// Consent + surface diagnostics: what the tab looked like before playback.
+	ConsentPresent bool    `json:"consentPresent"`
+	Consent        string  `json:"consent"`
+	Viewport       string  `json:"viewport"`
+	OverlayFree    bool    `json:"overlayFree"`
+	ReadyState     int     `json:"readyState"`
+	Advance        float64 `json:"advance"`
+	Verification   string  `json:"verification"`
 }
 
 // codecSupportJS reports which codecs this page's browser can decode via MSE —
@@ -233,6 +162,34 @@ func ProbeMedia(ctx context.Context, browserCfg BrowserConfig, link string, seco
 
 	rep := MediaProbeReport{URL: target, Kind: mt.Kind}
 
+	// Consent wall, then surface fit, then a buffered video: the same three
+	// steps a session performs before it shares the tab.
+	if res, err := dismissConsent(p, log, 25*time.Second); err != nil {
+		rep.ConsentPresent = true
+		rep.Consent = "not dismissed: " + err.Error()
+		log.Warnf("[PIPELINE:media-probe] consent: %v", err)
+	} else if res.Present {
+		rep.ConsentPresent = false
+		rep.Consent = res.describe()
+		log.Infof("[PIPELINE:media-probe] consent %s", res.describe())
+	} else {
+		rep.Consent = "no consent wall"
+	}
+	if fit, err := fitMediaTab(p, browserCfg, log); err != nil {
+		log.Warnf("[PIPELINE:media-probe] fit: %v", err)
+	} else {
+		rep.Viewport = fmt.Sprintf("%dx%d (screen %dx%d, video %dx%d)", fit.ViewportW, fit.ViewportH, fit.ScreenW, fit.ScreenH, fit.VideoW, fit.VideoH)
+		rep.OverlayFree = fit.OverlayFree
+		log.Infof("[PIPELINE:media-probe] surface %s", fit.describe())
+	}
+	if st, err := waitMediaReady(p, log, 30*time.Second); err != nil {
+		rep.Verdict = err.Error()
+		log.Warnf("[PIPELINE:media-probe] not ready: %v", err)
+	} else {
+		rep.ReadyState = st.Ready
+		log.Infof("[PIPELINE:media-probe] video ready: %s", st.describe())
+	}
+
 	// What did YouTube's own player decide? playabilityStatus names the real
 	// blocker (bot check, unavailable, region, age) even when the UI hides it.
 	if diag, err := p.Timeout(5 * time.Second).Eval(`() => JSON.stringify({yt: typeof window.YT, player: !!window.__tmYT, pending: !!window.__tmYTPending, ytErr: window.__tmYTError || "", iframes: document.querySelectorAll("iframe").length, scripts: Array.from(document.scripts).map(s => s.src).filter(Boolean).slice(0, 4), title: document.title})`); err == nil {
@@ -272,12 +229,20 @@ func ProbeMedia(ctx context.Context, browserCfg BrowserConfig, link string, seco
 		log.Infof("[PIPELINE:media-probe] page problem %s", problem)
 	}
 
-	// Start playback the same way playMedia does.
+	// Start playback the same way playMedia does: press play, then require the
+	// position to advance with real (non-black) frames before sampling.
 	if _, err := p.Timeout(6 * time.Second).Eval(mediaControlJS("unmute", 0)); err != nil {
 		log.Debugf("media probe: unmute failed: %v", err)
 	}
-	if _, err := p.Timeout(6 * time.Second).Eval(mediaControlJS("play", 0)); err != nil {
-		log.Debugf("media probe: play failed: %v", err)
+	if ver, err := ensurePlayback(p, log, 1.0, 12*time.Second); err != nil {
+		rep.Verification = err.Error()
+		if rep.PageProblem == "" {
+			rep.PageProblem = strings.TrimSpace(ver.Problem)
+		}
+		log.Warnf("[PIPELINE:media-probe] playback verification failed: %v", err)
+	} else {
+		rep.Advance = ver.Advance
+		log.Infof("[PIPELINE:media-probe] playback verified: %s", ver.describe())
 	}
 	log.Infof("[PIPELINE:media-probe] play started, sampling %ds", seconds)
 
@@ -289,24 +254,37 @@ func ProbeMedia(ctx context.Context, browserCfg BrowserConfig, link string, seco
 			return rep, ctx.Err()
 		default:
 		}
-		res, err := p.Timeout(6 * time.Second).Eval(pixelSampleJS())
+		s, err := readPlaybackSample(p)
 		if err != nil {
 			log.Debugf("media probe: sample failed: %v", err)
 		} else {
-			var s MediaProbeSample
-			if jerr := json.Unmarshal([]byte(res.Value.Str()), &s); jerr == nil {
-				samples = append(samples, s)
-				rep.Samples = len(samples)
-				log.Infof("[PIPELINE:media-probe] sample %d cur=%.2f/%.2f paused=%t rgb=(%.0f,%.0f,%.0f) size=%dx%d draw=%q elem=%q",
-					len(samples), s.Current, s.Duration, s.Paused, s.MeanR, s.MeanG, s.MeanB, s.Width, s.Height, s.DrawErr, s.ElementErr)
-				if s.ElementErr != "" {
-					rep.PlayerErr = s.ElementErr
+			samples = append(samples, s)
+			rep.Samples = len(samples)
+			rep.ReadyState = s.Ready
+			log.Infof("[PIPELINE:media-probe] sample %d cur=%.2f/%.2f paused=%t rgb=(%.0f,%.0f,%.0f) size=%dx%d consent=%t draw=%q elem=%q",
+				len(samples), s.Current, s.Duration, s.Paused, s.MeanR, s.MeanG, s.MeanB, s.Width, s.Height, s.Consent, s.DrawErr, s.ElementErr)
+			if s.Consent {
+				// The wall can mount after playback starts; clear it mid-sample so
+				// the verdict reflects the page the meeting would actually see.
+				rep.Consent = fmt.Sprintf("wall on screen mid-probe (surface=%q)", s.Surface)
+				log.Infof("[PIPELINE:media-probe] consent wall mid-probe; dismissing")
+				if res, derr := dismissConsent(p, log, 12*time.Second); derr != nil {
+					rep.ConsentPresent = true
+					log.Warnf("[PIPELINE:media-probe] consent dismissal: %v", derr)
+				} else if res.Dismissed {
+					log.Infof("[PIPELINE:media-probe] consent %s", res.describe())
+					rep.Consent = res.describe()
+				} else {
+					rep.ConsentPresent = true
 				}
-				if s.DrawErr != "" && strings.Contains(s.DrawErr, "no media element") && rep.PageProblem == "" {
-					prob := pageProblemOn(p)
-					if prob != "" {
-						rep.PageProblem = prob
-					}
+			}
+			if s.ElementErr != "" {
+				rep.PlayerErr = s.ElementErr
+			}
+			if s.DrawErr != "" && strings.Contains(s.DrawErr, "no media element") && rep.PageProblem == "" {
+				prob := pageProblemOn(p)
+				if prob != "" {
+					rep.PageProblem = prob
 				}
 			}
 		}
@@ -355,7 +333,14 @@ func classifyProbe(rep *MediaProbeReport, samples []MediaProbeSample) {
 	rep.MeanB = bSum / float64(len(samples))
 	rep.Painted = painted >= len(samples)/2 && painted > 0
 	rep.Position, rep.Duration = samples[len(samples)-1].Current, samples[len(samples)-1].Duration
+	rep.Advance = maxCur - minCur
 	rep.Progressed = (maxCur-minCur) >= 0.4 || maxCur > 2
+	if s := samples[len(samples)-1]; s.Consent {
+		rep.ConsentPresent = true
+		if rep.Consent == "" {
+			rep.Consent = fmt.Sprintf("consent wall on screen (surface=%q)", s.Surface)
+		}
+	}
 
 	// Green: decode failed but the compositor still pushes frames — the archetypal
 	// signature is a channel dominated by green while red/blue stay near zero.
@@ -388,6 +373,8 @@ func classifyProbe(rep *MediaProbeReport, samples []MediaProbeSample) {
 	rep.BlackFrames = painted > 0 && !rep.Progressed && black == len(last2)
 
 	switch {
+	case rep.ConsentPresent:
+		rep.Verdict = "a consent wall is on screen — the share would show the cookie dialog, not the video (" + rep.Consent + ")"
 	case rep.PageProblem != "":
 		rep.Verdict = "page shows an error: " + rep.PageProblem
 	case len(samples) > 0 && strings.Contains(samples[0].DrawErr, "no media element"):

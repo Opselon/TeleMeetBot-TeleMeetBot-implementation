@@ -9,10 +9,15 @@ import (
 // form, never IIFE-wrapped (an IIFE breaks rod's Eval).
 func TestMediaProbeScriptShape(t *testing.T) {
 	for name, js := range map[string]string{
-		"pixelSampleJS":   pixelSampleJS(),
-		"codecSupportJS":  codecSupportJS(),
-		"playerProblemJS": playerProblemJS(),
-		"tabAliveJS":      tabAliveJS(),
+		"playbackSampleJS":  playbackSampleJS(),
+		"readyStateJS":      readyStateJS(),
+		"mediaFitJS":        mediaFitJS(),
+		"consentProbeJS":    consentProbeJS(),
+		"consentClickJS":    consentClickJS(""),
+		"consentClickJSAlt": consentClickJS("accept"),
+		"codecSupportJS":    codecSupportJS(),
+		"playerProblemJS":   playerProblemJS(),
+		"tabAliveJS":        tabAliveJS(),
 	} {
 		if !strings.HasPrefix(js, "() => {") {
 			t.Errorf("%s must be function form for rod Eval", name)

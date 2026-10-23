@@ -283,14 +283,31 @@ func (s *Session) cleanup() {
 	s.emit(EventEnded, "session closed")
 }
 
-// watch keeps cached media stats fresh and detects a dead share/page.
+// maxMediaRecoveries bounds self-healing so a genuinely broken link cannot spin
+// forever; the share stays up either way and the log carries the diagnostics.
+const maxMediaRecoveries = 5
+
+// watch keeps cached media stats fresh, self-heals the media tab and detects a
+// dead share/page.
+//
+// Media recovery NEVER re-presents: getDisplayMedia is bound to the media tab, so
+// dismissing a consent wall, re-fitting the surface or replaying the same tab is
+// invisible to the meeting. Only a share Meet itself dropped is re-presented, and
+// only after two consecutive misses so a single slow poll cannot cost a re-click.
 func (s *Session) watch() {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	presentTries := 0
+	presentMisses := 0
 	lastPresentCheck := time.Now()
 	lastLog := time.Now()
+	lastMediaCheck := time.Now()
+	lastRecovery := time.Time{}
+	recoveries := 0
 	deadPolls := 0
+	stalled := 0
+	lastCur := -1.0
+	exhaustedLogged := false
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -316,6 +333,16 @@ func (s *Session) watch() {
 			if st.Error != "" {
 				s.setDetail("player error: " + st.Error)
 			}
+			// A frozen position with a "playing" player is a stall (buffering,
+			// a rotated consent wall, a dead decoder) even when paused=false.
+			if st.Count > 0 && !st.Paused {
+				if lastCur >= 0 && st.CurrentTime-lastCur < 0.05 {
+					stalled++
+				} else {
+					stalled = 0
+				}
+			}
+			lastCur = st.CurrentTime
 		}
 
 		// Heartbeat log every 10 seconds for real-time diagnostics
@@ -327,22 +354,68 @@ func (s *Session) watch() {
 			s.mu.RUnlock()
 		}
 
-		// Verify the presentation is still up; re-present a bounded number of
-		// times (Meet sometimes drops a share on network hiccups).
-		if time.Since(lastPresentCheck) > 15*time.Second {
-			lastPresentCheck = time.Now()
-			if ok, _ := s.presenting(); !ok {
-				if presentTries >= 3 {
-					s.setDetail("sharing stopped and could not be resumed; leaving")
-					s.setError(errors.New("screen share was dropped by Google Meet"))
-					return
+		// Self-heal the media tab: a consent wall can appear mid-stream, and the
+		// player can stall. Repair the media tab only — never the share.
+		if s.snapshotState() == StateStreaming && time.Since(lastMediaCheck) >= 10*time.Second {
+			lastMediaCheck = time.Now()
+			reason := ""
+			if stalled >= 3 {
+				reason = fmt.Sprintf("playback position frozen for %ds", stalled*2)
+			}
+			if h, st2, _ := s.mediaHealth(); h != "" {
+				reason = h
+				if st2.Consent {
+					s.log.Warnf("[PIPELINE:recovery] session %s: consent wall mid-stream (%s): %s", s.ID, st2.Surface, st2.describe())
 				}
-				presentTries++
-				s.log.Warnf("session %s: share not detected, re-presenting (%d/3)", s.ID, presentTries)
-				if err := s.startPresenting(); err != nil {
-					s.log.Warnf("session %s: re-present failed: %v", s.ID, err)
+			}
+			switch {
+			case reason == "":
+				recoveries = 0
+				exhaustedLogged = false
+			case recoveries >= maxMediaRecoveries:
+				if !exhaustedLogged {
+					exhaustedLogged = true
+					s.log.Errorf("[PIPELINE:recovery] session %s: %s; %d recovery attempts already failed — share left up, run `--media-probe <link>` for the media diagnostics", s.ID, reason, recoveries)
+					s.setDetail("[6/6] Media unhealthy: " + reason)
+				}
+			case time.Since(lastRecovery) >= 20*time.Second:
+				recoveries++
+				lastRecovery = time.Now()
+				stalled = 0
+				if rerr := s.recoverMedia(reason); rerr != nil {
+					s.log.Errorf("[PIPELINE:recovery] session %s: attempt %d failed: %v", s.ID, recoveries, rerr)
+					s.setDetail("[6/6] Media recovery failed: " + rerr.Error())
 				} else {
-					_ = s.playMedia()
+					lastCur = -1
+				}
+			}
+		}
+
+		// Verify the presentation is still up; re-present a bounded number of
+		// times (Meet sometimes drops a share on network hiccups). Two
+		// consecutive misses are required: one slow eval must not cost a
+		// needless Share Screen click.
+		if time.Since(lastPresentCheck) > 8*time.Second {
+			lastPresentCheck = time.Now()
+			if ok, _ := s.presenting(); ok {
+				presentMisses = 0
+			} else {
+				presentMisses++
+				s.log.Warnf("[PIPELINE:present] session %s: presenting() false (%d/2 consecutive)", s.ID, presentMisses)
+				if presentMisses >= 2 {
+					presentMisses = 0
+					if presentTries >= 3 {
+						s.setDetail("sharing stopped and could not be resumed; leaving")
+						s.setError(errors.New("screen share was dropped by Google Meet"))
+						return
+					}
+					presentTries++
+					s.log.Warnf("session %s: share not detected, re-presenting (%d/3)", s.ID, presentTries)
+					if err := s.startPresenting(); err != nil {
+						s.log.Warnf("session %s: re-present failed: %v", s.ID, err)
+					} else {
+						_ = s.playMedia()
+					}
 				}
 			}
 		}
@@ -420,12 +493,6 @@ func (s *Session) openMedia() error {
 	}
 	_ = p.WaitLoad()
 
-	// Consent/interstitial walls (YouTube in the EU, etc.).
-	s.log.Infof("[PIPELINE:media] session %s: clearing interstitials...", s.ID)
-	if err := s.clearMediaInterstitials(p); err != nil {
-		return err
-	}
-
 	// Keep the tab title stable so Chromium's auto-select capture-source finds it.
 	if _, err := p.Eval(titleLockJS(s.TabTitle)); err != nil {
 		s.log.Debugf("session %s: title lock failed: %v", s.ID, err)
@@ -436,13 +503,13 @@ func (s *Session) openMedia() error {
 		s.log.Infof("[PIPELINE:media] session %s: media tab title locked to %q (current=%v)", s.ID, s.TabTitle, curTitle.Value)
 	}
 
+	// Consent walls, surface fitting and the buffered-video wait. The wall is
+	// cleared BEFORE the cosmetic CSS is installed: a hidden dialog cannot be
+	// clicked, and the video never paints while the lightbox owns the page.
 	s.setState(StateJoining, "[2/6] Waiting for playable video")
-	s.log.Infof("[PIPELINE:media] session %s: waiting for playable media element...", s.ID)
-	if err := s.waitMedia(35 * time.Second); err != nil {
-		if prob := s.playerProblem(); prob != "" {
-			return fmt.Errorf("media unavailable: %s", prob)
-		}
-		return fmt.Errorf("no playable media found on %s (%s)", s.MediaURL, errHelpURL)
+	s.log.Infof("[PIPELINE:media] session %s: preparing the media surface (consent → fit → ready)...", s.ID)
+	if err := s.prepareMedia(p); err != nil {
+		return err
 	}
 	if s.playerOpts.Mute {
 		_, _ = s.mediaAction("mute", 0)
@@ -687,44 +754,42 @@ func (s *Session) startPresenting() error {
 		timeout, lastState, s.captureTabTitles())
 }
 
-// playMedia starts playback after the share is live, retrying a few times
-// because YouTube's player sometimes swallows the first startPrompt while it
-// is still wiring up its own autoplay logic.
+// playMedia starts playback after the share is live and proves it: the position
+// must advance and the frames must be real pixels (not black, not decoder-green).
+// A consent wall that lands between opening the tab and the share going live is
+// cleared here without touching the Meet presentation.
 func (s *Session) playMedia() error {
-	var lastErr error
-	for attempt := 1; attempt <= 3; attempt++ {
-		if _, err := s.mediaAction("unmute", 0); err != nil {
-			lastErr = err
-		}
-		st, err := s.mediaAction("play", 0)
-		if err != nil {
-			lastErr = err
-		} else {
-			s.mu.Lock()
-			s.paused = st.Paused
-			s.muted = st.Muted
-			s.volume = int(st.Volume*100 + 0.5)
-			s.rate = st.PlaybackRate
-			if st.Title != "" {
-				s.title = st.Title
-			}
-			s.cur = st.CurrentTime
-			s.dur = st.Duration
-			s.mu.Unlock()
-			if !st.Paused {
-				if attempt > 1 {
-					s.log.Infof("[PIPELINE:media] session %s: media playing on attempt %d", s.ID, attempt)
-				}
-				return nil
-			}
-			lastErr = fmt.Errorf("player still paused (pos=%.1fs)", st.CurrentTime)
-		}
-		s.log.Warnf("[PIPELINE:media] session %s: play attempt %d/3 failed: %v", s.ID, attempt, lastErr)
-		if err := s.ctxSleep(2 * time.Second); err != nil {
-			return err
-		}
+	media := s.mediaTab()
+	if media == nil {
+		return errors.New("media page is not available")
 	}
-	return lastErr
+	if res, err := dismissConsent(media, s.log, 15*time.Second); err != nil {
+		s.log.Warnf("[PIPELINE:playback] session %s: consent check before play: %v", s.ID, err)
+	} else if res.Present {
+		s.log.Infof("[PIPELINE:playback] session %s: consent %s", s.ID, res.describe())
+	}
+	if st, err := s.mediaAction("unmute", 0); err == nil {
+		s.mu.Lock()
+		s.muted = st.Muted
+		s.volume = int(st.Volume*100 + 0.5)
+		if st.Title != "" {
+			s.title = st.Title
+		}
+		s.mu.Unlock()
+	}
+	rep, err := ensurePlayback(media, s.log, 1.0, 20*time.Second)
+	s.mu.Lock()
+	s.cur, s.dur, s.paused = rep.Current, rep.Duration, rep.Paused
+	s.mediaErr = rep.DrawErr
+	if rep.Title != "" {
+		s.title = rep.Title
+	}
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	s.log.Infof("[PIPELINE:playback] session %s: %s", s.ID, rep.describe())
+	return nil
 }
 
 // ctxSleep sleeps for d, aborting early if the session is cancelled.
@@ -873,51 +938,12 @@ func (s *Session) reopenMedia() error {
 	}
 	_ = media.WaitLoad()
 	_, _ = media.Eval(titleLockJS(s.TabTitle))
-	return s.waitMedia(25 * time.Second)
+	return s.prepareMedia(media)
 }
 
 // queryMedia reads the media status JSON from the page.
 func (s *Session) queryMedia() (mediaStatus, error) {
 	return s.mediaAction("status", 0)
-}
-
-// waitMedia waits until a media element with metadata exists.
-func (s *Session) waitMedia(timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	var last string
-	found := false
-	for time.Now().Before(deadline) {
-		if s.ctx.Err() != nil {
-			return s.ctx.Err()
-		}
-		st, err := s.queryMedia()
-		if err == nil && st.Count > 0 {
-			if !found {
-				found = true
-				s.log.Infof("[PIPELINE:media] session %s: media element found (dur=%.1fs paused=%t src=%s)",
-					s.ID, st.Duration, st.Paused, truncateStr(st.Src, 60))
-			}
-			// A <video> tag shows up before the stream is buffered. Waiting for a
-			// known duration (or an element already playing) means the first
-			// play() lands on real media instead of an empty frame — the
-			// difference between a green share and a real one.
-			if st.Duration > 0 || !st.Paused {
-				return nil
-			}
-		}
-		if err != nil {
-			last = err.Error()
-		}
-		time.Sleep(700 * time.Millisecond)
-	}
-	if found {
-		s.log.Warnf("[PIPELINE:media] session %s: media element present but never buffered (last=%q); continuing", s.ID, last)
-		return nil
-	}
-	if last == "" {
-		last = "timeout"
-	}
-	return errors.New(last)
 }
 
 // truncateStr shortens s for log lines.
@@ -958,30 +984,4 @@ func (s *Session) playerProblem() string {
 	return strings.TrimSpace(res.Value.Str())
 }
 
-// clearMediaInterstitials dismisses consent dialogs for YouTube/Google.
-func (s *Session) clearMediaInterstitials(p *rod.Page) error {
-	url := strings.ToLower(p.MustInfo().URL)
-	if strings.Contains(url, "consent.") {
-		for i := 0; i < 3; i++ {
-			if clicked, _ := clickByText(p, []string{"accept all", "i agree", "agree to all"}, 2*time.Second); clicked {
-				time.Sleep(1500 * time.Millisecond)
-			}
-			if !strings.Contains(strings.ToLower(p.MustInfo().URL), "consent.") {
-				break
-			}
-		}
-	}
-	// YouTube in-page consent / cookie buttons
-	_, _ = p.Timeout(3 * time.Second).Eval(`() => {
-		const norm = x => (x || "").toLowerCase().trim();
-		const btns = Array.from(document.querySelectorAll('button, [role=button]'));
-		for (const b of btns) {
-			const t = norm((b.getAttribute('aria-label') || "") + " " + (b.innerText || ""));
-			if (t === "accept all" || t === "reject all" || t === "i agree" || t === "agree to all" || t.includes("accept the use of cookies") || t === "reject") {
-				try { b.click(); return t; } catch (e) {}
-			}
-		}
-		return "";
-	}`)
-	return nil
-}
+// Consent walls are handled by dismissConsent (consent.go).

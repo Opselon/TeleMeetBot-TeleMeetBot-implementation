@@ -28,7 +28,8 @@ func runMediaProbe(mediaLink string, seconds int, cfg *config.Config, log *slogL
 	}
 	out, _ := json.MarshalIndent(rep, "", "  ")
 	fmt.Println(string(out))
-	if rep.Progressed && !rep.GreenFrames && !rep.BlackFrames && rep.PageProblem == "" && rep.PlayerErr == "" {
+	if rep.Progressed && !rep.GreenFrames && !rep.BlackFrames && !rep.ConsentPresent &&
+		rep.PageProblem == "" && rep.PlayerErr == "" && rep.Verification == "" {
 		return nil
 	}
 	return fmt.Errorf("media verdict: %s", rep.Verdict)
