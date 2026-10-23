@@ -1,0 +1,104 @@
+---
+title: Security model
+description: How TeleMeetBot gates access, what it exposes on the network, how secrets and session history are stored, and the risks you accept by running it.
+group: Operations
+order: 4
+keywords: ['security', 'allow-list', 'token', 'sandbox', 'privacy', 'health']
+---
+
+import Callout from '../../components/Callout.astro';
+
+TeleMeetBot runs a real browser that joins real meetings. Treat it as a privileged automation host,
+not as a stateless utility.
+
+## Access control
+
+- **Fail-closed allow-list.** Every Telegram update is authorised against `telegram.admins` before it
+  is parsed. There is no password, no invite link and no second factor.
+- **First-start claim.** When the allow-list is empty and `first_start_claims_admin` is true, the first
+  `/start` becomes the sole admin. This exists to make a fresh install usable; turn it off afterwards.
+- **Nobody, by default, in hardened mode.** If the allow-list is empty and the claim is disabled,
+  validation aborts startup rather than running an unusable bot.
+- **Strangers get one message.** It contains their numeric id and nothing about sessions, config or
+  meetings.
+
+<Callout type="danger" title="Whoever holds the token controls the bot">
+The bot talks to Telegram with a bot token. Anyone who obtains that token can poll updates as the bot
+and read its messages. Rotate the token with @BotFather and restart after any suspected exposure.
+</Callout>
+
+## Network surface
+
+Nothing but the health listener is exposed, and it is read-only:
+
+```bash
+curl -s http://127.0.0.1:18080/livez        # ok
+curl -s http://127.0.0.1:18080/healthz      # sessions, browser, disk, uptime
+```
+
+Bind `server.health_addr` to `127.0.0.1` (the default) and put a reverse proxy in front if it must be
+reachable from elsewhere. Docker publishes the port on loopback only; do not change that unless you
+add authentication in front of it. There is no endpoint that starts, stops or controls a session.
+
+| Surface | Direction | Contents |
+|---|---|---|
+| Telegram Bot API | Outbound long polling | Updates and messages; no inbound port |
+| `/healthz`, `/livez` | Inbound, loopback by default | Read-only JSON/plain text; `GET`/`HEAD` only |
+| `meet.google.com` | Outbound HTTPS | The meeting UI |
+| Media host | Outbound HTTPS | The link you asked it to play |
+
+There are no remote control endpoints, no admin panel and no file browser. `/healthz` does reveal the
+config path, the Chromium path, the version and the active session count — enough to fingerprint a
+host, which is why it should stay local or sit behind TLS and authentication.
+
+The optional `browser.proxy` applies to media traffic; Meet and Google accounts are added to the proxy
+bypass list so the join flow never depends on the proxy.
+
+## Process and browser isolation
+
+- Chromium runs with `--no-sandbox` (through rod's launcher). This is common in containers and required
+  for many minimal images, but it means the browser's own sandbox is not a security boundary here.
+- A per-session profile directory is created for Chromium and removed when the browser closes.
+  `browser.per_session: false` shares one browser across sessions, which trades isolation for memory.
+- Chromium is launched with `--disable-dev-shm-usage`, a fixed window size, a stock Chrome user agent
+  and automation flags removed from the fingerprint where possible.
+- The Docker image runs as uid 10001 with no login shell, and the systemd unit sets
+  `NoNewPrivileges=true` and `ProtectSystem=full`. Chromium still needs write access to its temp
+  directory, so a fully read-only filesystem is not supported.
+- The bot's own process has full access to the config file, the data directory and the media links it
+  is asked to open. Run it as a dedicated user; do not run it as root on a shared host.
+
+## Secrets and stored data
+
+| Item | Where | Protection |
+|---|---|---|
+| Bot token | `telegram.token` in the YAML config | Config saved atomically with mode `0600`; the installer stages the template as `0640` |
+| Admin ids | `telegram.admins` | Not secret, but identifies operators |
+| Session history | `state.json` in `paths.data_dir` | Contains meeting URLs and timestamps; capped at 50 records |
+| Chromium profile | Per-session temp directory | Removed when the session ends |
+| Media URLs | Session history and logs | May embed signed query strings — treat logs as sensitive |
+
+The wizard masks the token when it prints the summary (`123456789:AA…`), but the token is written in
+plain text to the config. Protect the file, not the summary.
+
+## What you accept by running this
+
+- **Meeting content is processed by a browser.** Anything visible on a shared tab is visible to the
+  meeting. Do not point the bot at pages that show private data if the call has guests.
+- **Meeting URLs are recorded.** Anyone who can read the data directory learns which meetings the bot
+  attended.
+- **Playback is not authenticated.** A public link works; a link that requires your cookies or login
+  does not, and the bot will not try to log in for you.
+- **The bot is a guest.** Hosts can remove it, and meetings can restrict guests at any time.
+- **No warranty.** MIT licensed, provided as-is; you are responsible for consent to record or present
+  content in a meeting.
+
+## Reporting a security issue
+
+Open a GitHub issue at [Opselon/TeleMeetBot-TeleMeetBot-implementation](https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/issues)
+with a minimal reproduction and **no** bot token, meeting URL, config dump or log excerpt containing
+either. Private vulnerability reporting is not enabled on the repository, so the issue thread is the
+entry point; say explicitly what is sensitive and redact it before posting.
+
+Include: affected version (`telemeetbot --version`), the surface (Telegram, health, browser), and the
+impact you believe it has. Please do not test against meetings or bots you do not own.

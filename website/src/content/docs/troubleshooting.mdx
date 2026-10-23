@@ -1,0 +1,91 @@
+---
+title: Troubleshooting
+description: Symptom-by-symptom fixes for admission, presenting, playback, audio, permissions and container failures — plus the known limitations.
+group: Reference
+order: 3
+keywords: ['errors', 'fix', 'admission', 'present', 'playback', 'docker', 'limits']
+---
+
+import Callout from '../../components/Callout.astro';
+
+Start with the doctor, then narrow down with a probe. Most failures fall into one of four buckets:
+the meeting will not admit the bot, Meet will not start the share, the media will not play, or the
+process cannot run where it is installed.
+
+```bash
+telemeetbot --config telemeetbot.yml --check --capture-test
+telemeetbot --config telemeetbot.yml --media-probe "<media-url>" --probe-seconds 12
+telemeetbot --config telemeetbot.yml --probe "<meet-url>" --probe-seconds 90
+```
+
+## Admission and joining
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Card stays at `admitting` / “Waiting for host to admit bot” | The meeting restricts guests, or no host is present | Enable guest joining, or have a host admit “TeleMeet Bot” |
+| “You can't join this video call — no one can join unless invited or admitted by the host” | No host in the call; indistinguishable from a wrong or expired code | Wait for the host. The bot keeps re-requesting entry every 30 s until `meet.admit_wait_seconds` expires |
+| `admission timeout` | Nobody admitted the bot in time | Admit it, raise `meet.admit_wait_seconds`, or use `0` to wait forever |
+| Meeting ends immediately | Meeting full, ended, or the code is invalid | Those are the only fatal lobby conditions; check the code and the meeting state |
+| Bot never appears in the lobby | Wrong Meet URL or the join flow failed earlier | Run `--probe` and read the stage log; `meet.google.com` links only |
+
+## Presenting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `present flow timed out` | The Present button was not found or a source menu did not open | Use `logging.level: debug`, run `--check --capture-test`, and report the menu DOM if it persists |
+| “Presentation is starting…” forever | Chromium cannot match the capture source, usually because the tab title is not what the selector expects | Keep `meet.capture_source: "TeleMeet Media"` in tab mode; do not override the player title |
+| Present works but the meeting sees a blank tab | The media page painted nothing | `--media-probe` the link; check `painted`, `readyState` and `advance` |
+| Capture refused with `NotReadableError` | Auto-select found no matching source, or the browser was launched with conflicting fake-device flags | Remove `use-fake-device-for-media-stream` / `use-fake-ui-for-media-stream` from `browser.extra_args` |
+| Old Meet opened a source menu, new Meet did not | Meet ships two shapes of the flow | Both are handled; upgrade to the current release if only one works |
+
+<Callout type="warn" title="Meet UI language">
+The automation matches English labels. `browser.lang` must stay `en-US`, and the Google account (if
+any) must not force another UI language. A localised Meet looks like “no such element”.
+</Callout>
+
+## Playback
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `media doesn't play` | The page refuses to be embedded, needs a login, or the codec is unsupported | Check `playerProblem` / `playerErr` in the probe; use a direct file or a YouTube watch link |
+| “Before you continue to YouTube” is visible in the share | The consent wall was not cleared | The bot refuses to present an uncleared tab; run `--media-probe <url>` and read `consentPresent` / `consent` |
+| Sign in to confirm you're not a bot | Datacenter IP detected by YouTube | Set `browser.proxy` to a egress proxy; Meet bypasses it automatically |
+| Green rectangle instead of video | Chromium's fake camera device, or a `getDisplayMedia` fallback to a screen | Keep `headless: true`, remove fake-device flags, mute camera/mic on prejoin (the bot does) |
+| Black frames, position stuck at 0 | Video never started, blocked autoplay, or a codec problem | Probe the link; check `readyState`, `advance`, `meanR/G/B` |
+| No audio in the meeting | Capture had no audio track, or the player is muted | `--check --capture-test` must report `audio=true`; press 🔊 Unmute |
+| Playback restarts when the session recovers | A recovery reloads the media tab | Expected after a media reload; position is preserved where the page allows it |
+
+## Process, config and host
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `invalid config: …` at startup | A value failed validation | The message names the key; fix it or re-run `--wizard` |
+| `cannot load config` | Wrong path or unreadable file | Check `--config`, `TELEMEETBOT_CONFIG`, and file mode (`0600`) |
+| Telegram bot ignores you | Your id is not in `telegram.admins`, or the claim was already used | Add the id, restart, and use `/id` to confirm the number |
+| `/new` refuses to start | `limits.max_sessions` reached | Stop a session or raise the limit (max 8) |
+| `health port … address already in use` | Another instance or a stale process owns the port | Stop the other process, or change `server.health_addr` |
+| Chromium crashes repeatedly | Too little shared memory or RAM | `--shm-size=1g` (compose default), fewer sessions, more memory |
+| Container exits with `[FATAL tini] exec --config failed` | The binary name was omitted in a one-off command | `docker compose run --rm telemeetbot telemeetbot --wizard …` |
+| Config cannot be saved in Docker | Bind-mounted `./data` is not writable by uid 10001 | `sudo chown -R 10001:10001 ./data` |
+| New sessions fail after an upgrade | The browser path changed, or Meet/YouTube changed | Re-run `--check --capture-test` |
+| Sessions from before a restart vanished | Chromium is a child process; sessions do not survive a restart | Expected. The admin chat gets an interruption notice, history is kept |
+
+## Known limitations
+
+- **Guest join only.** Sign-in-only meetings cannot be joined.
+- **English Meet UI.** Localised UIs are not matched.
+- **One presenter per session.** Two sessions sharing the same meeting will compete for the presenter
+  role; Meet allows one.
+- **Unwired config keys.** `media.autoplay`, `media.loop` and `telegram.notify_chat_id` are parsed but
+  not read. Playback starts after the share is confirmed, the player always loops, and notifications go
+  to the launching chat. See [known gaps](/docs/configuration/#known-gaps).
+- **No control API.** Health is read-only; control is Telegram-only. There is no HTTP admin API and no
+  scheduling (both are roadmap items, not shipped features).
+- **No camera or layout compositing.** Tab mode shares one tab; screen mode shares a display.
+- **Playback depends on the source.** Pages that require a login, block framing, or refuse automated
+  browsers will not play, and there is no credential injection.
+
+## Reporting a defect
+
+Attach `telemeetbot --version`, the `--check` output, the failing `[PIPELINE:…]` lines at `debug`, and
+the probe output for the same link. Redact the bot token and any private meeting URL.

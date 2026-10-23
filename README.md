@@ -9,6 +9,8 @@ restart / stop** controls straight inside Telegram.
 
 No desktop environment. No Python/Selenium. No external automation service. One binary.
 
+**Documentation:** [opselon.github.io/TeleMeetBot-TeleMeetBot-implementation](https://opselon.github.io/TeleMeetBot-TeleMeetBot-implementation/) — install, configuration, Meet integration, playback troubleshooting, CLI and deployment.
+
 ```
                  ┌────────────────────────────── Telegram ──────────────────────────────┐
                  │  /start ──► live dashboard · cards refresh every few seconds         │
@@ -68,7 +70,7 @@ git clone https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation
 cd TeleMeetBot-TeleMeetBot-implementation
 
 # first run: interactive wizard writes ./data/telemeetbot.yml
-docker compose run --rm telemeetbot --wizard --config /data/telemeetbot.yml
+docker compose run --rm telemeetbot telemeetbot --wizard --config /data/telemeetbot.yml
 
 docker compose up -d
 docker compose logs -f

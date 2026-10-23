@@ -1,0 +1,65 @@
+{
+  "live": true,
+  "source": "api",
+  "fetchedAt": "2026-10-23T02:37:24.314Z",
+  "repo": {
+    "stars": 0,
+    "forks": 1,
+    "watchers": 0,
+    "openIssues": 0,
+    "language": "Go",
+    "license": "MIT",
+    "defaultBranch": "main",
+    "pushedAt": "2026-10-23T01:29:22Z"
+  },
+  "releases": [
+    {
+      "tag": "v1.0.0",
+      "name": "TeleMeetBot v1.0.0",
+      "publishedAt": "2026-10-22T15:59:16Z",
+      "createdAt": "2026-10-22T15:59:13Z",
+      "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/tag/v1.0.0",
+      "prerelease": false,
+      "draft": false,
+      "body": "# TeleMeetBot v1.0.0 — first release\n\n**The first public release: a 100% Go, headless Google Meet streaming bot with a Telegram dashboard.**\n\n## Highlights\n\n* Headless Chromium streaming engine driven by rod/CDP:\n  `--enable-usermedia-screen-capturing`,\n  `--auto-select-desktop-capture-source=…`, autoplay permitted, stock Chrome UA override.\n* Real guest-flow automation in Google Meet: guest name → join → Present now → tab capture.\n* Telegram dashboard: home, sessions, settings, health + live session cards\n  (pause/resume, mute/unmute, volume ±, seek ±10 s, restart, stop, refresh).\n* 2-minute setup wizard (`telemeetbot --wizard`), doctor (`--check`) and a real\n  getDisplayMedia capture self-test (`--check --capture-test`).\n* Per-session isolation, strict fail-closed admin allow-list, first-start admin claim.\n* Operation ready: Dockerfile + compose (1 GiB shm, healthcheck), systemd unit,\n  one-command installer, cross-arch release archives:\n  linux/amd64 · linux/arm64 · linux/armv6 · linux/armv7 · linux/386.\n* Surfaces of note: only `/healthz` + `/livez` are exposed (no remote control HTTP).\n* Tests: unit suites for config/wizard/bot/store/web plus real-Chromium integration\n  tests, also running in CI with `browser-actions/setup-chrome`.\n\n## Install\n\n```bash\ncurl -fsSL https://raw.githubusercontent.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/main/scripts/install.sh | bash\n```\n\nor Docker:\n\n```bash\ndocker compose run --rm telemeetbot --wizard --config /data/telemeetbot.yml\ndocker compose up -d\n```\n\nSHA256 checksums for the archives are attached below (`SHA256SUMS`).\n",
+      "assets": [
+        {
+          "name": "SHA256SUMS",
+          "size": 483,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.0.0/SHA256SUMS"
+        },
+        {
+          "name": "telemeetbot-linux-386.tar.gz",
+          "size": 5618125,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.0.0/telemeetbot-linux-386.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-amd64.tar.gz",
+          "size": 5729607,
+          "downloads": 3,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.0.0/telemeetbot-linux-amd64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm64.tar.gz",
+          "size": 5362881,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.0.0/telemeetbot-linux-arm64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-armv6.tar.gz",
+          "size": 5572798,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.0.0/telemeetbot-linux-armv6.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-armv7.tar.gz",
+          "size": 5572319,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.0.0/telemeetbot-linux-armv7.tar.gz"
+        }
+      ]
+    }
+  ]
+}

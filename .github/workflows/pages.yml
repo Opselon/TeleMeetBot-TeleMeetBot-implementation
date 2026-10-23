@@ -1,0 +1,88 @@
+name: website
+
+# Builds the Astro documentation site, audits it, and deploys it to GitHub Pages.
+# The site is generated from the Go source at build time, so it must rebuild on
+# every change to the repository — not only on changes under website/.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'website/**'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'deploy/**'
+      - 'docs/release-notes-*.md'
+      - 'go.mod'
+      - 'README.md'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  SITE_URL: https://opselon.github.io
+  BASE_PATH: /TeleMeetBot-TeleMeetBot-implementation
+
+jobs:
+  build:
+    name: build + audit
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: install
+        run: npm ci
+
+      - name: build site (syncs Go source + GitHub metadata)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run build
+
+      - name: static SEO and link audit
+        run: npm run test:seo
+
+      - name: WCAG contrast audit
+        run: npm run test:contrast
+
+      - name: install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+
+      - name: end-to-end (desktop + mobile)
+        run: npm run test:e2e
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: website/dist
+
+  deploy:
+    name: deploy to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

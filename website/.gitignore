@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.astro/
+test-results/
+playwright-report/
+src/data/repo.generated.json
+src/content/releases/*.md
+dark.png

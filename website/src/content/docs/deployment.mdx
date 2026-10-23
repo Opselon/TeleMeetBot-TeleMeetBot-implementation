@@ -1,0 +1,159 @@
+---
+title: Deployment
+description: Run TeleMeetBot with Docker Compose, systemd, or the installer; size the host, expose health safely, and upgrade without losing history.
+group: Operations
+order: 2
+keywords: ['docker', 'compose', 'systemd', 'upgrade', 'reverse proxy', 'sizing']
+---
+
+import Callout from '../../components/Callout.astro';
+
+## Docker (recommended)
+
+The image is a multi-stage build: Go {`1.26`} compiles a static binary, and the runtime is
+`debian:bookworm-slim` with Chromium, `tini`, `curl` and fonts. It runs as the unprivileged user
+`telemeet` (uid 10001), exposes `/data` as a volume, and declares a healthcheck against `/livez`.
+
+```bash
+docker compose build          # or: docker build -t telemeetbot:dev .
+docker compose up -d
+docker compose logs -f
+```
+
+The compose file pins the pieces that matter:
+
+| Setting | Value | Why |
+|---|---|---|
+| `shm_size` | `1gb` | Chromium crashes with the default 64 MB of shared memory |
+| `init` | `true` | Reaps Chromium's child processes |
+| `restart` | `unless-stopped` | Survives host reboots and crashes |
+| `ports` | `127.0.0.1:18080:18080` | Health stays local by default |
+| `volumes` | `./data:/data` | Config and session history persist |
+| `healthcheck` | `curl -fsS http://127.0.0.1:18080/livez` | Container orchestrators see liveness |
+| `logging` | json-file, 10 MB × 3 | Chromium is chatty; cap the logs |
+
+The entrypoint is `tini --`, so **the binary must be the first argument** in one-off commands:
+
+```bash
+docker compose run --rm telemeetbot telemeetbot --wizard --config /data/telemeetbot.yml
+docker compose run --rm telemeetbot telemeetbot --config /data/telemeetbot.yml --check
+```
+
+Without `telemeetbot` the container tries to exec your flag and dies with
+`[FATAL tini] exec --config failed`.
+
+<Callout type="warn" title="Writable data directory">
+The container user is uid 10001. If you bind-mount a directory that already exists, make it writable
+for that uid (`sudo chown -R 10001:10001 ./data`), otherwise the wizard cannot save the config and
+`state.json` cannot be written.
+</Callout>
+
+## systemd (bare metal)
+
+The release archive and the installer both ship `deploy/telemeetbot.service`:
+
+```ini
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/telemeetbot --config /etc/telemeetbot/config.yml
+WorkingDirectory=/etc/telemeetbot
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+Environment=HOME=/root
+LimitNOFILE=65536
+ReadWritePaths=/etc/telemeetbot /var/lib/telemeetbot
+ProtectSystem=full
+PrivateTmp=false
+```
+
+Paths assume `/etc/telemeetbot/config.yml` and `/var/lib/telemeetbot`. Change both the unit's
+`ReadWritePaths` and `paths.data_dir` together if you relocate them. `PrivateTmp=false` is intentional:
+Chromium's own temporary files must remain reachable for the lifetime of the process.
+
+```bash
+sudo cp deploy/telemeetbot.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now telemeetbot
+journalctl -u telemeetbot -f
+```
+
+The bot writes to stdout by default, so journald is the log store. Set `logging.file` only if you
+prefer a file and handle rotation yourself.
+
+## Installer
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/main/scripts/install.sh | sudo bash
+```
+
+It verifies the download against `SHA256SUMS` before installing, stages the example config with mode
+`0640`, installs (but does not enable) the unit, then runs the wizard. Use `--version`, `--prefix`,
+`--config-dir`, `--no-wizard` or `--no-service` to change that behaviour.
+
+## Sizing
+
+| Resource | Guidance |
+|---|---|
+| Memory | ~1 GB per concurrent session plus headroom for the page being played |
+| Shared memory | `--shm-size=1g` (compose sets it) |
+| Disk | The doctor requires 1.5 GB free on the data filesystem; `state.json` keeps at most 50 records |
+| CPU | 2 vCPU is comfortable for one 720p stream; add a core per extra session |
+| Network | Outbound HTTPS to `meet.google.com` and the media host; nothing inbound |
+
+`limits.max_sessions` is capped at 8 by validation, but the practical limit is memory: each session is
+a full Chromium with its own profile directory.
+
+## Exposing health
+
+There is no control API. `/healthz` and `/livez` are read-only and are the only HTTP routes besides a
+plain-text index page. Keep `server.health_addr` on `127.0.0.1` and scrape it from the same host, from
+a sidecar, or through an SSH tunnel.
+
+If a monitoring system needs remote access, put a reverse proxy in front and add TLS plus
+authentication. A health endpoint that is reachable but unauthenticated leaks the config path, the
+Chromium path and the session count.
+
+```nginx
+location = /telemeetbot/healthz {
+    auth_basic "monitoring";
+    auth_basic_user_file /etc/nginx/.htpasswd;
+    proxy_pass http://127.0.0.1:18080/healthz;
+}
+```
+
+## Upgrades
+
+Docker:
+
+```bash
+git pull
+TELEMEETBOT_VERSION=sha-$(git rev-parse --short HEAD) docker compose build
+docker compose up -d
+```
+
+Bare metal:
+
+```bash
+curl -fsSL …/scripts/install.sh | sudo bash -s -- --no-wizard
+sudo systemctl restart telemeetbot
+```
+
+Sessions do not survive a restart: Chromium is a child process, so in-flight streams end. On the next
+start the bot reads `state.json`, finds sessions marked active and warns the admin chat that they were
+interrupted, then clears them. Meeting URLs remain in the history (max 50 records), so treat the data
+directory as sensitive.
+
+A corrupt `state.json` is moved aside as `*.corrupt-*` and a fresh store is created, so one bad write
+cannot prevent startup.
+
+## Removing it
+
+```bash
+docker compose down                    # keeps ./data
+sudo systemctl disable --now telemeetbot
+sudo rm -f /etc/systemd/system/telemeetbot.service
+```
+
+Then remove `/usr/local/bin/telemeetbot`, `/etc/telemeetbot` and the data directory if you no longer
+need the history.

@@ -1,0 +1,11 @@
+---
+/**
+ * Comma-separated inline code list. Used where the items are generated from the
+ * Go source (media extensions), so the list cannot drift from the parser.
+ */
+type Props = { items: string[]; separator?: string };
+const { items, separator = ', ' } = Astro.props;
+---
+{items.map((item, index) => (
+  <span>{index > 0 ? separator : ''}<code>{item}</code></span>
+))}

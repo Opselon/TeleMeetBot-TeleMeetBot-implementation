@@ -1,0 +1,166 @@
+---
+title: Getting started
+description: Install TeleMeetBot with Docker, the one-command installer, or from source, create a bot token, claim admin access and run your first stream.
+group: Start here
+order: 2
+keywords: ['install', 'docker', 'systemd', 'wizard', 'botfather', 'first run']
+---
+
+import repo from '../../data/repo.generated.json';
+import Callout from '../../components/Callout.astro';
+
+## Before you start
+
+You need:
+
+- A Linux host. The published archives cover {repo.releaseTargets.join(', ')}.
+- A Telegram bot token from [@BotFather](https://t.me/BotFather): `/newbot`, pick a name, copy the token.
+- Your numeric Telegram user id. Send `/id` to the bot after setup, or configure
+  `first_start_claims_admin: true` and press `/start` first.
+- Chromium. The Docker image ships one; a bare-metal install needs `chromium` (or `google-chrome`)
+  on `PATH`, or a path in `browser.executable`.
+
+Chromium needs roughly 1 GB of memory per session and a little more shared memory than the default
+container limit. The provided compose file sets `shm_size: "1gb"` for that reason.
+
+## Option A — Docker (recommended on a server)
+
+```bash
+git clone https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation.git
+cd TeleMeetBot-TeleMeetBot-implementation
+
+# 1. create the config with the interactive wizard
+docker compose run --rm telemeetbot telemeetbot --wizard --config /data/telemeetbot.yml
+
+# 2. start the bot
+docker compose up -d
+
+# 3. follow the logs and check health
+docker compose logs -f
+curl -s http://127.0.0.1:18080/healthz
+```
+
+The image entrypoint is `tini`, and the binary is the first argument. If you omit `telemeetbot` from
+the `docker compose run` command, the container tries to exec your flag and exits with
+`[FATAL tini] exec --config failed`.
+
+<Callout type="note">
+The wizard runs as the container user (`uid 10001`). Its first pass creates `./data` on the host; if
+that directory already exists, make sure uid 10001 can write to it:
+
+```bash
+sudo chown -R 10001:10001 ./data
+```
+</Callout>
+
+When the wizard asks for the health address inside Docker, bind `0.0.0.0:18080` so the mapped port
+reaches `/healthz`. Compose publishes it on `127.0.0.1` only; put a reverse proxy in front if it must
+be reachable from elsewhere.
+
+## Option B — one-command installer (bare metal)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/main/scripts/install.sh | sudo bash
+```
+
+The script:
+
+1. detects the architecture and downloads the matching release archive,
+2. verifies it against `SHA256SUMS`,
+3. installs `/usr/local/bin/telemeetbot`,
+4. stages a template config at `/etc/telemeetbot/config.yml` (mode `0640`),
+5. installs the systemd unit without enabling it,
+6. runs the setup wizard.
+
+It refuses to run on non-Linux hosts and needs `curl` and `tar`. Flags:
+
+| Flag | Effect |
+|---|---|
+| `--version vX.Y.Z` | install a specific release instead of the latest |
+| `--prefix DIR` | install under another prefix (default `/usr/local`) |
+| `--config-dir DIR` | config directory (default `/etc/telemeetbot`) |
+| `--no-wizard` | install only, do not run the interactive setup |
+| `--no-service` | do not install the systemd unit |
+
+The unit is installed but not enabled. Start and enable it after the wizard:
+
+```bash
+sudo systemctl enable --now telemeetbot
+sudo systemctl status telemeetbot
+sudo journalctl -u telemeetbot -f
+```
+
+## Option C — build from source
+
+```bash
+git clone https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation.git
+cd TeleMeetBot-TeleMeetBot-implementation
+
+go build -o telemeetbot ./cmd/telemeetbot   # Go {repo.goVersion}+
+./telemeetbot --wizard                      # writes ./telemeetbot.yml
+./telemeetbot --config ./telemeetbot.yml
+```
+
+`make build` stamps the git description into the binary; `./telemeetbot --version` prints it.
+
+## The wizard, step by step
+
+The wizard asks seven questions and validates as it goes:
+
+1. **Bot token** — verified against Telegram (`getMe`), and it prints the bot username it reached.
+2. **Admin user ids** — comma separated. Leaving it blank enables the first-start claim.
+3. **First-start claim** — whether the first `/start` becomes the admin when the list is empty.
+4. **Chromium** — detects an installed browser; offers `apt-get install -y chromium` on Debian/Ubuntu.
+5. **Presentation mode** — `tab` (headless, recommended) or `screen` (needs Xvfb and a display).
+6. **Limits and defaults** — max concurrent sessions, default volume.
+7. **Health address and data dir**, then a summary and a save confirmation.
+
+After saving, the wizard offers to install a systemd service and to run the real tab-capture test.
+Both are optional but the capture test is the fastest way to know the host can present.
+
+<Callout type="tip">
+`TELEMEETBOT_TOKEN` supplies the token in non-interactive runs, and `TELEMEETBOT_CONFIG` overrides the
+config path. The wizard also runs automatically when no config exists at the resolved path.
+</Callout>
+
+## First run in Telegram
+
+```text
+/start        → dashboard: active sessions, uptime, limits
+/new          → step 1/2: paste the Meet link
+              → step 2/2: paste the media link
+              → "Ready to launch" → 🚀 Launch
+```
+
+Or send both links in one message:
+
+```text
+/new https://meet.google.com/abc-defg-hij https://www.youtube.com/watch?v=jNQXAC9IVRw
+```
+
+The bot then launches Chromium, opens the media tab, joins Meet as a guest, presents the tab, starts
+playback and sends a live session card. Press **🔄 Refresh** to re-render it, or **⏹ Stop** to end.
+
+## Verify the installation
+
+```bash
+# config, Chromium, disk, port, token, network
+telemeetbot --config telemeetbot.yml --check
+
+# the same plus a real getDisplayMedia capture test
+telemeetbot --config telemeetbot.yml --check --capture-test
+
+# the HTTP surface
+curl -s http://127.0.0.1:18080/healthz
+curl -s http://127.0.0.1:18080/livez
+```
+
+A healthy `/healthz` returns JSON with `"status": "ok"`, the active session count and the Chromium
+path. The doctor prints one line per check and exits non-zero when any check fails.
+
+## Next steps
+
+- [Configuration reference](/docs/configuration/) — every key with its default.
+- [Google Meet integration](/docs/google-meet/) — what the host must allow.
+- [Playback](/docs/playback/) — supported links and how controls behave.
+- [Troubleshooting](/docs/troubleshooting/) — symptom → cause → fix.

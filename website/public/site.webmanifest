@@ -1,0 +1,13 @@
+{
+  "name": "TeleMeetBot",
+  "short_name": "TeleMeetBot",
+  "description": "Headless Google Meet streaming bot with a Telegram dashboard.",
+  "start_url": "/TeleMeetBot-TeleMeetBot-implementation/",
+  "display": "browser",
+  "background_color": "#06090f",
+  "theme_color": "#06090f",
+  "icons": [
+    { "src": "favicon.svg", "sizes": "any", "type": "image/svg+xml" },
+    { "src": "apple-touch-icon.png", "sizes": "180x180", "type": "image/png" }
+  ]
+}

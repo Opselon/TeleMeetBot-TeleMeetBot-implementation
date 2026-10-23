@@ -1,0 +1,124 @@
+---
+title: Telegram commands and cards
+description: Every TeleMeetBot command, the inline session card, dashboard behaviour, and how authorisation gates strangers.
+group: Guides
+order: 3
+keywords: ['commands', 'inline buttons', 'dashboard', 'card', 'authorisation']
+---
+
+import repo from '../../data/repo.generated.json';
+import Callout from '../../components/Callout.astro';
+
+{/* Generated from internal/bot/flows.go, views.go and cmd/telemeetbot/main.go at build time. */}
+
+## Commands
+
+<table>
+  <thead>
+    <tr><th>Command</th><th>What it does</th></tr>
+  </thead>
+  <tbody>
+    {repo.commands.map((command) => (
+      <tr>
+        <td><code>{command.command}</code></td>
+        <td>{command.description}</td>
+      </tr>
+    ))}
+  </tbody>
+</table>
+
+`/new` accepts its arguments inline: `/new <meet-link> <media-link>`. With one argument it prefills the
+Meet link and asks for the media link. With none it starts at step 1.
+
+The number of concurrent sessions is capped by `limits.max_sessions` (default 2). `/new` refuses with
+the current count when the cap is reached; stop a session first.
+
+## Inline session card
+
+Every session gets a card that is edited in place. The header carries the state emoji and the session
+id (`s-` plus eight hex characters).
+
+```text
+🟢 Session s-4f2a1c9b
+🎞 Media: Big Buck Bunny — Blender Foundation
+🔗 Meet: https://meet.google.com/abc-defg-hij
+⏱ Playback: 04:12 / 10:34
+🔊 Volume: 80%
+📶 State: streaming — [6/6] Streaming live
+⏳ Elapsed: 6m
+```
+
+Buttons below the card:
+
+<table>
+  <thead>
+    <tr><th>Button</th><th>Effect</th></tr>
+  </thead>
+  <tbody>
+    {repo.inlineActions.map((action) => (
+      <tr>
+        <td>{action.label}</td>
+        <td>{action.description}</td>
+      </tr>
+    ))}
+  </tbody>
+</table>
+
+Buttons are rebuilt for each state, so an ended session shows only **⬅️ Dashboard**. The card is
+refreshed by a three-second loop and by **🔄 Refresh**; edits replace the message instead of spamming
+the chat.
+
+## Session states
+
+<table>
+  <thead>
+    <tr><th>State</th><th>Marker</th><th>Meaning</th></tr>
+  </thead>
+  <tbody>
+    {repo.states.map((state) => (
+      <tr>
+        <td><code>{state.state}</code></td>
+        <td>{state.emoji}</td>
+        <td>{state.description}</td>
+      </tr>
+    ))}
+  </tbody>
+</table>
+
+The progress detail after the state follows the session pipeline, for example:
+`[1/6] Launching Chromium`, `[2/6] Loading media`, `[3/6] Opening Google Meet`,
+`[4/6] Joining meeting`, `[5/6] Starting screen share`, `[6/6] Streaming live`.
+
+## Dashboard views
+
+| View | Contents |
+|---|---|
+| `/start` | Active session count, uptime, limits and the main keyboard |
+| `/sessions` | One row per session with state, title and elapsed time |
+| `/health` | Version, Go build, browser path, disk, uptime and active sessions |
+| `/settings` | Effective configuration summary with the token masked |
+| `/help` | The same usage overview the bot prints on request |
+
+## Authorisation
+
+Access is fail-closed and checked before any parsing:
+
+1. The numeric Telegram user id must be in `telegram.admins`.
+2. If the list is empty and `first_start_claims_admin` is true, the first `/start` claims the bot and
+   becomes the sole admin.
+3. If the list is empty and the claim is disabled, nobody can use the bot — configuration validation
+   refuses to start in that state.
+
+A stranger gets a single message containing their own user id and instructions to ask the operator,
+and nothing else. No command, no button and no wizard input is processed for them.
+
+<Callout type="note">
+The claim path is convenient but not a security boundary: enable it on a fresh bot only, then add
+your numeric id to `telegram.admins` and turn the claim off.
+</Callout>
+
+## Notifications
+
+Lifecycle notifications (started, failed, ended, stream recovered) go to the chat that launched the
+session, and session cards are edited in that same chat. `telegram.notify_chat_id` is parsed but not
+read yet — see [known gaps](/docs/configuration/#known-gaps).

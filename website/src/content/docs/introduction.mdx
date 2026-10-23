@@ -1,0 +1,76 @@
+---
+title: Introduction
+description: What TeleMeetBot is, how a session flows from Telegram to Google Meet, and what it deliberately does not do.
+group: Start here
+order: 1
+keywords: ['overview', 'architecture', 'headless', 'google meet', 'telegram']
+---
+
+import repo from '../../data/repo.generated.json';
+
+TeleMeetBot is a single Go binary that joins a Google Meet as a guest, presents a tab, and plays a
+link inside it. You create sessions and control playback from a Telegram chat. There is no web
+dashboard, no desktop session, and no external automation service.
+
+The current release is **{repo.version}**, built from commit `{repo.commit}`. The repository is the
+source of truth for this site: command names, flags, configuration keys, health fields and supported
+media extensions are extracted from the Go source at build time.
+
+## Before you go further
+
+If you want the shortest working path, this is it — details are in
+[Getting started](/docs/getting-started/):
+
+```bash
+git clone https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation.git
+cd TeleMeetBot-TeleMeetBot-implementation
+docker compose run --rm telemeetbot telemeetbot --wizard --config /data/telemeetbot.yml
+docker compose up -d
+curl -s http://127.0.0.1:18080/healthz
+```
+
+## What a session does
+
+1. You send `/new`, then a Google Meet link and a media link.
+2. The bot launches Chromium headless with capture flags and a stock Chrome user agent.
+3. It opens a local player tab titled `TeleMeet Media` and loads your link there.
+4. It opens Meet in a second tab, fills the guest name, joins or asks to join, and mutes the prejoin
+   camera and microphone.
+5. It clicks Meet's own **Present** control and shares the media tab.
+6. It starts playback only after the capture is live, then sends you a session card with controls.
+
+Everything you do afterwards — pause, mute, volume, seek, restart, stop — acts on the local player
+page, so a source site's own controls and overlays do not matter.
+
+## Design constraints
+
+- **Tab mode is the default.** Headless Chromium can share a tab without a virtual display. Screen
+  mode exists for unusual layouts and needs Xvfb, but it is not required.
+- **Guest join only.** The bot does not sign in to a Google account. Meetings that require a Google
+  sign-in cannot be joined.
+- **English Meet UI.** The automation finds controls by their labels; `browser.lang` must stay
+  `en-US` for that to work.
+- **One browser per session by default.** `browser.per_session: true` costs memory and buys
+  isolation between meetings.
+- **Read-only HTTP.** The only endpoints are `/healthz` and `/livez`. Control is Telegram-only.
+
+## What it does not do
+
+- It does not stream a camera, composite layouts, or act as a Meet participant with a Google
+  identity.
+- It does not bypass a host's lobby: if nobody admits the guest, the session ends in a timeout.
+- It does not guarantee playback on pages that refuse to be framed or require a login. YouTube
+  watch pages and direct media files are the reliable paths.
+
+## Requirements at a glance
+
+| Component | Requirement |
+|---|---|
+| OS | Linux (the release archives and container target Linux) |
+| Go (building from source) | {repo.goVersion} or newer |
+| Chromium | A recent system Chromium/Chrome, or rod's managed download |
+| Memory | Plan ~1 GB per concurrent session plus the page being played |
+| Network | Outbound HTTPS to `meet.google.com`, plus the media host |
+| Telegram | A bot token from [@BotFather](https://t.me/BotFather) |
+
+Next: [install it](/docs/getting-started/) or read [how the Meet side works](/docs/google-meet/).

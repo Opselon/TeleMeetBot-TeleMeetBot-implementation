@@ -1,0 +1,44 @@
+---
+import { footerNav, site } from '../data/site';
+import repoData from '../data/repo.generated.json';
+import { url } from '../utils/paths';
+
+const year = new Date().getUTCFullYear();
+---
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="footer-grid">
+      <div class="footer-brand">
+        <a class="brand" href={url('/')}>
+          <svg class="brand-mark" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+            <rect x="1.5" y="1.5" width="29" height="29" rx="9" fill="#16324a" stroke="rgba(61,220,151,0.35)" />
+            <path d="M12.5 10.5 22 16l-9.5 5.5v-11Z" fill="#3ddc97" />
+          </svg>
+          <span>TeleMeetBot</span>
+        </a>
+        <p>{site.tagline}. One Go binary, headless Chromium, and a Telegram dashboard.</p>
+        <p class="mono" style="font-size:11px;color:var(--faint);margin-top:10px">
+          {site.version} · {site.commit} · {site.license}
+        </p>
+      </div>
+      {footerNav.map((column) => (
+        <div class="footer-col">
+          <h3>{column.title}</h3>
+          <ul>
+            {column.links.map((link) => (
+              <li>
+                <a href={'external' in link && link.external ? link.href : url(link.href)} rel={('external' in link && link.external) ? 'noopener' : undefined}>
+                  {link.label}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
+    <div class="footer-bottom">
+      <span>© {year} {site.author} · MIT licensed</span>
+      <span>Site built from commit {repoData.commit} · Go {repoData.testTotals.unit} unit tests</span>
+    </div>
+  </div>
+</footer>

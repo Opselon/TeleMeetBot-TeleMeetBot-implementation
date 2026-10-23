@@ -1,0 +1,22 @@
+---
+import repo from '../data/repo.generated.json';
+
+type Props = { section: string | string[] };
+const { section } = Astro.props;
+const sections = Array.isArray(section) ? section : [section];
+const rows = repo.configKeys.filter((entry) => sections.includes(entry.section));
+---
+<table>
+  <thead>
+    <tr><th>Key</th><th>Default</th><th>Notes</th></tr>
+  </thead>
+  <tbody>
+    {rows.map((row) => (
+      <tr>
+        <td><code>{row.key}</code></td>
+        <td><code>{row.value === '' ? '""' : row.value}</code></td>
+        <td set:html={row.description} />
+      </tr>
+    ))}
+  </tbody>
+</table>

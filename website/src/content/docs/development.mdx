@@ -1,0 +1,157 @@
+---
+title: Development
+description: Repository layout, build and test commands, what CI runs, and how a release archive is produced and published.
+group: Reference
+order: 2
+keywords: ['development', 'tests', 'ci', 'make', 'release', 'astro']
+---
+
+import repo from '../../data/repo.generated.json';
+import Callout from '../../components/Callout.astro';
+
+## Repository layout
+
+```text
+cmd/telemeetbot/     entrypoint, flags, probe modes
+internal/
+  bot/               Telegram layer: updates, dashboard, wizard, session cards
+  engine/            rod/CDP engine: browser, sessions, media, Meet, capture test
+  config/            YAML config, defaults, strict validation
+  store/             session history (state.json, max 50 records)
+  setup/             interactive wizard and doctor
+  health/            runtime health snapshot
+  web/               /healthz, /livez and a plain-text index
+deploy/              config example and systemd unit
+scripts/             install.sh, release.sh
+docs/                release notes
+website/             this site (Astro)
+.github/workflows/   CI and GitHub Pages deployment
+```
+
+## Build
+
+```bash
+go build -o telemeetbot ./cmd/telemeetbot     # Go {repo.goVersion}+
+make build                                    # same, with the git description stamped in
+./telemeetbot --version
+```
+
+`make` targets:
+
+| Target | Effect |
+|---|---|
+| `make build` | Build `./telemeetbot` with `-trimpath` and the version stamped |
+| `make run` | Build then run with `./telemeetbot.yml` |
+| `make wizard` | Build then run the setup wizard |
+| `make check` | Build then run `--check --capture-test` |
+| `make test` | Unit tests (`go test ./...`) |
+| `make test-integration` | Full suite with `TELEMEETBOT_BROWSER` or a detected Chromium |
+| `make fmt` / `make vet` / `make lint` | gofmt, go vet, both |
+| `make docker` | Build the container image |
+| `make release` | Cross-compile archives and checksums into `dist/` |
+| `make publish` | Tag, push and create the GitHub release (`VERSION` required) |
+
+## Tests
+
+The suite is split so the default run stays fast and hermetic:
+
+<table>
+  <thead>
+    <tr><th>Package</th><th>Test files</th><th>Unit tests</th><th>Integration tests</th></tr>
+  </thead>
+  <tbody>
+    {repo.testPackages.map((pkg) => (
+      <tr>
+        <td><code>{pkg.name}</code></td>
+        <td>{pkg.files}</td>
+        <td>{pkg.unitTests}</td>
+        <td>{pkg.integrationTests}</td>
+      </tr>
+    ))}
+  </tbody>
+</table>
+
+Totals: **{repo.testTotals.unit} unit tests** and **{repo.testTotals.integration} integration tests**.
+Integration tests need a real Chromium and are skipped when none is found:
+
+```bash
+TELEMEETBOT_BROWSER=/usr/bin/chromium go test ./internal/engine -run TestIntegration -count=1 -v
+```
+
+They cover the title lock (Chromium must see the capture tab title), the player document, a real
+`getDisplayMedia` grant, the consent wall mounted after a share goes live, host-gate waiting, and the
+present-button matcher skipping Meet's toolbar container.
+
+Optional live checks, never required by CI:
+
+```bash
+TELEMEETBOT_YOUTUBE_URL=https://www.youtube.com/watch?v=jNQXAC9IVRw \
+TELEMEETBOT_PROXY=http://host:port \
+TELEMEETBOT_BROWSER=/path/to/chrome \
+  go test ./internal/engine -run TestIntegrationRealYouTube -v
+```
+
+<Callout type="tip">
+Browser integration tests take a few minutes and download nothing: the capture pages are served over
+loopback. If Chromium is missing, they skip rather than fail, so a green unit run does not prove the
+capture path.
+</Callout>
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on pushes to `main`, on tags and on pull requests:
+
+1. **gofmt** — fails if any file is unformatted.
+2. **go vet**.
+3. **unit tests** — `go test ./... -count=1`.
+4. **browser integration** — installs stable Chrome via `browser-actions/setup-chrome`, exports
+   `TELEMEETBOT_BROWSER`, runs `go test ./internal/engine -run TestIntegration -count=1 -v`.
+5. **docker build** — buildx image build with the tag as `VERSION`, no push.
+
+A separate workflow builds this website and deploys it to GitHub Pages on every push to `main`.
+
+## Release process
+
+Releases are built from a clean tree, not from a CI job:
+
+```bash
+VERSION=v1.1.0 ./scripts/release.sh publish
+```
+
+That command:
+
+1. cross-compiles `linux/amd64`, `linux/arm64`, `linux/arm/v6`, `linux/arm/v7`, `linux/386`,
+2. stages `README.md`, `README.fa.md`, `LICENSE`, `deploy/` and `install.sh` into each archive,
+3. writes `SHA256SUMS`,
+4. tags `vX.Y.Z`, pushes the branch and the tag,
+5. creates the GitHub release with `docs/release-notes-<version>.md` as the body and the archives
+   attached.
+
+`./scripts/release.sh build` does only the first three steps, which is what you want when checking the
+archives locally.
+
+The release notes file must exist before `publish` runs; the script passes it to
+`gh release create --notes-file`.
+
+## Working on this website
+
+The site is Astro, static output, no client framework. It lives in `website/`:
+
+```bash
+cd website
+npm install
+npm run dev        # sync generated data, then dev server
+npm run build      # production build into website/dist
+npm run test:seo   # HTML, metadata and internal-link audit
+npm run test:e2e   # Playwright: desktop + mobile, search, theme, nav
+```
+
+`scripts/sync-repo-content.mjs` runs before every build. It reads the Go source, `go.mod`,
+`deploy/config.example.yml`, `scripts/release.sh` and the GitHub API (with a committed snapshot
+fallback), then writes `src/data/repo.generated.json`. If a new bot command or config key has no
+documented description, the build fails instead of shipping a stale page.
+
+Deployment uses `SITE_URL=https://opselon.github.io` and
+`BASE_PATH=/TeleMeetBot-TeleMeetBot-implementation`. All internal links go through a base-path helper,
+and Markdown links are rewritten by a rehype plugin, so the same build works at the origin root and
+under the project path.

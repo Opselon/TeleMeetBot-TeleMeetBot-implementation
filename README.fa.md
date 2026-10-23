@@ -64,7 +64,7 @@ UA هدلس را می‌پسندد؟ نپسندید → ما آن را override 
 git clone https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation
 cd TeleMeetBot-TeleMeetBot-implementation
 
-docker compose run --rm telemeetbot --wizard --config /data/telemeetbot.yml
+docker compose run --rm telemeetbot telemeetbot --wizard --config /data/telemeetbot.yml
 docker compose up -d
 docker compose logs -f
 curl http://127.0.0.1:18080/healthz

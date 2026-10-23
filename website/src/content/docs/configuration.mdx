@@ -1,0 +1,166 @@
+---
+title: Configuration reference
+description: Every TeleMeetBot configuration key with its default, how the file is resolved, and the rules enforced at startup.
+group: Operations
+order: 1
+keywords: ['config', 'yaml', 'defaults', 'validation', 'environment']
+---
+
+import repo from '../../data/repo.generated.json';
+import Callout from '../../components/Callout.astro';
+import ConfigTable from '../../components/ConfigTable.astro';
+
+The config is one YAML file. Omitted keys keep the defaults shown here, because the loader starts from
+a fully populated default struct and unmarshals over it.
+
+## Where the config is read from
+
+1. `--config <path>` when given,
+2. `TELEMEETBOT_CONFIG` when set,
+3. `./telemeetbot.yml`,
+4. `/etc/telemeetbot/config.yml`.
+
+The first existing candidate wins; if none exists, the wizard runs and writes to the first candidate.
+The container image runs `telemeetbot --config /data/telemeetbot.yml`.
+
+## Keys
+
+The defaults below are read from `deploy/config.example.yml`, which is the file the installer stages at
+`/etc/telemeetbot/config.yml`. Descriptions come from the Go configuration structs.
+
+### telegram
+
+<ConfigTable section="telegram" />
+
+### server
+
+<ConfigTable section="server" />
+
+### browser
+
+<ConfigTable section="browser" />
+
+### media
+
+<ConfigTable section="media" />
+
+### meet
+
+<ConfigTable section="meet" />
+
+### limits, logging, paths
+
+<ConfigTable section={['limits', 'logging', 'paths']} />
+
+<Callout type="warn" title="No hot reload">
+The config is read once at startup. Restart the bot (or the container) after editing it. The running
+process keeps the values it started with, and `/settings` shows those.
+</Callout>
+
+## Validation at startup
+
+`config.Validate()` runs before the bot connects to Telegram. It aborts with a list of problems when:
+
+- `telegram.token` is empty, or does not contain `:` (not `<bot_id>:<secret>` shaped),
+- `telegram.admins` is empty **and** `first_start_claims_admin` is false — nobody could control the bot,
+- an admin id is non-positive,
+- `meet.present_mode` is anything other than `tab` or `screen`,
+- `meet.capture_source` is empty, or looks like a screen source while `present_mode` is `tab`,
+- `media.default_volume` is outside 0–100, or `media.default_speed` outside 0.25–4,
+- `limits.max_sessions` is outside 1–8,
+- `paths.data_dir` is empty.
+
+Every error names the offending key, so the fix is usually one line. The message also suggests
+re-running the wizard.
+
+## Examples
+
+### Headless tab mode (default)
+
+```yaml
+telegram:
+  token: "123456789:AA…"
+  admins: [5094837833]
+  first_start_claims_admin: false
+
+server:
+  health_addr: "127.0.0.1:18080"
+
+browser:
+  headless: true
+  per_session: true
+  lang: "en-US"
+
+meet:
+  guest_name: "TeleMeet Bot"
+  present_mode: "tab"
+  capture_source: "TeleMeet Media"
+  admit_wait_seconds: 300
+
+limits:
+  max_sessions: 2
+
+paths:
+  data_dir: "/var/lib/telemeetbot"
+```
+
+### Container
+
+```yaml
+server:
+  health_addr: "0.0.0.0:18080"      # the mapped port must reach it
+paths:
+  data_dir: "/data"
+```
+
+### Datacenter egress for YouTube
+
+```yaml
+browser:
+  proxy: "http://172.17.0.1:3339"   # proxy reachable from the container
+```
+
+### Screen mode
+
+```yaml
+browser:
+  headless: false
+  display: ":99"
+meet:
+  present_mode: "screen"
+  capture_source: "Entire screen (monitor 1)"
+```
+
+## Environment variables
+
+| Variable | Effect |
+|---|---|
+| `TELEMEETBOT_CONFIG` | Config path when `--config` is not given |
+| `TELEMEETBOT_TOKEN` | Token used by a non-interactive wizard run |
+| `CHROME_BIN` | Container image default Chromium path (set by the Dockerfile to `/usr/bin/chromium`) |
+
+## Known gaps
+
+These keys exist in the config struct and are validated, but the engine does not read them today:
+
+<table>
+  <thead><tr><th>Key</th><th>Current behaviour</th></tr></thead>
+  <tbody>
+    {repo.unwiredConfig.map((entry) => (
+      <tr>
+        <td><code>{entry.key}</code></td>
+        <td>{entry.note}</td>
+      </tr>
+    ))}
+  </tbody>
+</table>
+
+They are listed instead of silently documented as working. Playback always starts after the share is
+confirmed and the player always loops; whether that changes is a product decision, not a config one.
+
+## Rotating secrets
+
+1. Edit `telegram.token` in the config.
+2. Restart the service: `docker compose restart` or `sudo systemctl restart telemeetbot`.
+3. The wizard writes config files with mode `0640`, so the token is not world-readable; keep the file
+   and the data directory on a volume you would treat as a secret.

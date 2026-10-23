@@ -1,0 +1,54 @@
+---
+import Icon from './Icon.astro';
+import { docPath, groupDocs, type Doc } from '../lib/docs';
+import { url } from '../utils/paths';
+
+type Props = { docs: Doc[]; currentId?: string };
+const { docs, currentId } = Astro.props;
+const groups = groupDocs(docs);
+---
+<aside class="docs-sidebar" aria-label="Documentation">
+  <div class="docs-sidebar-inner">
+    <a class="chip chip-accent" href={url('/docs/')} style="margin:0 0 18px 10px">Documentation</a>
+    {groups.map((group) => (
+      <div class="docs-group">
+        <h2>{group.group}</h2>
+        <ul class="docs-nav-list">
+          {group.items.map((doc) => (
+            <li>
+              <a href={url(docPath(doc))} aria-current={doc.id === currentId ? 'page' : undefined}>
+                {doc.data.title}
+              </a>
+            </li>
+          ))}
+        </ul>
+      </div>
+    ))}
+  </div>
+</aside>
+
+<div class="drawer" id="docs-drawer" data-drawer>
+  <div class="drawer-backdrop" data-drawer-close></div>
+  <div class="drawer-panel" role="dialog" aria-modal="true" aria-label="Documentation menu">
+    <div class="drawer-head">
+      <span class="eyebrow">Documentation</span>
+      <button class="icon-btn" type="button" data-drawer-close aria-label="Close documentation menu">
+        <Icon name="close" size={18} />
+      </button>
+    </div>
+    {groups.map((group) => (
+      <div class="docs-group">
+        <h2>{group.group}</h2>
+        <ul class="docs-nav-list">
+          {group.items.map((doc) => (
+            <li>
+              <a href={url(docPath(doc))} aria-current={doc.id === currentId ? 'page' : undefined}>
+                {doc.data.title}
+              </a>
+            </li>
+          ))}
+        </ul>
+      </div>
+    ))}
+  </div>
+</div>

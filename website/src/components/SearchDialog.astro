@@ -1,0 +1,33 @@
+---
+import Icon from './Icon.astro';
+import { url } from '../utils/paths';
+---
+<dialog class="search-dialog" id="search-dialog" aria-label="Search documentation" data-search-dialog>
+  <form class="search-form" role="search" data-search-form>
+    <Icon name="search" size={18} />
+    <input
+      class="search-input"
+      id="search-input"
+      type="search"
+      name="q"
+      placeholder="Search the docs…"
+      autocomplete="off"
+      autocapitalize="off"
+      spellcheck="false"
+      aria-label="Search query"
+      aria-controls="search-results"
+      aria-autocomplete="list"
+    />
+    <button class="icon-btn search-close" type="button" data-search-close aria-label="Close search">
+      <Icon name="close" size={16} />
+    </button>
+  </form>
+  <ul class="search-results" id="search-results" role="listbox" aria-label="Search results" data-search-results></ul>
+  <div class="search-foot">
+    <span class="kbd">↑</span><span class="kbd">↓</span> navigate
+    <span class="kbd">↵</span> open
+    <span class="kbd">esc</span> close
+    <span class="spacer"></span>
+    <a href={url('/docs/')}>Browse all docs</a>
+  </div>
+</dialog>
