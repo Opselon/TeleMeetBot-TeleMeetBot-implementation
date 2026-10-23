@@ -36,6 +36,7 @@ type Session struct {
 	MediaURL  string
 	MediaKind MediaKind
 	TabTitle  string
+	AudioLang string
 
 	mgr        *Manager
 	log        Logger
@@ -60,6 +61,7 @@ type Session struct {
 	joined   time.Time
 	ended    time.Time
 	mediaErr string
+	audioRep AudioTrackReport
 
 	lastMeetLoad time.Time
 
@@ -73,22 +75,25 @@ type Session struct {
 
 // Status is a dashboard-friendly snapshot.
 type Status struct {
-	ID       SessionID
-	State    string
-	Detail   string
-	Error    string
-	Title    string
-	MeetURL  string
-	MediaURL string
-	Paused   bool
-	Muted    bool
-	Volume   int
-	Rate     float64
-	Cur      float64
-	Dur      float64
-	Created  time.Time
-	Joined   time.Time
-	Ended    time.Time
+	ID             SessionID
+	State          string
+	Detail         string
+	Error          string
+	Title          string
+	MeetURL        string
+	MediaURL       string
+	Paused         bool
+	Muted          bool
+	Volume         int
+	Rate           float64
+	Cur            float64
+	Dur            float64
+	Created        time.Time
+	Joined         time.Time
+	Ended          time.Time
+	AudioLang      string
+	AudioTrack     string
+	FallbackReason string
 }
 
 // Elapsed is how long the session has been running.
@@ -108,23 +113,33 @@ func (s *Session) Snapshot() Status {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return Status{
-		ID:       s.ID,
-		State:    s.state,
-		Detail:   s.detail,
-		Error:    s.errMsg,
-		Title:    s.title,
-		MeetURL:  s.MeetURL,
-		MediaURL: s.MediaURL,
-		Paused:   s.paused,
-		Muted:    s.muted,
-		Volume:   s.volume,
-		Rate:     s.rate,
-		Cur:      s.cur,
-		Dur:      s.dur,
-		Created:  s.created,
-		Joined:   s.joined,
-		Ended:    s.ended,
+		ID:             s.ID,
+		State:          s.state,
+		Detail:         s.detail,
+		Error:          s.errMsg,
+		Title:          s.title,
+		MeetURL:        s.MeetURL,
+		MediaURL:       s.MediaURL,
+		Paused:         s.paused,
+		Muted:          s.muted,
+		Volume:         s.volume,
+		Rate:           s.rate,
+		Cur:            s.cur,
+		Dur:            s.dur,
+		Created:        s.created,
+		Joined:         s.joined,
+		Ended:          s.ended,
+		AudioLang:      s.AudioLang,
+		AudioTrack:     s.audioRep.SelectedTrackLabel(),
+		FallbackReason: s.audioRep.FallbackReason,
 	}
+}
+
+// AudioReport returns a copy of the audio track report.
+func (s *Session) AudioReport() AudioTrackReport {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.audioRep
 }
 
 func (s *Session) snapshotState() string {

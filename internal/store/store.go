@@ -1,15 +1,51 @@
 // Package store keeps a small JSON history of streaming sessions so a restart
-// can tell the operator what was interrupted.
+// can tell the operator what was interrupted, alongside per-user preferences
+// (such as YouTube audio language preference).
 package store
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
+
+// DefaultAudioLang is Persian (fa) as mandated.
+const DefaultAudioLang = "fa"
+
+// Valid audio language preference codes.
+const (
+	AudioLangPersian  = "fa"
+	AudioLangEnglish  = "en"
+	AudioLangOriginal = "orig"
+	AudioLangAuto     = "auto"
+)
+
+// NormalizeAudioLang normalizes language input, falling back to DefaultAudioLang.
+func NormalizeAudioLang(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "fa", "persian", "farsi", "فارسی":
+		return AudioLangPersian
+	case "en", "english", "eng":
+		return AudioLangEnglish
+	case "orig", "original", "source":
+		return AudioLangOriginal
+	case "auto", "best":
+		return AudioLangAuto
+	default:
+		return AudioLangPersian
+	}
+}
+
+// UserPreference stores persistent settings for one Telegram user.
+type UserPreference struct {
+	AudioLang string `json:"audio_lang"`
+}
 
 // Record is one streaming session.
 type Record struct {
@@ -27,31 +63,96 @@ type Record struct {
 // maxRecords bounds the history file.
 const maxRecords = 50
 
+type persistedPayload struct {
+	Records []Record                  `json:"records"`
+	Prefs   map[string]UserPreference `json:"user_prefs,omitempty"`
+}
+
 // Store is a concurrency-safe session history persisted to a JSON file.
 type Store struct {
 	mu      sync.Mutex
 	path    string
 	records []Record
+	prefs   map[int64]UserPreference
 	// writes counts atomic file replacements; tests assert that no-op updates
 	// do not touch the disk.
 	writes int
 }
 
-// Load reads the history; a missing or corrupt file yields an empty store.
+// Load reads the history and preferences; a missing or corrupt file yields an empty store.
 func Load(path string) *Store {
-	s := &Store{path: path}
+	s := &Store{
+		path:  path,
+		prefs: make(map[int64]UserPreference),
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return s
 	}
-	var records []Record
-	if err := json.Unmarshal(raw, &records); err != nil {
-		// Keep the damaged file for forensics instead of silently deleting it.
-		_ = os.Rename(path, fmt.Sprintf("%s.corrupt-%d", path, time.Now().Unix()))
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
 		return s
 	}
-	s.records = records
+
+	// Case 1: Legacy format where state.json is a JSON array of []Record
+	if trimmed[0] == '[' {
+		var records []Record
+		if err := json.Unmarshal(trimmed, &records); err == nil {
+			s.records = records
+			return s
+		}
+	}
+
+	// Case 2: Object format { "records": [...], "user_prefs": {...} }
+	var payload persistedPayload
+	if err := json.Unmarshal(trimmed, &payload); err == nil {
+		s.records = payload.Records
+		if payload.Prefs != nil {
+			for k, v := range payload.Prefs {
+				if uid, err := strconv.ParseInt(k, 10, 64); err == nil {
+					s.prefs[uid] = v
+				}
+			}
+		}
+		return s
+	}
+
+	// Case 3: Damaged file
+	_ = os.Rename(path, fmt.Sprintf("%s.corrupt-%d", path, time.Now().Unix()))
 	return s
+}
+
+// AudioLang returns the user's preferred YouTube audio language, defaulting to "fa" (Persian).
+func (s *Store) AudioLang(userID int64) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if pref, ok := s.prefs[userID]; ok && pref.AudioLang != "" {
+		return pref.AudioLang
+	}
+	return DefaultAudioLang
+}
+
+// SetAudioLang updates and persists the user's audio language preference.
+func (s *Store) SetAudioLang(userID int64, lang string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	normalized := NormalizeAudioLang(lang)
+	current := s.prefs[userID]
+	if current.AudioLang == normalized {
+		return nil
+	}
+	s.prefs[userID] = UserPreference{AudioLang: normalized}
+	return s.saveLocked()
+}
+
+// GetUserAudioLang returns the user's preferred YouTube audio language.
+func (s *Store) GetUserAudioLang(userID int64) string {
+	return s.AudioLang(userID)
+}
+
+// SetUserAudioLang sets and persists the user's preferred YouTube audio language.
+func (s *Store) SetUserAudioLang(userID int64, lang string) error {
+	return s.SetAudioLang(userID, lang)
 }
 
 // Interrupted marks records that were still running when the process died.
@@ -119,7 +220,7 @@ func (s *Store) Update(id, state, errMsg string) {
 	}
 }
 
-// GeneratedAt returns the oldest record time, used for "history since" text.
+// Records returns a copy of stored records.
 func (s *Store) Records() []Record {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -135,7 +236,15 @@ func (s *Store) saveLocked() error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
 		return err
 	}
-	out, err := json.MarshalIndent(s.records, "", "  ")
+	payload := persistedPayload{
+		Records: s.records,
+		Prefs:   make(map[string]UserPreference, len(s.prefs)),
+	}
+	for uid, pref := range s.prefs {
+		payload.Prefs[strconv.FormatInt(uid, 10)] = pref
+	}
+
+	out, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
 		return err
 	}

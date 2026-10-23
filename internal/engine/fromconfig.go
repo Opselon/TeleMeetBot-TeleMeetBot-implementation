@@ -23,6 +23,7 @@ func FromConfig(c *config.Config) (BrowserConfig, MediaOptions, MeetOptions) {
 		Autoplay:           c.Media.Autoplay,
 		MuteUntilConnected: c.Media.MuteUntilConnected,
 		SeekStepSeconds:    c.Media.SeekStepSeconds,
+		DefaultAudioLang:   c.Media.DefaultAudioLang,
 	}
 	meet := MeetOptions{
 		GuestName:             c.Meet.GuestName,

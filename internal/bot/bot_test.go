@@ -392,3 +392,120 @@ func TestNewWithInlineArguments(t *testing.T) {
 		t.Fatalf("single arg did not prefill the meet link: %q", h.api.lastSent().text)
 	}
 }
+
+func TestAudioTrackMenuAndPersistence(t *testing.T) {
+	h := newHarness(t, []int64{42}, 2)
+
+	// Verify default is Persian ("fa")
+	if got := h.st.GetUserAudioLang(42); got != "fa" {
+		t.Fatalf("expected default audio lang fa, got %s", got)
+	}
+
+	// Command /audiotrack shows selection menu
+	h.message(42, "/audiotrack")
+	last := h.api.lastSent()
+	if !strings.Contains(last.text, "Audio Track Language") {
+		t.Fatalf("expected audio track menu, got: %s", last.text)
+	}
+	if !strings.Contains(last.text, "فارسی (default)") {
+		t.Fatalf("expected Persian default mentioned in menu, got: %s", last.text)
+	}
+
+	// Callback menu:audiolang
+	h.callback(42, cbAudioLang)
+	edit := h.api.lastEdit()
+	if !strings.Contains(edit.text, "Audio Track Language") {
+		t.Fatalf("expected edited audio track menu, got: %s", edit.text)
+	}
+
+	// Switch to English
+	h.callback(42, cbLangEn)
+	if got := h.st.GetUserAudioLang(42); got != "en" {
+		t.Fatalf("expected audio lang en, got %s", got)
+	}
+	edit = h.api.lastEdit()
+	if !strings.Contains(edit.text, "English") {
+		t.Fatalf("expected English selected in text, got: %s", edit.text)
+	}
+
+	// Switch to Original
+	h.callback(42, cbLangOrig)
+	if got := h.st.GetUserAudioLang(42); got != "orig" {
+		t.Fatalf("expected audio lang orig, got %s", got)
+	}
+
+	// Switch to Auto
+	h.callback(42, cbLangAuto)
+	if got := h.st.GetUserAudioLang(42); got != "auto" {
+		t.Fatalf("expected audio lang auto, got %s", got)
+	}
+
+	// Switch back to Persian
+	h.callback(42, cbLangFa)
+	if got := h.st.GetUserAudioLang(42); got != "fa" {
+		t.Fatalf("expected audio lang fa, got %s", got)
+	}
+}
+
+func TestAudioTrackUserIsolation(t *testing.T) {
+	h := newHarness(t, []int64{10, 20, 30}, 5)
+
+	// User 10 selects English
+	h.callback(10, cbLangEn)
+	// User 20 selects Original
+	h.callback(20, cbLangOrig)
+
+	// User 10 is English
+	if got := h.st.GetUserAudioLang(10); got != "en" {
+		t.Fatalf("user 10 expected en, got %s", got)
+	}
+	// User 20 is Original
+	if got := h.st.GetUserAudioLang(20); got != "orig" {
+		t.Fatalf("user 20 expected orig, got %s", got)
+	}
+	// User 30 untouched -> Persian default
+	if got := h.st.GetUserAudioLang(30); got != "fa" {
+		t.Fatalf("user 30 expected fa default, got %s", got)
+	}
+
+	// When user 10 launches a stream, req.AudioLang must be "en"
+	h.message(10, "/new meet.google.com/abc-defg-hij https://youtu.be/dQw4w9WgXcQ")
+	h.callback(10, cbLaunch)
+	if len(h.eng.requests) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(h.eng.requests))
+	}
+	if h.eng.requests[0].AudioLang != "en" {
+		t.Fatalf("expected req.AudioLang=en for user 10, got %s", h.eng.requests[0].AudioLang)
+	}
+
+	// When user 20 launches a stream, req.AudioLang must be "orig"
+	h.message(20, "/new meet.google.com/abc-defg-hij https://youtu.be/dQw4w9WgXcQ")
+	h.callback(20, cbLaunch)
+	if len(h.eng.requests) != 2 {
+		t.Fatalf("expected 2 requests, got %d", len(h.eng.requests))
+	}
+	if h.eng.requests[1].AudioLang != "orig" {
+		t.Fatalf("expected req.AudioLang=orig for user 20, got %s", h.eng.requests[1].AudioLang)
+	}
+}
+
+func TestAudioTrackPersistsAcrossBotRestart(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, "state.json")
+
+	st1 := store.Load(statePath)
+	_ = st1.SetUserAudioLang(999, "orig")
+	if got := st1.GetUserAudioLang(999); got != "orig" {
+		t.Fatalf("expected orig, got %s", got)
+	}
+
+	// Load second instance from disk
+	st2 := store.Load(statePath)
+	if got := st2.GetUserAudioLang(999); got != "orig" {
+		t.Fatalf("expected reloaded store to have orig for user 999, got %s", got)
+	}
+	// Unknown user still defaults to Persian
+	if got := st2.GetUserAudioLang(888); got != "fa" {
+		t.Fatalf("expected unknown user to default to fa, got %s", got)
+	}
+}

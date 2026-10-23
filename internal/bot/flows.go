@@ -103,6 +103,9 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 			b.startFlow(chatID, userID, m.CommandArguments())
 		case "sessions":
 			b.sendSessions(chatID)
+		case "audiotrack", "audiolang", "lang", "language":
+			lang := b.st.GetUserAudioLang(userID)
+			b.sendText(chatID, audioLangText(lang), audioLangKB(lang))
 		case "health":
 			b.sendHealth(chatID)
 		case "settings":
@@ -155,7 +158,8 @@ func (b *Bot) stepInput(chatID, userID int64, f *flow, text string) {
 		f.media = target.URL
 		f.step = stepNone
 		b.setFlow(userID, f)
-		b.sendText(chatID, confirmText(f.meet, f.media, target.Kind), confirmKB())
+		userLang := b.st.GetUserAudioLang(userID)
+		b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang), confirmKB(userLang))
 	default:
 		b.clearFlow(userID)
 		b.sendText(chatID, "Wizard restarted. Send a Meet link, or /cancel.", mainMenuKB())
@@ -192,7 +196,8 @@ func (b *Bot) startFlow(chatID, userID int64, args string) {
 		f.media = target.URL
 		f.step = stepNone
 		b.setFlow(userID, f)
-		b.sendText(chatID, confirmText(f.meet, f.media, target.Kind), confirmKB())
+		userLang := b.st.GetUserAudioLang(userID)
+		b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang), confirmKB(userLang))
 		return
 	}
 	b.setFlow(userID, f)
@@ -210,9 +215,11 @@ func (b *Bot) launch(chatID, userID int64) {
 		b.sendText(chatID, fmt.Sprintf("⚠️ <b>Limit reached</b> (%d/%d). Stop a session first.", active, b.cfg.Limits.MaxSessions), sessionsKB(b.statuses()))
 		return
 	}
+	userLang := b.st.GetUserAudioLang(userID)
 	sess, err := b.eng.Start(context.Background(), engine.StartRequest{
 		MeetLink:  f.meet,
 		MediaLink: f.media,
+		AudioLang: userLang,
 	})
 	if err != nil {
 		b.sendText(chatID, "❌ "+esc(err.Error()), mainMenuKB())
@@ -266,6 +273,16 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 	case data == cbHelp:
 		_ = b.api.AnswerCallback(q.ID, "")
 		_ = b.api.Edit(chatID, msgID, helpText(), backKB())
+	case data == cbAudioLang:
+		_ = b.api.AnswerCallback(q.ID, "")
+		lang := b.st.GetUserAudioLang(userID)
+		_ = b.api.Edit(chatID, msgID, audioLangText(lang), audioLangKB(lang))
+	case strings.HasPrefix(data, "lang:"):
+		chosen := strings.TrimPrefix(data, "lang:")
+		norm := engine.NormalizeAudioLang(chosen)
+		b.st.SetUserAudioLang(userID, norm)
+		_ = b.api.AnswerCallback(q.ID, "Saved: "+engine.AudioLangDisplayName(norm))
+		_ = b.api.Edit(chatID, msgID, audioLangText(norm), audioLangKB(norm))
 	case data == cbLaunch:
 		_ = b.api.AnswerCallback(q.ID, "launching…")
 		b.launch(chatID, userID)

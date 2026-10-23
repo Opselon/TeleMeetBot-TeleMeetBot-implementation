@@ -86,6 +86,7 @@ type MediaConfig struct {
 	MuteUntilConnected bool    `yaml:"mute_until_connected"`
 	SeekStepSeconds    int     `yaml:"seek_step_seconds"`
 	Loop               bool    `yaml:"loop"`
+	DefaultAudioLang   string  `yaml:"default_audio_lang"`
 }
 
 // MeetConfig controls Google Meet join and screen-share behaviour.
@@ -144,6 +145,7 @@ func Default() *Config {
 			Autoplay:           true,
 			MuteUntilConnected: true,
 			SeekStepSeconds:    10,
+			DefaultAudioLang:   "fa",
 		},
 		Meet: MeetConfig{
 			GuestName:             "TeleMeet Bot",
@@ -227,6 +229,9 @@ func (c *Config) normalize() {
 	}
 	if c.Media.DefaultSpeed <= 0 {
 		c.Media.DefaultSpeed = 1.0
+	}
+	if strings.TrimSpace(c.Media.DefaultAudioLang) == "" {
+		c.Media.DefaultAudioLang = "fa"
 	}
 	if c.Telegram.PollTimeoutSeconds <= 0 {
 		c.Telegram.PollTimeoutSeconds = 30
