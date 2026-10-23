@@ -135,11 +135,18 @@ func Doctor(cfg *config.Config, cfgPath string, opts DoctorOptions) Report {
 			hint := "if the picker was blocked, try present_mode: screen with Xvfb"
 			r.Checks = append(r.Checks, Check{"tab capture", false, fmt.Sprintf("%v (%s)", err, hint)})
 		} else {
-			detail := fmt.Sprintf("video=%t audio=%t label=%q frames=%d", rep.Video, rep.Audio, rep.Label, rep.Frames)
+			detail := fmt.Sprintf("video=%t audio=%t label=%q frames=%d px=(%s) mean=%.0f delta=%.1f",
+				rep.Video, rep.Audio, rep.Label, rep.Frames, rep.Px, rep.Variance, rep.Delta)
 			if !rep.Audio {
 				detail += " — no audio track captured (Meet tab shares usually include tab audio; check --enable-usermedia-screen-capturing)"
 			}
-			r.Checks = append(r.Checks, Check{"tab capture", true, detail})
+			if rep.Delta < 0.5 {
+				// A static capture means the share is frozen even though the
+				// track is "live": report it rather than a green check.
+				r.Checks = append(r.Checks, Check{"tab capture", false, detail + " — captured frames are not changing (frozen share)"})
+			} else {
+				r.Checks = append(r.Checks, Check{"tab capture", true, detail})
+			}
 		}
 	}
 

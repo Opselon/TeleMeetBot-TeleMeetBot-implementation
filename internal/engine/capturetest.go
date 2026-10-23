@@ -22,9 +22,14 @@ type CaptureReport struct {
 	Audio    bool    `json:"audio"`
 	Frames   int     `json:"frames"`
 	Variance float64 `json:"variance"`
-	Label    string  `json:"label"`
-	Px       string  `json:"px"`
-	Error    string  `json:"error"`
+	// Delta is the mean per-pixel luminance change between consecutive captured
+	// frames. A static (frozen or black) capture has Delta 0; a live share has
+	// Delta well above 0. It is the "is anything moving?" number that Variance
+	// alone cannot answer.
+	Delta float64 `json:"delta"`
+	Label string  `json:"label"`
+	Px    string  `json:"px"`
+	Error string  `json:"error"`
 }
 
 // TestTabCapture launches Chromium exactly like a real session and verifies
@@ -140,18 +145,31 @@ func TestTabCapture(ctx context.Context, browserCfg BrowserConfig, meet MeetOpti
     const c = document.createElement("canvas");
     c.width = 96; c.height = 54;
     const ctx = c.getContext("2d");
-    let sum = 0, frames = 0;
+    let sum = 0, frames = 0, delta = 0, deltaN = 0;
+    let prev = null;
     for (let i = 0; i < 4; i++) {
       ctx.drawImage(el, 0, 0, c.width, c.height);
       const d = ctx.getImageData(0, 0, c.width, c.height).data;
       let local = 0;
-      for (let p = 0; p < d.length; p += 4) local += d[p] + d[p+1] + d[p+2];
+      const lum = new Array(d.length / 4);
+      for (let p = 0; p < d.length; p += 4) {
+        local += d[p] + d[p+1] + d[p+2];
+        lum[p / 4] = (d[p] + d[p+1] + d[p+2]) / 3;
+      }
       sum += local / (d.length / 4);
+      if (prev) {
+        let acc = 0;
+        for (let k = 0; k < lum.length; k++) acc += Math.abs(lum[k] - prev[k]);
+        delta += acc / lum.length;
+        deltaN++;
+      }
+      prev = lum;
       frames++;
       await new Promise(r => setTimeout(r, 250));
     }
     out.frames = frames;
     out.variance = sum / frames;
+    out.delta = deltaN ? delta / deltaN : 0;
   } catch (e) {
     out.error = "frame sampling failed: " + String(e);
   }

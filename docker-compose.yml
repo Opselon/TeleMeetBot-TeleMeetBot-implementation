@@ -22,6 +22,10 @@ services:
       - ./data:/data
     environment:
       TZ: UTC
+      # Bound the Go runtime heap so GC works aggressively on a small VPS
+      # instead of letting the heap swell with CDP/JSON payloads. The browser
+      # processes are the real memory consumers; see docs/sizing.
+      GOMEMLIMIT: "256MiB"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18080/livez"]
       interval: 30s

@@ -32,6 +32,9 @@ type Store struct {
 	mu      sync.Mutex
 	path    string
 	records []Record
+	// writes counts atomic file replacements; tests assert that no-op updates
+	// do not touch the disk.
+	writes int
 }
 
 // Load reads the history; a missing or corrupt file yields an empty store.
@@ -85,7 +88,10 @@ func (s *Store) Add(r Record) {
 	_ = s.saveLocked()
 }
 
-// Update changes the state (and error) of an existing record.
+// Update changes the state (and error) of an existing record. A no-op update
+// (same state, no new error) does not rewrite the file: progress events repeat
+// the current state, and rewriting the history for every one of them was pure
+// disk churn during a join/present flow.
 func (s *Store) Update(id, state, errMsg string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -93,11 +99,19 @@ func (s *Store) Update(id, state, errMsg string) {
 		if s.records[i].ID != id {
 			continue
 		}
+		terminal := state == "ended" || state == "error" || state == "interrupted"
+		if s.records[i].State == state && (errMsg == "" || s.records[i].Error == errMsg) {
+			// Terminal states also stamp EndedAt once; only skip when that is
+			// already recorded.
+			if !terminal || !s.records[i].EndedAt.IsZero() {
+				return
+			}
+		}
 		s.records[i].State = state
 		if errMsg != "" {
 			s.records[i].Error = errMsg
 		}
-		if state == "ended" || state == "error" || state == "interrupted" {
+		if terminal {
 			s.records[i].EndedAt = time.Now()
 		}
 		_ = s.saveLocked()
@@ -129,5 +143,9 @@ func (s *Store) saveLocked() error {
 	if err := os.WriteFile(tmp, out, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	if err := os.Rename(tmp, s.path); err != nil {
+		return err
+	}
+	s.writes++
+	return nil
 }

@@ -70,6 +70,12 @@ type BrowserConfig struct {
 	UserAgent string `yaml:"user_agent"`
 	// Proxy is passed to Chromium, e.g. "socks5://127.0.0.1:9050".
 	Proxy string `yaml:"proxy"`
+	// GPU selects the compositing backend: "off" (software compositing, the
+	// default in headless — measured ~6x less host CPU than SwiftShader for the
+	// same shared frames on a 2-core VPS), "swiftshader" (ANGLE/SwiftShader
+	// software GL, the pre-1.2 default) or "auto" (let Chromium decide; use on
+	// hosts with a real GPU). Empty keeps the default.
+	GPU string `yaml:"gpu"`
 }
 
 // MediaConfig controls playback inside the shared tab.
@@ -287,6 +293,11 @@ func (c *Config) Validate() error {
 	case "tab", "screen":
 	default:
 		problems = append(problems, `meet.present_mode must be "tab" or "screen"`)
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Browser.GPU)) {
+	case "", "off", "disable", "disabled", "none", "swiftshader", "angle", "swangle", "auto", "default", "on", "hardware":
+	default:
+		problems = append(problems, `browser.gpu must be "off", "swiftshader" or "auto"`)
 	}
 	if strings.TrimSpace(c.Meet.CaptureSource) == "" {
 		problems = append(problems, "meet.capture_source is empty")

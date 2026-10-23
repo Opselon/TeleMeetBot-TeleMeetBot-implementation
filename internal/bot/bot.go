@@ -35,11 +35,12 @@ func (noopLogger) Errorf(string, ...interface{}) {}
 
 // cardRef points at a dashboard message that mirrors a session.
 type cardRef struct {
-	chat    int64
-	msg     int
-	text    string
-	fixedAt time.Time
-	errs    int
+	chat     int64
+	msg      int
+	text     string
+	fixedAt  time.Time
+	lastEdit time.Time
+	errs     int
 }
 
 // Engine is the engine surface the bot needs (Manager implements it; tests fake it).
@@ -165,25 +166,42 @@ func (b *Bot) refreshAll() {
 	b.expireFlows()
 }
 
+// minCardEditInterval is the floor between two edits of the same card.
+// Telegram allows roughly one edit per second per chat; without a floor a
+// chatty state machine turns into an edit storm (and 429 retries) that burns CPU
+// on TLS handshakes rather than on streaming.
+const minCardEditInterval = 1200 * time.Millisecond
+
 func (b *Bot) refreshCard(ref *cardRef, id engine.SessionID, text string, kb *tgbotapi.InlineKeyboardMarkup) {
 	b.mu.Lock()
 	if ref.text == text {
 		b.mu.Unlock()
 		return
 	}
-	b.mu.Unlock()
-	b.mu.Lock()
-	ref.text = text
-	ref.errs = 0
+	if !ref.lastEdit.IsZero() && time.Since(ref.lastEdit) < minCardEditInterval {
+		// Leave ref.text stale so the next tick retries instead of dropping
+		// the update for good.
+		b.mu.Unlock()
+		return
+	}
 	b.mu.Unlock()
 	if err := b.api.Edit(ref.chat, ref.msg, text, kb); err != nil {
 		b.mu.Lock()
 		ref.errs++
+		errs := ref.errs
 		b.mu.Unlock()
-		if ref.errs <= 2 {
+		if errs <= 2 {
 			b.log.Debugf("edit card %s: %v", id, err)
 		}
+		// Do not record the text: a transient Telegram failure must not leave
+		// the card permanently stale.
+		return
 	}
+	b.mu.Lock()
+	ref.text = text
+	ref.errs = 0
+	ref.lastEdit = time.Now()
+	b.mu.Unlock()
 }
 
 // handleEvent reacts to engine events.

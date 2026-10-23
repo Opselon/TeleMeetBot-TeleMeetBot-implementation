@@ -50,6 +50,80 @@ func detectProxy(cfg BrowserConfig) string {
 	return ""
 }
 
+// GPU backend modes accepted by browser.gpu.
+const (
+	// GPUModeOff disables the GPU process: Chromium composites the shared tab
+	// in software without SwiftShader's per-frame GL round trips.
+	GPUModeOff = "off"
+	// GPUModeSwiftShader forces ANGLE/SwiftShader software GL.
+	GPUModeSwiftShader = "swiftshader"
+	// GPUModeAuto leaves the compositor choice to Chromium (real-GPU hosts).
+	GPUModeAuto = "auto"
+)
+
+// gpuMode resolves browser.gpu. Headless defaults to software compositing:
+// SwiftShader rasterises every shared frame through a software GL pipeline and
+// measured ~6x the host CPU of plain software compositing for identical frames
+// on a 2-core VPS.
+func gpuMode(cfg BrowserConfig) string {
+	switch strings.ToLower(strings.TrimSpace(cfg.GPU)) {
+	case "":
+		if cfg.Headless {
+			return GPUModeOff
+		}
+		return GPUModeAuto
+	case "default":
+		return GPUModeAuto
+	case GPUModeOff, "disable", "disabled", "none":
+		return GPUModeOff
+	case GPUModeSwiftShader, "angle", "swangle":
+		return GPUModeSwiftShader
+	case GPUModeAuto, "on", "hardware":
+		return GPUModeAuto
+	default:
+		return GPUModeAuto
+	}
+}
+
+// launchFlags is the Chromium command line for one browser (pure so the flag
+// contract is testable without launching anything).
+func launchFlags(cfg BrowserConfig, meet MeetOptions) []string {
+	src := captureSource(cfg, meet)
+	out := []string{
+		"disable-dev-shm-usage",
+		"disable-background-timer-throttling",
+		"disable-backgrounding-occluded-windows",
+		"disable-renderer-backgrounding",
+		"disable-notifications",
+		"disable-crash-reporter",
+		"disable-blink-features=AutomationControlled",
+		"autoplay-policy=no-user-gesture-required",
+		// Do NOT set use-fake-device-for-media-stream or use-fake-ui-for-media-stream.
+		// fake-device replaces every capture with Chromium's green test pattern, and
+		// fake-ui makes getDisplayMedia auto-pick a *screen* source that either fails
+		// to start (NotReadableError) or falls back to that same green pattern —
+		// both end up presenting a green rectangle instead of the media tab.
+		// Camera/mic permissions are granted through CDP instead (see grantMedia).
+		"enable-usermedia-screen-capturing",
+		"auto-select-desktop-capture-source=" + src,
+		"auto-select-tab-capture-source-by-title=" + src,
+		fmt.Sprintf("window-size=%d,%d", widthOf(cfg), heightOf(cfg)),
+		// Headless Chrome exposes one virtual display; this sizes it so tab-capture
+		// (and therefore the Meet share) is not stuck at 800x600.
+		fmt.Sprintf("screen-info={%dx%d}", widthOf(cfg), heightOf(cfg)),
+		"lang=" + languageOf(cfg),
+		"accept-lang=" + languageOf(cfg),
+		"user-agent=" + userAgentOf(cfg),
+	}
+	switch gpuMode(cfg) {
+	case GPUModeSwiftShader:
+		out = append(out, "enable-unsafe-swiftshader", "use-gl=angle", "use-angle=swiftshader", "disable-gpu-sandbox")
+	case GPUModeOff:
+		out = append(out, "disable-gpu")
+	}
+	return append(out, cfg.ExtraArgs...)
+}
+
 // launchBrowser starts Chromium with the flags needed to join Meet and share a
 // tab automatically (no screen picker dialog, no user gesture). The returned
 // close function must be called exactly once (it is idempotent).
@@ -70,45 +144,15 @@ func launchBrowser(opts launchOptions, log Logger) (*rod.Browser, func(), error)
 	} else {
 		l.Headless(false)
 	}
-
-	l.Set("disable-dev-shm-usage")
-	l.Set("disable-background-timer-throttling")
-	l.Set("disable-backgrounding-occluded-windows")
-	l.Set("disable-renderer-backgrounding")
-	l.Set("disable-notifications")
-	l.Set("disable-crash-reporter")
-	l.Set("disable-blink-features", "AutomationControlled")
-	l.Set("autoplay-policy", "no-user-gesture-required")
-	// Do NOT set use-fake-device-for-media-stream or use-fake-ui-for-media-stream.
-	// fake-device replaces every capture with Chromium's green test pattern, and
-	// fake-ui makes getDisplayMedia auto-pick a *screen* source that either fails
-	// to start (NotReadableError) or falls back to that same green pattern —
-	// both end up presenting a green rectangle instead of the media tab.
-	// Camera/mic permissions are granted through CDP instead (see grantMedia).
-	l.Set("enable-usermedia-screen-capturing")
-	l.Set("enable-unsafe-swiftshader")
-	l.Set("use-gl", "angle")
-	l.Set("use-angle", "swiftshader")
-	l.Set("disable-gpu-sandbox")
-	src := captureSource(cfg, opts.meet)
-	l.Set("auto-select-desktop-capture-source", src)
-	l.Set("auto-select-tab-capture-source-by-title", src)
-	l.Set("window-size", fmt.Sprintf("%d,%d", widthOf(cfg), heightOf(cfg)))
-	// Headless Chrome exposes one virtual display; this sizes it so tab-capture
-	// (and therefore the Meet share) is not stuck at 800x600.
-	l.Set("screen-info", fmt.Sprintf("{%dx%d}", widthOf(cfg), heightOf(cfg)))
-	l.Set("lang", languageOf(cfg))
-	l.Set("accept-lang", languageOf(cfg))
-	l.Set("user-agent", userAgentOf(cfg))
-
 	if proxy := detectProxy(cfg); proxy != "" {
 		l.Proxy(proxy)
-		l.Set("proxy-bypass-list", "meet.google.com;*.google.com;accounts.google.com;localhost;127.0.0.1;<local>")
+		bypass := "meet.google.com;*.google.com;accounts.google.com;localhost;127.0.0.1;<local>;172.16.0.0/12;10.0.0.0/8;192.168.0.0/16"
+		l.Set("proxy-bypass-list", bypass)
 		log.Infof("[PIPELINE:browser] media proxy enabled: %s (Meet bypassed)", proxy)
 	}
-	for _, a := range cfg.ExtraArgs {
-		name, vals, ok := splitArg(a)
-		if ok {
+
+	for _, f := range launchFlags(cfg, opts.meet) {
+		if name, vals, ok := splitArg(f); ok {
 			l.Set(flags.Flag(name), vals...)
 		}
 	}

@@ -3,6 +3,7 @@ package bot
 import (
 	"bytes"
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -35,6 +36,8 @@ type fakeAPI struct {
 	edits   []editMsg
 	answers []string
 	seq     int
+	// failEdits makes the next N Edit calls fail (transient Telegram errors).
+	failEdits int
 }
 
 func (f *fakeAPI) Send(chatID int64, text string, kb *tgbotapi.InlineKeyboardMarkup) (int, error) {
@@ -49,6 +52,10 @@ func (f *fakeAPI) Edit(chatID int64, messageID int, text string, kb *tgbotapi.In
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.edits = append(f.edits, editMsg{chatID, messageID, text})
+	if f.failEdits > 0 {
+		f.failEdits--
+		return errors.New("telegram: too many requests (simulated)")
+	}
 	return nil
 }
 

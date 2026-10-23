@@ -18,7 +18,8 @@ FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CHROME_BIN=/usr/bin/chromium \
-    DISPLAY=""
+    DISPLAY="" \
+    GOMEMLIMIT=256MiB
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       chromium \

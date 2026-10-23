@@ -16,6 +16,19 @@ import (
 // errHelpURL is a hint appended to "no media" failures.
 const errHelpURL = "make sure the link is publicly reachable from this server"
 
+// Pacing constants for the stage poll loop.
+//
+// When a meeting is host-restricted ("no one can join unless invited or
+// admitted"), polling the DOM every sub-second is wasted CDP churn: the page
+// cannot change until we re-request entry (reload), so a relaxed poll bounded by
+// the re-entry deadline cuts CPU down to near zero during long host waits.
+const (
+	meetReloadInterval  = 30 * time.Second
+	blockedPollInterval = 5 * time.Second
+	lobbyPollInterval   = 2 * time.Second
+	hostWaitHeartbeat   = 30 * time.Second
+)
+
 // Session is one Google Meet participant that shares one media tab.
 type Session struct {
 	ID        SessionID
@@ -568,24 +581,22 @@ func (s *Session) joinMeeting() error {
 	}
 
 	var lastStage string
-	hostWaitLogged := false
+	lastWaitNote := time.Time{}
 	reloadCount := 0
 	for time.Now().Before(deadline) {
 		if s.ctx.Err() != nil {
 			return s.ctx.Err()
 		}
+		// pace is the delay before the next stage poll. States that can change
+		// on their own (loading, prejoin, lobby) need a short poll; a host-gated
+		// page cannot change until Meet is re-requested, so polling it every
+		// sub-second is pure CDP churn (it used to re-render the dashboard card
+		// and rewrite the state file ~1.2x/second for minutes on end).
+		pace := 900 * time.Millisecond
 		stage, info := s.meetStage()
 		if stage != lastStage {
 			lastStage = stage
 			s.log.Infof("session %s: meet stage=%s %q", s.ID, stage, info)
-		} else if stage == "blocked" || stage == "lobby" {
-			// Diagnostics: the gate can only be debugged from the log, so
-			// keep a bounded heartbeat while waiting on a host.
-			if !hostWaitLogged {
-				hostWaitLogged = true
-				s.log.Debugf("session %s: still %s after %s (detail=%q)", s.ID, stage,
-					time.Since(hostWaitStarted).Round(time.Second), info)
-			}
 		}
 		switch stage {
 		case "meeting":
@@ -595,6 +606,8 @@ func (s *Session) joinMeeting() error {
 		case "lobby":
 			extendWaitForHost()
 			s.setState(StateAdmitting, "[4/6] Waiting for host to admit bot")
+			pace = lobbyPollInterval
+			s.logHostWait(&lastWaitNote, "lobby", "waiting to be admitted", 0, hostWaitStarted)
 		case "blocked":
 			if phrase := blockedFatalPhrase(info); phrase != "" {
 				return fmt.Errorf("cannot join this meeting: %s", phrase)
@@ -602,15 +615,33 @@ func (s *Session) joinMeeting() error {
 			// Host-gated: Meet only lets people in after the first host has
 			// joined. The blocked page also bounces back to Meet's home screen
 			// after ~60 s, so re-request entry on a bounded cadence until the
-			// gate lifts.
+			// gate lifts. The card keeps a stable detail string (no attempt
+			// counter): the counter belongs to the log, where it costs nothing,
+			// not to the dashboard text where every increment forces a message
+			// edit and a state-file rewrite.
 			extendWaitForHost()
-			reloadCount++
-			s.setState(StateAdmitting, fmt.Sprintf("[4/6] Host-restricted meeting (attempt %d): waiting for host", reloadCount))
-			if time.Since(s.lastMeetLoad) > 30*time.Second {
-				s.log.Infof("[PIPELINE:meet] session %s: host-restricted meeting, re-requesting entry (attempt %d)", s.ID, reloadCount)
+			s.setState(StateAdmitting, "[4/6] Host-restricted meeting: waiting for host")
+			if time.Since(s.lastMeetLoad) >= meetReloadInterval {
+				reloadCount++
+				s.log.Infof("[PIPELINE:meet] session %s: host-restricted meeting, re-requesting entry (attempt %d, waited %s)",
+					s.ID, reloadCount, time.Since(hostWaitStarted).Round(time.Second))
 				if err := s.reopenMeet(); err != nil {
 					return fmt.Errorf("reload the meeting page: %w", err)
 				}
+				pace = 2 * time.Second
+			} else {
+				// Nothing can change until the next re-request: wait it out
+				// (bounded, so admission is still noticed quickly).
+				pace = blockedPollInterval
+				if remaining := meetReloadInterval - time.Since(s.lastMeetLoad); remaining < pace {
+					// Never trim the wait to nothing: a sub-tick pace would
+					// turn the last moments before a reload into a poll storm.
+					if remaining < 250*time.Millisecond {
+						remaining = 250 * time.Millisecond
+					}
+					pace = remaining
+				}
+				s.logHostWait(&lastWaitNote, "blocked", "host-restricted meeting", reloadCount, hostWaitStarted)
 			}
 		case "login":
 			return errors.New("this meeting requires a signed-in Google account; TeleMeetBot joins as a guest only")
@@ -620,17 +651,37 @@ func (s *Session) joinMeeting() error {
 			s.mutePrejoinDevices()
 			if clicked, label := s.clickJoin(); clicked {
 				s.log.Infof("[PIPELINE:meet] session %s: clicked %q", s.ID, label)
-				time.Sleep(1500 * time.Millisecond)
+				pace = 1500 * time.Millisecond
 			}
 		default:
 			// Unknown/loading: a little patience.
 		}
-		time.Sleep(800 * time.Millisecond)
+		if err := s.ctxSleep(pace); err != nil {
+			return err
+		}
 	}
 	if !hostWaitStarted.IsZero() {
 		return fmt.Errorf("waited %s for a host-restricted meeting: no host ever started it (google: no one can join unless invited or admitted by the host). if the link is wrong or expired, Meet shows this same page — verify the meeting code with the host", deadline.Sub(hostWaitStarted).Round(time.Second))
 	}
 	return fmt.Errorf("meet join timed out after %s (stage=%s)", timeout, lastStage)
+}
+
+// logHostWait emits a bounded heartbeat while the bot waits for a host, so a
+// long host-restricted wait stays diagnosable without a log line per poll.
+func (s *Session) logHostWait(last *time.Time, stage, what string, attempts int, since time.Time) {
+	if !last.IsZero() && time.Since(*last) < hostWaitHeartbeat {
+		return
+	}
+	*last = time.Now()
+	waited := "unknown"
+	if !since.IsZero() {
+		waited = time.Since(since).Round(time.Second).String()
+	}
+	if attempts > 0 {
+		s.log.Infof("[PIPELINE:meet] session %s: %s (%s), waited %s, re-entry attempts=%d", s.ID, what, stage, waited, attempts)
+		return
+	}
+	s.log.Infof("[PIPELINE:meet] session %s: %s (%s), waited %s", s.ID, what, stage, waited)
 }
 
 // reopenMeet reloads the meeting link on the existing tab (never a new one), so
