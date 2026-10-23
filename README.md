@@ -233,6 +233,7 @@ The capture probe result is printed as JSON: `{"granted":true,"video":true,"fram
 | `admission timeout` | Same as above; reduce `admit_wait_seconds` if you want faster failures. |
 | `present can't start` | Chromium too old (use ≥ 118), or Meet UI changed language (we require `browse.lang: en-US`), or `capture_source` mismatch — run `--check --capture-test`. |
 | `media doesn't play` in a web page | The page may block embedding; log shows `playerProblem` hints; restart via button. |
+| Share shows **"Before you continue to YouTube"** | The consent wall was not cleared. The bot dismisses it structurally (reject-all preferred, locale-independent phrase tables, light-DOM + shadow-DOM, `consent.youtube.com` redirect) and refuses to present a tab whose wall won't clear — the session error carries the surface, the buttons it saw and what it tried. Run `--media-probe <link>` for the same diagnostics without a meeting. |
 | `no such element` after a Meet redesign | Open an issue with `(meetctl)` debug logs — turn `log.level: debug`. |
 | Chromium keeps crashing | `--check` shows RAM; add `shm_size: "1gb"` in Docker and set `per_session: true`. |
 
@@ -247,6 +248,21 @@ make test-integration    # adds real-Chromium tests (title-lock, player doc, get
 
 Integration tests automatically locate `${TELEMEETBOT_BROWSER}` or a PATH `chromium/chrome`,
 skip cleanly when absent, and are also run in CI (`browser-actions/setup-chrome`).
+
+Two optional live checks (never required, so CI stays hermetic and offline):
+
+```bash
+# real YouTube: consent wall → ready video → advancing, non-black frames
+TELEMEETBOT_YOUTUBE_URL=https://www.youtube.com/watch?v=jNQXAC9IVRw \
+TELEMEETBOT_PROXY=http://host:port TELEMEETBOT_BROWSER=/path/to/chrome \
+  go test ./internal/engine -run TestIntegrationRealYouTube -v
+```
+
+`TestIntegrationPresentationSurvivesLateConsentWall` is the hermetic version of the
+production failure: it prepares a YouTube-shaped tab, shares it with a real
+`getDisplayMedia`, mounts the consent wall *after* the share is live, runs
+`recoverMedia`, and asserts the same capture track keeps delivering non-black
+frames — i.e. the share is never restarted.
 
 `make check` runs the real `--check --capture-test` self-test against your installed Chromium.
 
