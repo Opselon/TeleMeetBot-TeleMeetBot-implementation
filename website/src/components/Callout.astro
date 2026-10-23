@@ -1,0 +1,15 @@
+---
+import Icon from './Icon.astro';
+
+type Props = { type?: 'note' | 'warn' | 'tip' | 'danger'; title?: string };
+const { type = 'note', title } = Astro.props;
+const icons = { note: 'info', warn: 'alert', tip: 'check', danger: 'alert' } as const;
+const labels = { note: 'Note', warn: 'Important', tip: 'Tip', danger: 'Warning' } as const;
+---
+<div class:list={['callout', type !== 'note' ? type : '']}>
+  <Icon name={icons[type]} size={18} />
+  <div>
+    <span class="callout-title">{title ?? labels[type]}</span>
+    <slot />
+  </div>
+</div>

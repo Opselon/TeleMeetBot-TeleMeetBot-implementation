@@ -1,0 +1,96 @@
+---
+title: CLI reference
+description: Every TeleMeetBot flag, what it does, the order in which modes are chosen, and the exit codes the binary returns.
+group: Reference
+order: 1
+keywords: ['cli', 'flags', 'exit codes', 'probe', 'version']
+---
+
+import repo from '../../data/repo.generated.json';
+import Callout from '../../components/Callout.astro';
+
+One binary, no subcommands. Mode is chosen by flags in this order:
+`--media-probe` → `--probe` → `--check` → normal run. `--wizard` runs setup first (and also runs
+automatically when no config exists).
+
+## Flags
+
+<table>
+  <thead>
+    <tr><th>Flag</th><th>Type</th><th>Default</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    {repo.cliFlags.map((flag) => (
+      <tr>
+        <td><code>{flag.name}</code></td>
+        <td>{flag.type}</td>
+        <td><code>{flag.default === '' ? '""' : flag.default}</code></td>
+        <td>{flag.usage}</td>
+      </tr>
+    ))}
+  </tbody>
+</table>
+
+## Mode behaviour
+
+| Invocation | Behaviour |
+|---|---|
+| `telemeetbot` | Loads the config (or starts the wizard), then runs the bot, engine and health server until `SIGINT`/`SIGTERM` |
+| `telemeetbot --config PATH` | Same, with an explicit config file |
+| `telemeetbot --wizard` | Runs setup and exits unless `--run` is also given |
+| `telemeetbot --wizard --run` | Setup, then start the bot |
+| `telemeetbot --check` | Doctor, prints checks, exits |
+| `telemeetbot --check --capture-test` | Doctor plus a real tab-capture probe |
+| `telemeetbot --probe MEET --probe-media URL --probe-seconds N` | Joins the meeting with the real engine, logs the stages, exits; no Telegram traffic |
+| `telemeetbot --media-probe URL --probe-seconds N` | Plays one media link and samples playback/pixels; no meeting |
+| `telemeetbot --version` | Prints `telemeetbot <version> (<go version> <os>/<arch>)` and exits |
+
+`--capture-test` is ignored without `--check`. `--probe-seconds` is used as the admit wait by
+`--probe` and as the sample window by `--media-probe`; both floor it at 10 seconds.
+
+## Config path resolution
+
+1. `--config <path>`
+2. `TELEMEETBOT_CONFIG`
+3. `./telemeetbot.yml`
+4. `/etc/telemeetbot/config.yml`
+
+If none exists, the wizard starts and writes to the first candidate.
+
+## Exit status
+
+| Code | Meaning |
+|---|---|
+| `0` | Success — including a clean shutdown on a signal |
+| `1` | Setup failed, config could not be loaded or validated, a probe failed, or the doctor reported a failed check |
+
+There are no other exit codes. The doctor prints failed checks before exiting, and a probe logs its
+failure and exits 1.
+
+## Examples
+
+```bash
+# first install
+telemeetbot --wizard --config /data/telemeetbot.yml
+
+# run with an explicit config
+telemeetbot --config /data/telemeetbot.yml
+
+# pre-flight a host
+telemeetbot --config /data/telemeetbot.yml --check --capture-test
+
+# is this YouTube link actually playable from this server?
+telemeetbot --config /data/telemeetbot.yml --media-probe \
+  "https://www.youtube.com/watch?v=jNQXAC9IVRw" --probe-seconds 12
+
+# does this meeting admit the bot and start a share?
+telemeetbot --config /data/telemeetbot.yml \
+  --probe https://meet.google.com/abc-defg-hij \
+  --probe-media https://www.youtube.com/watch?v=jNQXAC9IVRw \
+  --probe-seconds 90
+```
+
+<Callout type="note">
+Inside the container the binary is the first argument after the `tini` entrypoint:
+<code>docker exec telemeetbot telemeetbot --config /data/telemeetbot.yml --check</code>.
+</Callout>

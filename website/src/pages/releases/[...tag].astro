@@ -1,0 +1,75 @@
+---
+import { getCollection, render } from 'astro:content';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import Icon from '../../components/Icon.astro';
+import { absolute, url } from '../../utils/paths';
+
+export async function getStaticPaths() {
+  const entries = await getCollection('releases');
+  return entries.map((entry) => ({ params: { tag: entry.data.tag }, props: { entry } }));
+}
+
+const { entry } = Astro.props;
+const { Content, headings } = await render(entry);
+const canonical = absolute(`/releases/${entry.data.tag}/`);
+const date = entry.data.publishedAt
+  ? new Date(entry.data.publishedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' })
+  : null;
+const jsonLd = [
+  {
+    '@context': 'https://schema.org',
+    '@type': 'TechArticle',
+    headline: entry.data.title,
+    description: entry.data.summary,
+    url: canonical,
+    datePublished: entry.data.publishedAt ?? undefined,
+    isPartOf: { '@type': 'WebSite', name: 'TeleMeetBot', url: absolute('/') },
+  },
+];
+const toc = headings.filter((heading) => heading.depth === 2);
+---
+<BaseLayout title={`${entry.data.title} — TeleMeetBot`} description={entry.data.summary || `Release notes for ${entry.data.tag}.`} type="article" jsonLd={jsonLd}>
+  <div class="wrap" style="max-width:860px;padding-block:48px 80px">
+    <nav class="breadcrumbs" aria-label="Breadcrumb">
+      <a href={url('/')}>Home</a><span aria-hidden="true">/</span>
+      <a href={url('/releases/')}>Releases</a><span aria-hidden="true">/</span>
+      <span aria-current="page">{entry.data.tag}</span>
+    </nav>
+
+    <div class="docs-meta" style="margin:0 0 14px">
+      <span class="chip chip-accent">{entry.data.tag}</span>
+      {date ? <span class="chip">{date}</span> : <span class="chip">Unreleased</span>}
+    </div>
+
+    <h1 class="docs-title">{entry.data.title}</h1>
+    {entry.data.summary && <p class="docs-lede">{entry.data.summary}</p>}
+
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:22px">
+      {entry.data.releaseUrl && (
+        <a class="btn btn-ghost btn-sm" href={entry.data.releaseUrl} rel="noopener">
+          <Icon name="github" size={15} /> GitHub release
+        </a>
+      )}
+      <a class="btn btn-ghost btn-sm" href={url('/docs/getting-started/')}>Install guide</a>
+    </div>
+
+    {toc.length > 1 && (
+      <nav aria-label="Sections" style="margin-top:26px;padding:14px 16px;border:1px solid var(--border);border-radius:12px;background:var(--panel)">
+        <span class="eyebrow" style="font-size:10px">In this release</span>
+        <ul style="margin:8px 0 0;padding-left:18px;columns:2;font-size:13.5px">
+          {toc.map((heading) => (
+            <li><a href={`#${heading.slug}`}>{heading.text}</a></li>
+          ))}
+        </ul>
+      </nav>
+    )}
+
+    <div class="prose" style="margin-top:30px">
+      <Content />
+    </div>
+
+    <p class="docs-edit">
+      Compare or download from <a href={`https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/tag/${entry.data.tag}`} rel="noopener">GitHub</a>.
+    </p>
+  </div>
+</BaseLayout>

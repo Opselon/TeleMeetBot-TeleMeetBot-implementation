@@ -1,0 +1,27 @@
+{
+  "name": "telemeetbot-website",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Documentation and product website for TeleMeetBot",
+  "scripts": {
+    "sync": "node scripts/sync-repo-content.mjs",
+    "dev": "npm run sync && astro dev",
+    "build": "npm run sync && astro build",
+    "build:pages": "npm run sync && astro build",
+    "preview": "astro preview",
+    "make:og": "node scripts/make-og.mjs",
+    "test:seo": "node tests/seo-and-links.test.mjs",
+    "test:contrast": "node tests/contrast-report.mjs",
+    "test:e2e": "playwright test",
+    "test": "npm run test:seo && npm run test:contrast && npm run test:e2e",
+    "audit:contrast": "node tests/contrast-report.mjs"
+  },
+  "dependencies": {
+    "@astrojs/mdx": "^4.3.14",
+    "astro": "^5.14.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.55.0"
+  }
+}

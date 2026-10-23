@@ -1,0 +1,37 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Icon from '../components/Icon.astro';
+import { url } from '../utils/paths';
+---
+<BaseLayout title="Page not found — TeleMeetBot" description="That page does not exist. Browse the TeleMeetBot documentation, releases or troubleshooting guide instead." noindex>
+  <section class="wrap" style="max-width:760px;padding-block:76px 96px">
+    <span class="eyebrow">404</span>
+    <h1 class="docs-title" style="margin-top:10px">This page is not in the meeting</h1>
+    <p class="docs-lede">
+      The link may be outdated, or the page moved. Everything below is generated from the current
+      release and is reachable from the header.
+    </p>
+    <div class="hero-cta" style="margin-top:26px">
+      <a class="btn btn-primary" href={url('/docs/')}>Browse the documentation</a>
+      <a class="btn btn-ghost" href={url('/')}>Go home</a>
+    </div>
+
+    <div class="grid-3" style="margin-top:38px">
+      <a class="card" href={url('/docs/getting-started/')} style="text-decoration:none">
+        <span class="card-icon"><Icon name="compass" size={17} /></span>
+        <h3>Getting started</h3>
+        <p>Install with Docker, the installer or from source.</p>
+      </a>
+      <a class="card" href={url('/docs/troubleshooting/')} style="text-decoration:none">
+        <span class="card-icon"><Icon name="alert" size={17} /></span>
+        <h3>Troubleshooting</h3>
+        <p>Symptom → cause → fix for joins, shares and playback.</p>
+      </a>
+      <a class="card" href={url('/releases/')} style="text-decoration:none">
+        <span class="card-icon"><Icon name="layers" size={17} /></span>
+        <h3>Releases</h3>
+        <p>Archives, checksums and release notes.</p>
+      </a>
+    </div>
+  </section>
+</BaseLayout>

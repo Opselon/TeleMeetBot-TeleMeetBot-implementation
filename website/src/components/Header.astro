@@ -1,0 +1,80 @@
+---
+import Icon from './Icon.astro';
+import { primaryNav, site } from '../data/site';
+import { url } from '../utils/paths';
+
+const path = Astro.url.pathname;
+const isDocs = path.includes('/docs/');
+---
+<header class="site-header">
+  <div class="wrap header-inner">
+    <a class="brand" href={url('/')} aria-label="TeleMeetBot home">
+      <svg class="brand-mark" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+        <rect x="1.5" y="1.5" width="29" height="29" rx="9" fill="url(#brand-grad)" stroke="rgba(255,255,255,0.14)" />
+        <path d="M12.5 10.5 22 16l-9.5 5.5v-11Z" fill="#04150d" />
+        <circle cx="25.5" cy="7" r="3.2" fill="#3ddc97" stroke="#04150d" stroke-width="1.4" />
+        <defs>
+          <linearGradient id="brand-grad" x1="4" y1="2" x2="28" y2="30" gradientUnits="userSpaceOnUse">
+            <stop stop-color="#3ddc97" />
+            <stop offset="1" stop-color="#2b9fd8" />
+          </linearGradient>
+        </defs>
+      </svg>
+      <span>
+        TeleMeetBot
+        <small>v{site.version.replace(/^v/, '')} · docs</small>
+      </span>
+    </a>
+
+    <nav class="header-nav" aria-label="Primary">
+      {primaryNav.map((item) => (
+        <a
+          href={item.href.startsWith('/#') ? `${url('/')}${item.href.slice(1)}` : url(item.href)}
+          aria-current={item.href === '/docs/' && isDocs ? 'page' : undefined}
+        >{item.label}</a>
+      ))}
+    </nav>
+
+    <div class="header-actions">
+      <button class="search-trigger" type="button" data-search-open aria-label="Search documentation">
+        <Icon name="search" size={15} />
+        <span>Search</span>
+        <span class="kbd" aria-hidden="true">⌘K</span>
+      </button>
+      <button class="icon-btn" type="button" data-theme-toggle aria-label="Switch colour theme" title="Switch colour theme">
+        <span data-theme-icon="dark"><Icon name="moon" size={17} /></span>
+        <span data-theme-icon="light" hidden><Icon name="sun" size={17} /></span>
+      </button>
+      <a class="icon-btn" href={site.repo} aria-label="TeleMeetBot on GitHub" rel="noopener">
+        <Icon name="github" size={17} />
+      </a>
+      <button class="icon-btn nav-toggle" type="button" data-drawer-open aria-label="Open menu" aria-expanded="false" aria-controls="site-drawer">
+        <Icon name="menu" size={18} />
+      </button>
+    </div>
+  </div>
+</header>
+
+<div class="drawer" id="site-drawer" data-drawer>
+  <div class="drawer-backdrop" data-drawer-close></div>
+  <div class="drawer-panel" role="dialog" aria-modal="true" aria-label="Site menu">
+    <div class="drawer-head">
+      <span class="eyebrow">Menu</span>
+      <button class="icon-btn" type="button" data-drawer-close aria-label="Close menu">
+        <Icon name="close" size={18} />
+      </button>
+    </div>
+    <nav class="drawer-nav" aria-label="Mobile">
+      {primaryNav.map((item) => (
+        <a href={item.href.startsWith('/#') ? `${url('/')}${item.href.slice(1)}` : url(item.href)}>
+          {item.label}
+        </a>
+      ))}
+      <a href={url('/docs/getting-started/')}>Getting started</a>
+      <a href={url('/docs/troubleshooting/')}>Troubleshooting</a>
+    </nav>
+    <div class="drawer-head" style="margin-top:22px">
+      <a class="btn btn-primary btn-sm" href={url('/docs/getting-started/')}>Read the docs</a>
+    </div>
+  </div>
+</div>

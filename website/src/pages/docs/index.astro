@@ -1,0 +1,73 @@
+---
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import Icon from '../../components/Icon.astro';
+import repo from '../../data/repo.generated.json';
+import { getDocs, groupDocs, docPath } from '../../lib/docs';
+import { absolute, url } from '../../utils/paths';
+
+const docs = await getDocs();
+const groups = groupDocs(docs);
+const jsonLd = [
+  {
+    '@context': 'https://schema.org',
+    '@type': 'CollectionPage',
+    name: 'TeleMeetBot documentation',
+    description: 'Installation, configuration, Google Meet integration, playback, diagnostics and deployment for TeleMeetBot.',
+    url: absolute('/docs/'),
+    isPartOf: { '@type': 'WebSite', name: 'TeleMeetBot', url: absolute('/') },
+  },
+  {
+    '@context': 'https://schema.org',
+    '@type': 'BreadcrumbList',
+    itemListElement: [
+      { '@type': 'ListItem', position: 1, name: 'Home', item: absolute('/') },
+      { '@type': 'ListItem', position: 2, name: 'Documentation', item: absolute('/docs/') },
+    ],
+  },
+];
+
+const icons = ['compass', 'book', 'terminal', 'code'];
+---
+<BaseLayout title="Documentation — TeleMeetBot" description="Everything needed to install, configure and operate TeleMeetBot: Google Meet integration, playback troubleshooting, diagnostics, security and deployment." jsonLd={jsonLd}>
+  <div class="wrap" style="padding-block:52px 16px;max-width:1000px">
+    <nav class="breadcrumbs" aria-label="Breadcrumb">
+      <a href={url('/')}>Home</a><span aria-hidden="true">/</span><span aria-current="page">Docs</span>
+    </nav>
+    <span class="eyebrow">Documentation</span>
+    <h1 class="docs-title" style="margin-top:10px">TeleMeetBot, end to end</h1>
+    <p class="docs-lede" style="max-width:64ch">
+      {docs.length} pages covering the shipped behaviour of {repo.version}: how a session joins a
+      meeting, how the tab is presented, what every configuration key does, and how to diagnose the
+      failures that actually happen.
+    </p>
+    <div class="docs-meta">
+      <span class="chip chip-accent">{repo.version}</span>
+      <span class="chip">Go {repo.goVersion}</span>
+      <span class="chip">{repo.testTotals.unit} unit tests</span>
+      <span class="chip">commit {repo.commit}</span>
+    </div>
+  </div>
+
+  <div class="wrap" style="max-width:1000px;padding-bottom:72px">
+    {groups.map((group, index) => (
+      <section style="margin-top:40px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">
+          <span class="card-icon" style="width:30px;height:30px;border-radius:8px">
+            <Icon name={icons[index] ?? 'book'} size={15} />
+          </span>
+          <h2 style="margin:0;font-size:1.05rem;letter-spacing:-.01em">{group.group}</h2>
+          <span class="mono" style="font-size:11px;color:var(--faint)">{group.items.length} pages</span>
+        </div>
+        <div class="grid-3">
+          {group.items.map((doc) => (
+            <a class="card" href={url(docPath(doc))} style="text-decoration:none">
+              <h3>{doc.data.title}</h3>
+              <p>{doc.data.description}</p>
+              <span class="card-link">Read →</span>
+            </a>
+          ))}
+        </div>
+      </section>
+    ))}
+  </div>
+</BaseLayout>

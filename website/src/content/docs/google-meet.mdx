@@ -1,0 +1,119 @@
+---
+title: Google Meet integration
+description: How TeleMeetBot joins a meeting as a guest, presents a tab headlessly, survives the host lobby, and what the meeting host must allow.
+group: Guides
+order: 1
+keywords: ['meet', 'present', 'screen share', 'lobby', 'xvfb', 'host']
+---
+
+import Callout from '../../components/Callout.astro';
+
+TeleMeetBot drives the real Meet UI in headless Chromium. It is not an API client: it clicks the
+same controls a person would, which is why the meeting must be one a guest can join.
+
+## What the meeting must allow
+
+| Requirement | Why |
+|---|---|
+| Guest join (or a host who admits guests) | The bot has no Google account and does not sign in. |
+| A host present, or a meeting that does not need admission | Without a host, Meet shows “no one can join unless invited or admitted”. |
+| The Meet UI in English | Controls are matched by English labels; `browser.lang` defaults to `en-US`. |
+| A meeting that is not sign-in-only | “Only users signed in to a Google account can join” cannot be satisfied. |
+
+<Callout type="warn" title="Guest-only by design">
+Meetings restricted to signed-in accounts, or to a specific organisation, cannot be joined. Waiting
+in a lobby is supported; authenticating as a Google user is not.
+</Callout>
+
+## The join sequence
+
+1. **Prejoin.** The bot fills `meet.guest_name`, mutes the camera and microphone (both by clicking the
+   Meet toggles and by sending `Ctrl+E` / `Ctrl+D`), then clicks **Ask to join** or **Join now**.
+2. **Lobby.** If the meeting requires admission, the session state becomes `admitting` and the bot
+   re-requests entry every 30 seconds. A host clicking *Admit* is enough.
+3. **In-call checks.** The engine confirms it is actually inside the call by looking for controls that
+   only exist in a call — leave call, raise hand, people, chat, meeting details, share screen — not
+   just the word “Present”.
+4. **Present.** The bot clicks Meet's share control and confirms the capture started.
+
+Muting before joining matters: Chromium's test camera device produces a green pattern, and Meet turns
+the camera on by default on the prejoin screen. Muting both devices is what prevents a green tile for
+everyone in the meeting.
+
+## How presenting works
+
+Meet has shipped two shapes of the same flow, and both are handled:
+
+- a source menu (**A tab** / **A window** / **Entire screen**) that needs a second click, and
+- a direct `getDisplayMedia` call from the toolbar button, after which Meet shows
+  “Presentation is starting…”.
+
+The presenter button is found among leaf buttons only, scored by exact `aria-label` / `data-tooltip`
+phrases (`present now`, then `share screen`), and excludes audio, microphone, camera, leave and
+settings controls. This matters because Meet's whole call-control bar is one `role="button"`
+container whose text contains every label; clicking it opens nothing.
+
+### Capture by tab title
+
+Chromium answers an automatic tab capture by matching the **browser-side** tab title against
+`--auto-select-tab-capture-source-by-title`. The bot therefore:
+
+- serves the player from a loopback HTTP server titled `TeleMeet Media`,
+- locks the title through the native `Document.prototype` setter so SPA title writes cannot change it,
+- checks that Chromium itself sees the capture tab before clicking Present.
+
+`meet.capture_source` must equal that title. Changing it without changing the player title breaks
+presenting, and config validation rejects a screen-looking source while `present_mode` is `tab`.
+
+<Callout type="tip">
+The capture tab's title must be visible to Chromium, not only to JavaScript. If you fork the player
+page, keep the title in the document head and avoid overriding `document.title` with a getter only.
+</Callout>
+
+## Sharing a display instead of a tab (screen mode)
+
+Screen mode shares a virtual X display. It is useful when a page cannot be captured as a tab, but it
+costs more resources and needs a display server:
+
+```yaml
+browser:
+  headless: false
+  display: ":99"
+meet:
+  present_mode: "screen"
+  capture_source: "Entire screen (monitor 1)"
+```
+
+Start the bot under `xvfb-run`, or point `display` at an existing Xvfb display. Config validation
+requires the capture source to look like a screen source in this mode. No-window Chromium cannot use
+`getDisplayMedia` this way, so `headless` must be false.
+
+## When the lobby does not let the bot in
+
+The session stays in `admitting` and logs each attempt. It fails fast only for terminal conditions:
+the meeting is full, the meeting has ended, or the code is invalid. Otherwise it keeps asking until
+`meet.admit_wait_seconds` expires (default 300; `0` waits forever).
+
+If the host never admits the bot, no amount of retrying helps. Ask the host to admit “TeleMeet Bot”,
+or use a meeting that does not require admission.
+
+## Recovery behaviour
+
+- A YouTube consent wall that appears **after** the share is live is cleared in place, without
+  re-presenting. The capture track is bound to the media tab, so restarting the share is unnecessary
+  and risky.
+- The bot re-presents only after two consecutive checks report that the presentation was lost, so a
+  single slow DevTools call cannot cost a share.
+- A transient DevTools hiccup no longer kills a live stream; the session requires repeated failures
+  before it gives up.
+
+## Limitations worth knowing
+
+- **Meet changes its UI.** Selectors are label- and structure-based, with regression tests, but a
+  redesign can still break a click. Run `--check --capture-test` after upgrading, and attach
+  `logging.level: debug` output when reporting a failure.
+- **Guest identity only.** The bot appears as “TeleMeet Bot” (or your `meet.guest_name`), not as a
+  named Google account.
+- **One presenter per session.** Two sessions in the same meeting both try to present; Meet permits
+  one presenter, so the second will fail.
+- **No camera compositing.** Tab mode shares the media tab only. Screen mode shares the whole display.

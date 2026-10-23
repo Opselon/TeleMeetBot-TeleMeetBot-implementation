@@ -1,0 +1,166 @@
+---
+title: Diagnostics
+description: The doctor, the real tab-capture self-test, media and meeting probes, health endpoints, and the log markers that explain a failure.
+group: Operations
+order: 3
+keywords: ['doctor', 'check', 'capture test', 'probe', 'healthz', 'logs']
+---
+
+import repo from '../../data/repo.generated.json';
+import Callout from '../../components/Callout.astro';
+
+TeleMeetBot has four diagnostic surfaces: a startup doctor, a capture self-test, two probes that
+reproduce playback and meeting failures, and structured logs. None of them require a Telegram chat.
+
+## Doctor
+
+```bash
+telemeetbot --config telemeetbot.yml --check
+```
+
+The doctor prints one line per check and exits non-zero if any check fails.
+
+| Check | What it proves |
+|---|---|
+| config | The YAML parses and passes validation |
+| telegram token | `getMe` reaches the Telegram API and returns the bot username |
+| chromium | A binary was found (explicit path, `PATH`, or rod's managed download) and reports a version |
+| disk | The data directory is writable and has at least 1.5 GB free |
+| health port | The address is free, or already served by a running TeleMeetBot instance |
+| network | Outbound HTTPS reaches `google.com` and `youtube.com` (skippable) |
+| tab capture | Only with `--capture-test`: a real `getDisplayMedia` capture produced changing frames and an audio track |
+
+The health-port check treats “already served by a running instance” as success. That is what makes it
+usable from inside the container that is already running.
+
+## Capture self-test
+
+```bash
+telemeetbot --config telemeetbot.yml --check --capture-test
+```
+
+This starts Chromium once, serves a local player page, requests a tab capture with the same flags and
+title the session uses, and proves the stream is real: frames must change and an audio track must be
+present. The result is printed both as a check line and as JSON:
+
+```json
+{"video": true, "audio": true, "frames": 4, "variance": 38.4, "label": "Shared tab", "px": "40,120,200", "error": ""}
+```
+
+`frames` is the number of sampled frames (4), `variance` is their mean brightness (a flat black
+capture reports a very low value), `label` is the track label the browser assigned, `px` is one sampled
+RGB pixel, and `error` is non-empty when a video-only grant or frame sampling problem occurred.
+
+If audio is missing the check adds a hint: Meet tab shares normally include tab audio, so a silent
+capture usually means the capture flags or the source selection are wrong. If the capture is refused
+entirely, the hint suggests screen mode with Xvfb as the fallback.
+
+<Callout type="note">
+`--capture-test` needs a writable temp/profiles directory and about a gigabyte of free memory. It does
+not join a meeting and does not contact Telegram.
+</Callout>
+
+## Media probe (no meeting)
+
+```bash
+telemeetbot --config telemeetbot.yml --media-probe "https://example.com/video.mp4" --probe-seconds 12
+```
+
+The probe opens the link exactly as a session would, then samples playback and rendered pixels:
+
+| Field | Meaning |
+|---|---|
+| `kind` | `youtube`, `direct` or `page` — how the link was classified |
+| `readyState` | `HTMLMediaElement.readyState` of the player (4 means enough data) |
+| `position`, `duration`, `advance` | Playback position, total duration and progress during the sample window |
+| `meanR`, `meanG`, `meanB` | Mean colour of the sampled canvas frame |
+| `samples` | Number of sampled frames |
+| `green`, `black` | Whether the frame is decoder-green or black |
+| `painted` | Whether anything was rendered at all |
+| `consentPresent`, `consent` | YouTube consent wall state and the action taken |
+| `overlayFree` | Whether blocking overlays (cookie walls, dialogs) are gone |
+| `playerErr`, `pageProblem`, `codec` | The page's own error, a detected problem, and codec support |
+| `ytState` | The YouTube player state, when the page exposes it |
+| `verdict` | A short human conclusion |
+
+`--probe-seconds` is the sample window and has a floor of 10 seconds for this mode.
+
+## Meeting probe (real join, no Telegram)
+
+```bash
+telemeetbot --config telemeetbot.yml --probe https://meet.google.com/abc-defg-hij \
+  --probe-media https://www.youtube.com/watch?v=jNQXAC9IVRw --probe-seconds 90
+```
+
+This runs the same engine a session uses — browser flags, player tab, Meet join, Present, playback —
+streams the stage sequence to the log, and exits. It never starts the Telegram bot. Use it to answer
+“is it the meeting or the bot?” without involving a chat.
+
+`--probe-seconds` is the admit wait for this mode, also with a 10 second floor. The default
+`--probe-media` is the first YouTube video ever uploaded (`jNQXAC9IVRw`), which makes a quick smoke
+test possible without hunting for a link.
+
+## Health endpoints
+
+| Route | Response |
+|---|---|
+| `GET /healthz` | JSON snapshot, `200 OK` |
+| `GET /livez` | `ok` plain text, `200 OK` — used by the container healthcheck |
+| `GET /` | A plain-text line pointing at Telegram and `/healthz` |
+
+`/healthz` exposes these fields, all from the live snapshot:
+
+{repo.healthFields.map((field) => <code>{field}</code>)}
+
+Example:
+
+```json
+{
+  "status": "ok",
+  "version": "v1.1.0",
+  "go": "go1.26.8",
+  "uptime_seconds": 3821,
+  "active_sessions": 1,
+  "max_sessions": 2,
+  "chromium": "/usr/bin/chromium",
+  "disk_free_gb": 42.1,
+  "config": "/data/telemeetbot.yml"
+}
+```
+
+Only `GET`/`HEAD` are accepted on `/healthz`; anything else returns `405`. There are no write
+endpoints.
+
+## Logs
+
+Set `logging.level` to `debug` for the UI-control traces that matter when Meet changes:
+
+```yaml
+logging:
+  level: "debug"
+```
+
+Markers group the pipeline:
+
+| Marker | Area |
+|---|---|
+| `[PIPELINE:browser]` | Chromium launch, flags, profile lifecycle |
+| `[PIPELINE:media]` | Media tab, player document, classification |
+| `[PIPELINE:meet]` | Meet load, prejoin, lobby and admission |
+| `[PIPELINE:present]` | Present button, source selection, capture start |
+| `[PIPELINE:consent]` | YouTube consent wall detection and dismissal |
+| `[PIPELINE:playback]` | Playback proof, position advance, pixel checks |
+| `[PIPELINE:recovery]` | Post-share recovery without re-presenting |
+| `[PIPELINE:session]` | Session lifecycle and state transitions |
+| `[PIPELINE:stream]` | Streaming heartbeat and progress |
+
+Session states also carry step detail (`[1/6]` … `[6/6]`), which is what the Telegram card shows.
+
+## What to attach to a bug report
+
+1. `telemeetbot --version`.
+2. `--check` output (redact the bot username if you care).
+3. The failing step's log lines at `debug`, with tokens and meeting URLs removed.
+4. `--media-probe` output for playback problems, or `--probe` output for join problems.
+
+Never paste a bot token or a private meeting URL into an issue.

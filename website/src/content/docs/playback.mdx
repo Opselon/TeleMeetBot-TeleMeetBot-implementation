@@ -1,0 +1,127 @@
+---
+title: Playback and media
+description: Which links TeleMeetBot plays, how the local player works, what the controls do, and how the YouTube consent wall and green frames are handled.
+group: Guides
+order: 2
+keywords: ['youtube', 'player', 'consent', 'green screen', 'autoplay', 'media probe']
+---
+
+import Callout from '../../components/Callout.astro';
+import InlineCodeList from '../../components/InlineCodeList.astro';
+import repo from '../../data/repo.generated.json';
+
+## Supported links
+
+The bot classifies each link before a session starts:
+
+| Kind | Detected by | How it is opened |
+|---|---|---|
+| YouTube | `youtu.be/…`, `youtube.com/watch?v=…`, `/shorts/…`, `/live/…` | Normalised to `https://www.youtube.com/watch?v=<id>&autoplay=1` and opened directly |
+| Direct media | A path extension in the list below, or a `googlevideo.com` / `videoplayback` URL | Rendered in the embedded player document with `<video>` / `<audio>` |
+| Web page | Anything else with an `http(s)` URL | Opened as a page; the player wrapper still provides controls where it can |
+
+Direct media extensions: <InlineCodeList items={repo.mediaExtensions} />.
+
+YouTube links are never opened as `/embed/` documents. Embedding a watch page in a local document
+triggers YouTube's 150/153 restriction errors; the watch layout is also the only one whose `<video>`
+element stays controllable from the same origin.
+
+<Callout type="warn" title="Channel and playlist pages">
+A YouTube URL that is not a video (a channel or playlist) is treated as a generic web page rather
+than a controlled player. Playback controls may not map cleanly to it.
+</Callout>
+
+## The player tab
+
+Direct media is served from a small loopback HTTP document titled `TeleMeet Media`. Two details
+matter:
+
+- Chromium never blocks the media fetch, because the document is local and the media URL is loaded by
+  the page itself.
+- The title is the value Chromium's tab-capture selector matches, so presenting does not depend on a
+  picker that a headless browser cannot show.
+
+The player is created **muted** when `media.mute_until_connected` is true, then unmuted and started
+once the share is confirmed. It always loops: the configured `media.loop` value is currently not read
+(see [known gaps](/docs/configuration/#known-gaps)).
+
+## Playback is proven, not assumed
+
+A session reaches `streaming` only when:
+
+1. the video/audio element reports a non-zero duration and a ready state that can play,
+2. the playback position advances between samples, and
+3. sampled canvas pixels are neither black nor a decoder green.
+
+Failures are reported on the session card and in the log (`[PIPELINE:playback]`) with the reason —
+codec support, page error, or “no frames”. `--media-probe` runs the same checks without a meeting.
+
+## YouTube specifics
+
+### The consent wall
+
+“Before you continue to YouTube” is dismissed structurally, not by guessing a phrase in one language:
+
+- buttons are scored by normalised labels (NFD, combining marks removed, punctuation stripped) against
+  per-locale phrase tables, preferring **Reject all** so no tracking cookies are enabled,
+- decoys such as *Customize*, *More options* and *Learn more* are excluded,
+- candidates are found in the light DOM and inside polymer shadow roots,
+- only elements with a non-zero rectangle count, so a `display:none` leftover cannot block forever,
+- the click ladder is synthetic click → physical mouse click → keyboard Enter, then the other action
+  family, recording every control tried.
+
+If the wall cannot be cleared, the bot refuses to present a tab that would show a cookie dialog, and
+the error carries the surface, the buttons it saw and what it tried.
+
+### Autoplay suppression
+
+YouTube's player pauses itself when it believes the tab is hidden. Before navigating, the bot spoofs
+`document.hidden = false` and `visibilityState = 'visible'`, suppresses `visibilitychange`, and stubs
+`HTMLMediaElement.prototype.pause` until play is requested. On play it also calls the player API
+(`playVideo`, `unMute`, `setVolume(100)`) when present.
+
+### Datacenter IPs
+
+YouTube may answer a datacenter IP with *“Sign in to confirm you're not a bot”*. That is an egress
+problem, not a bot problem. Route Chromium through a proxy:
+
+```yaml
+browser:
+  proxy: "http://172.17.0.1:3339"   # example: a proxy reachable from the container
+```
+
+`browser.proxy` accepts a Chromium proxy string (`http://`, `socks5://`). The bot also detects an
+ambient SOCKS5 proxy on `127.0.0.1:9050` if one is running.
+
+## Green or black frames
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| A green rectangle where the bot's camera should be | Chromium's fake camera device is enabled and Meet turned the camera on | Keep `headless: true` in tab mode; the bot mutes camera and mic on prejoin and in-call |
+| The shared tab is black | The page painted nothing, or the video never started | Run `--media-probe <url>`; check `readyState`, `advance` and mean RGB |
+| Audio missing in the meeting | Tab audio was not captured, or the player is muted | Check the capture probe reports `audio=true`; unmute from the card |
+| Video stutters every few seconds | CPU starvation or too many sessions | Lower `limits.max_sessions`, check `--check` disk/RAM output |
+
+## Controls and what they act on
+
+| Button | Effect |
+|---|---|
+| ⏸ Pause / ▶️ Resume | Pauses or resumes the player element |
+| 🔇 Mute / 🔊 Unmute | Mutes or restores audio at the current volume |
+| 🔉 Vol- / 🔊 Vol+ | Volume ±10 percentage points |
+| ⏪ -10s / ⏩ +10s | Seek by `media.seek_step_seconds` |
+| ♻️ Restart media | Reloads the media tab and starts from the beginning |
+| ⏹ Stop | Ends the session and closes Chromium |
+
+Volume, speed, mute state and position are read back from the page and mirrored on the card, so the
+card shows what the page actually did rather than what was requested.
+
+## Diagnosing one link without a meeting
+
+```bash
+telemeetbot --config telemeetbot.yml --media-probe "https://www.youtube.com/watch?v=jNQXAC9IVRw" --probe-seconds 12
+```
+
+The probe prints JSON with `kind`, `readyState`, `position`, `duration`, `advance`, `meanR/G/B`,
+`green`, `black`, `consentPresent`, `overlayFree`, `codec`, `playerErr`, `pageProblem`, `ytState` and a
+human `verdict`. Use it before blaming the meeting.

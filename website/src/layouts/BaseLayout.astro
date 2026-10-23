@@ -1,0 +1,36 @@
+---
+import BaseHead from '../components/BaseHead.astro';
+import Header from '../components/Header.astro';
+import Footer from '../components/Footer.astro';
+import SearchDialog from '../components/SearchDialog.astro';
+import '../styles/global.css';
+
+type Props = {
+  title: string;
+  description: string;
+  noindex?: boolean;
+  type?: 'website' | 'article';
+  jsonLd?: Record<string, unknown>[];
+  bodyClass?: string;
+};
+
+const { title, description, noindex, type, jsonLd = [], bodyClass = '' } = Astro.props;
+---
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <BaseHead title={title} description={description} noindex={noindex} type={type} jsonLd={jsonLd} />
+  </head>
+  <body class={bodyClass}>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <Header />
+    <main id="main">
+      <slot />
+    </main>
+    <Footer />
+    <SearchDialog />
+    <script>
+      import '../scripts/ui.js';
+    </script>
+  </body>
+</html>

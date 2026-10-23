@@ -50,6 +50,45 @@ jobs:
           TELEMEETBOT_BROWSER: ${{ steps.chrome.outputs.chrome-path }}
         run: go test ./internal/engine -run TestIntegration -count=1 -v
 
+  website:
+    name: website (build + audits)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: website
+    env:
+      SITE_URL: https://opselon.github.io
+      BASE_PATH: /TeleMeetBot-TeleMeetBot-implementation
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - run: npm ci
+
+      - name: build
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run build
+
+      - name: SEO and link audit
+        run: npm run test:seo
+
+      - name: contrast audit
+        run: npm run test:contrast
+
+      - run: npx playwright install --with-deps chromium
+
+      - name: end-to-end
+        run: npm run test:e2e
+
   docker:
     name: docker build
     runs-on: ubuntu-latest
