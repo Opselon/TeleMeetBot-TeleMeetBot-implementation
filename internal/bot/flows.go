@@ -18,16 +18,22 @@ const (
 	stepNone = iota
 	stepMeet
 	stepMedia
+	// stepSwitchMedia waits for a replacement media link for a live session;
+	// unlike the wizard it never changes the Meet link or creates a session.
+	stepSwitchMedia
 )
 
 // flowTimeout drops half-finished wizards after inactivity.
 const flowTimeout = 15 * time.Minute
 
 type flow struct {
-	step    int
-	meet    string
-	media   string
-	updated time.Time
+	step  int
+	meet  string
+	media string
+	// sessionID is set only by stepSwitchMedia: the live session whose media
+	// tab will be pointed at the new link.
+	sessionID string
+	updated   time.Time
 }
 
 // getFlow returns the user's pending wizard.
@@ -130,6 +136,13 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 	// Free text belongs to the wizard when one is open.
 	f := b.getFlow(userID)
 	if f == nil || f.step == stepNone {
+		// A bare media link while a session is live is most likely an attempt
+		// to change what is on screen: point at the switch flow instead of
+		// pretending the message was meaningless.
+		if target, err := engine.ClassifyMedia(text); err == nil && len(b.eng.Active()) > 0 {
+			b.sendText(chatID, fmt.Sprintf("🔀 Got <code>%s</code>.\n\nOpen the session card and press <b>Switch media</b> to put it on the share — the meeting and the share stay up.", esc(truncate(target.URL, 120))), sessionsKB(b.statuses()))
+			return
+		}
 		b.sendText(chatID, "Use /new (or ➕ New stream) to start a session.", mainMenuKB())
 		return
 	}
@@ -160,10 +173,45 @@ func (b *Bot) stepInput(chatID, userID int64, f *flow, text string) {
 		b.setFlow(userID, f)
 		userLang := b.st.GetUserAudioLang(userID)
 		b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang), confirmKB(userLang))
+	case stepSwitchMedia:
+		b.applyMediaSwitch(chatID, userID, f, text)
 	default:
 		b.clearFlow(userID)
 		b.sendText(chatID, "Wizard restarted. Send a Meet link, or /cancel.", mainMenuKB())
 	}
+}
+
+// applyMediaSwitch hands a validated replacement link to the engine, which
+// repoints the live session's media tab at it. The Meet session, the screen
+// share and every other session field are left alone, so the flow only waits
+// for a URL and then gets out of the way.
+func (b *Bot) applyMediaSwitch(chatID, userID int64, f *flow, text string) {
+	target, err := engine.ClassifyMedia(text)
+	if err != nil {
+		b.sendText(chatID, "❌ "+esc(err.Error())+"\n\nSend an http(s) media link, or /cancel.", cancelKB())
+		return
+	}
+	s := b.eng.Get(engine.SessionID(f.sessionID))
+	if s == nil {
+		b.clearFlow(userID)
+		b.sendText(chatID, "This session is gone — nothing to switch.", mainMenuKB())
+		return
+	}
+	switch s.Snapshot().State {
+	case engine.StateEnded, engine.StateError:
+		b.clearFlow(userID)
+		b.sendText(chatID, "This session has ended — nothing to switch.", mainMenuKB())
+		return
+	}
+	b.clearFlow(userID)
+	b.sendText(chatID, fmt.Sprintf("🔀 Switching to <code>%s</code>…\n\nThe share stays up; only the shared tab changes.", esc(truncate(target.URL, 120))), nil)
+	if err := s.SwitchMedia(target.URL); err != nil {
+		b.log.Warnf("switch media %s: %v", s.ID, err)
+		b.sendText(chatID, "🔴 <b>Switch failed</b>\n\n"+esc(truncate(err.Error(), 300))+"\n\nThe session kept streaming; retry with 🔀 Switch media.", sessionCardKB(s.Snapshot()))
+		return
+	}
+	st := s.Snapshot()
+	b.sendText(chatID, sessionCardText(st), sessionCardKB(st))
 }
 
 // startFlow begins the wizard. args optionally carries "/new <meet> [media]"
@@ -327,7 +375,17 @@ func (b *Bot) handleAction(chatID int64, msgID int, q *tgbotapi.CallbackQuery, d
 		_ = b.api.Edit(chatID, msgID, "This session is gone.", mainMenuKB())
 		return
 	}
+	// switchurl is a two-step action: open a URL flow, then act on the message.
+	// It must come before the generic actions below so the flow setup never
+	// races with a media-control call.
 	st := s.Snapshot()
+	if action == "switchurl" {
+		userID := q.From.ID
+		b.setFlow(userID, &flow{step: stepSwitchMedia, sessionID: string(id), meet: st.MeetURL, media: st.MediaURL})
+		_ = b.api.AnswerCallback(q.ID, "send the new media link")
+		_ = b.api.Edit(chatID, msgID, switchMediaText(st), cancelKB())
+		return
+	}
 	var err error
 	toast := ""
 	switch action {

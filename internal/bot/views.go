@@ -221,6 +221,7 @@ func sessionCardKB(st engine.Status) *tgbotapi.InlineKeyboardMarkup {
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData("♻️ Restart media", "act:"+id+":restart"),
+			tgbotapi.NewInlineKeyboardButtonData("🔀 Switch media", "act:"+id+":switchurl"),
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData("🔄 Refresh", "act:"+id+":refresh"),
@@ -339,6 +340,7 @@ func helpText() string {
 ⏪ ⏩ — seek 10s (configurable)
 🔉 🔊 — volume
 ♻️ Restart — reload the media from the start
+🔀 Switch media — swap the shared URL without rejoining
 ⏹ Stop — leave the meeting
 
 <b>Notes</b>
@@ -377,6 +379,21 @@ func cancelKB() *tgbotapi.InlineKeyboardMarkup {
 		{tgbotapi.NewInlineKeyboardButtonData("✖️ Cancel", cbCancel)},
 		{tgbotapi.NewInlineKeyboardButtonData("⬅️ Dashboard", cbHome)},
 	}}
+}
+
+// switchMediaText is the prompt shown while the bot waits for the new media
+// link of a switch (the Meet session keeps streaming the old URL meanwhile).
+func switchMediaText(st engine.Status) string {
+	var sb strings.Builder
+	sb.WriteString("🔀 <b>Switch media</b>\n\n")
+	sb.WriteString(fmt.Sprintf("Session <code>%s</code> is live; the screen share stays up while the media tab reloads.\n\n", esc(string(st.ID))))
+	sb.WriteString(fmt.Sprintf("Current media: <code>%s</code>\n\n", esc(truncate(st.MediaURL, 120))))
+	sb.WriteString("Send the <b>new media link</b> to switch to:\n")
+	sb.WriteString("• YouTube watch/shorts links\n")
+	sb.WriteString("• direct files (<code>.mp4 .webm .mp3 …</code>)\n")
+	sb.WriteString("• any web page to put on screen\n\n")
+	sb.WriteString("<i>The meeting, the share and all controls are kept. Only the shared tab changes.</i>")
+	return sb.String()
 }
 
 // confirmText summarises the pending stream.

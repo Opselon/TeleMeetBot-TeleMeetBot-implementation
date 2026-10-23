@@ -71,6 +71,18 @@ type Session struct {
 
 	// pub tracks Meet's own publication counters between samples.
 	pub publishTracker
+
+	// switchMu serializes SwitchMedia calls: only one navigate → prepare →
+	// play cycle may drive the media tab at a time. switchGen is the generation
+	// counter that lets an in-flight switch notice a newer request and abort.
+	switchMu  sync.Mutex
+	switchGen uint64
+	// switchRun is the browser-facing half of a switch (navigate → prepare →
+	// play). It is nil in production, where the real rod-based implementation
+	// runs; package tests may substitute a fake so the orchestration — the
+	// latest-wins handoff, the state transitions and the rollback — can be
+	// exercised without Chromium.
+	switchRun func(target MediaTarget, stale func() bool) error
 }
 
 // Status is a dashboard-friendly snapshot.
@@ -164,8 +176,8 @@ func (s *Session) setState(state, detail string) {
 	}
 	s.mu.Unlock()
 	if changed {
-		s.log.Infof("session %s: %s (%s)", s.ID, state, detail)
-		s.mgr.emit(Event{Session: s.ID, Kind: EventState, Text: detail})
+		s.logger().Infof("session %s: %s (%s)", s.ID, state, detail)
+		s.emit(EventState, detail)
 	}
 }
 
@@ -187,7 +199,18 @@ func (s *Session) setError(err error) {
 }
 
 func (s *Session) emit(kind EventKind, text string) {
-	s.mgr.emit(Event{Session: s.ID, Kind: kind, Text: text})
+	if s.mgr != nil {
+		s.mgr.emit(Event{Session: s.ID, Kind: kind, Text: text})
+	}
+}
+
+// logger returns the session logger, or a silent one when the session was built
+// by hand (tests) instead of the manager.
+func (s *Session) logger() Logger {
+	if s.log != nil {
+		return s.log
+	}
+	return noopLogger{}
 }
 
 // mediaTab returns the media page (nil until the tab exists).
@@ -1031,10 +1054,21 @@ func (s *Session) reopenMedia() error {
 	if media == nil {
 		return errors.New("media page is not available")
 	}
-	target := s.MediaURL
-	if s.MediaKind == MediaDirect {
+	if err := s.navigateMediaTab(media, s.MediaURL, s.MediaKind); err != nil {
+		return err
+	}
+	return s.prepareMedia(media)
+}
+
+// navigateMediaTab points the existing media tab at target. The share follows
+// the tab (Chromium's getDisplayMedia is bound to the tab, not the URL), so
+// navigating the same tab is what switches what participants see. Direct media
+// files are wrapped in the loopback player document, exactly like openMedia.
+func (s *Session) navigateMediaTab(media *rod.Page, url string, kind MediaKind) error {
+	target := url
+	if kind == MediaDirect {
 		// Loopback HTTP (not data:) so Chrome always allows the media fetch.
-		doc, err := PlayerHTML(MediaTarget{URL: s.MediaURL, Kind: s.MediaKind}, s.playerOpts)
+		doc, err := PlayerHTML(MediaTarget{URL: url, Kind: kind}, s.playerOpts)
 		if err != nil {
 			return err
 		}
@@ -1048,7 +1082,7 @@ func (s *Session) reopenMedia() error {
 	}
 	_ = media.WaitLoad()
 	_, _ = media.Eval(titleLockJS(s.TabTitle))
-	return s.prepareMedia(media)
+	return nil
 }
 
 // queryMedia reads the media status JSON from the page.
