@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 )
@@ -251,4 +252,24 @@ func (s *Session) logMeetPublish() string {
 		return fmt.Sprintf("Meet's video encoder produced no frames (encoder=%q quality=%q): participants see a still/black share", st.Encoder, st.Quality)
 	}
 	return ""
+}
+
+// publishProblemClass maps a logMeetPublish problem to the recovery family it
+// belongs to. Only classes that a re-present can fix count: Meet dropping the
+// share (its senders vanish or the capture stream is torn down). A frozen
+// media tab or a dead encoder is a media-side fault and is healed by the media
+// recovery path instead, so the share is not needlessly re-clicked.
+func publishProblemClass(problem string) string {
+	switch {
+	case problem == "":
+		return ""
+	case strings.Contains(problem, "capture stream is missing"),
+		strings.Contains(problem, "no video sender"),
+		strings.Contains(problem, "no video track"):
+		return "share-dropped"
+	case strings.Contains(problem, "stopped delivering frames"),
+		strings.Contains(problem, "encoder produced no frames"):
+		return "media-stalled"
+	}
+	return "unknown"
 }

@@ -324,6 +324,13 @@ func (s *Session) watch() {
 	stalled := 0
 	lastCur := -1.0
 	exhaustedLogged := false
+	// Publishing watchdog: Meet's DOM can claim a share while its outbound
+	// video channel is dead. Two consecutive named problems (≥ 16s apart) with
+	// a recoverable class cost one bounded re-present (max 2), so a dropped
+	// share heals itself instead of streaming to an audience that sees nothing.
+	publishMisses := 0
+	publishFixes := 0
+	lastPublishFix := time.Time{}
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -415,9 +422,31 @@ func (s *Session) watch() {
 			lastPresentCheck = time.Now()
 			// Meet's own encoder first: "presenting" is a DOM claim, the
 			// outbound-rtp counters are what participants actually receive.
-			if problem := s.logMeetPublish(); problem != "" {
+			problem := s.logMeetPublish()
+			class := publishProblemClass(problem)
+			if problem != "" {
 				s.log.Warnf("[PIPELINE:publish] session %s: %s", s.ID, problem)
 				s.setDetail("[6/6] Share problem: " + problem)
+				// A recoverable drop (no senders / no capture stream) is healed
+				// by clicking Share again — same treatment as presenting()
+				// going false, and bounded the same way.
+				if class == "share-dropped" {
+					publishMisses++
+					s.log.Warnf("[PIPELINE:publish] session %s: publication dropped (%d/2 consecutive)", s.ID, publishMisses)
+					if publishMisses >= 2 && publishFixes < 2 && time.Since(lastPublishFix) >= 30*time.Second {
+						publishMisses = 0
+						publishFixes++
+						lastPublishFix = time.Now()
+						s.log.Warnf("[PIPELINE:publish] session %s: re-presenting to restore the video track (%d/2)", s.ID, publishFixes)
+						if err := s.startPresenting(); err != nil {
+							s.log.Warnf("[PIPELINE:publish] session %s: re-present failed: %v", s.ID, err)
+						} else {
+							_ = s.playMedia()
+						}
+					}
+				}
+			} else {
+				publishMisses = 0
 			}
 			if ok, _ := s.presenting(); ok {
 				presentMisses = 0

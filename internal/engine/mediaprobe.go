@@ -127,7 +127,7 @@ func ProbeMedia(ctx context.Context, browserCfg BrowserConfig, link string, seco
 		return MediaProbeReport{}, err
 	}
 
-	b, closeFn, err := launchBrowser(launchOptions{browser: browserCfg}, log)
+	b, closeFn, err := launchBrowser(launchOptions{browser: browserCfg, forMeet: true}, log)
 	if err != nil {
 		return MediaProbeReport{}, err
 	}

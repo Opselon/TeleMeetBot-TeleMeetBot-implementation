@@ -148,6 +148,24 @@ func Doctor(cfg *config.Config, cfgPath string, opts DoctorOptions) Report {
 				r.Checks = append(r.Checks, Check{"tab capture", true, detail})
 			}
 		}
+
+		// 8. WebGL context, launched the way a Meet session launches Chromium.
+		// Meet needs WebGL to publish presentation video; a configuration that
+		// removes it (browser.gpu: "off") otherwise looks perfectly healthy
+		// right up until participants see a blank share.
+		gl, err := engine.ProbeWebGL(ctx, browserCfg, meetCfg, opts.Log)
+		if err != nil {
+			r.Checks = append(r.Checks, Check{"webgl", false, fmt.Sprintf("%v", err)})
+		} else if !gl.OK {
+			hint := "no WebGL context: Google Meet will share audio but no video; set browser.gpu to \"compatible\" or \"swiftshader\""
+			r.Checks = append(r.Checks, Check{"webgl", false, fmt.Sprintf("webgl2=%t webgl1=%t err=%q (%s)", gl.WebGL2, gl.WebGL1, gl.Error, hint)})
+		} else {
+			version := "webgl1"
+			if gl.WebGL2 {
+				version = "webgl2"
+			}
+			r.Checks = append(r.Checks, Check{"webgl", true, version + " renderer=" + gl.Renderer + " draw=[" + gl.Draw + "]"})
+		}
 	}
 
 	return r
