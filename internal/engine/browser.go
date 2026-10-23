@@ -24,6 +24,10 @@ type launchOptions struct {
 	browser  BrowserConfig
 	meet     MeetOptions
 	userData string
+	// forMeet marks a real meeting session. Such a launch never runs without
+	// a GL context (see gpuMode): Meet needs WebGL to publish presentation
+	// video, and gpu:off otherwise shares a blank surface.
+	forMeet bool
 }
 
 // detectProxy finds an explicit or ambient SOCKS5 proxy (e.g. Tor on 127.0.0.1:9050 or
@@ -53,32 +57,55 @@ func detectProxy(cfg BrowserConfig) string {
 // GPU backend modes accepted by browser.gpu.
 const (
 	// GPUModeOff disables the GPU process: Chromium composites the shared tab
-	// in software without SwiftShader's per-frame GL round trips.
+	// in software without SwiftShader's per-frame GL round trips. Cheapest
+	// mode, but it also tears down the GPU process entirely, so pages get no
+	// WebGL context at all — Google Meet's media pipeline needs one before it
+	// will publish a presentation video track.
 	GPUModeOff = "off"
-	// GPUModeSwiftShader forces ANGLE/SwiftShader software GL.
+	// GPUModeCompatible keeps the cheap software compositor (no per-frame GL
+	// round trip for the shared tab) but still brings up ANGLE/SwiftShader so
+	// pages get a working WebGL context. This is the mode Meet sessions run in.
+	GPUModeCompatible = "compatible"
+	// GPUModeSwiftShader forces ANGLE/SwiftShader software GL for everything,
+	// compositing included.
 	GPUModeSwiftShader = "swiftshader"
 	// GPUModeAuto leaves the compositor choice to Chromium (real-GPU hosts).
 	GPUModeAuto = "auto"
 )
 
-// gpuMode resolves browser.gpu. Headless defaults to software compositing:
-// SwiftShader rasterises every shared frame through a software GL pipeline and
-// measured ~6x the host CPU of plain software compositing for identical frames
-// on a 2-core VPS.
-func gpuMode(cfg BrowserConfig) string {
+// gpuMode resolves browser.gpu for one launch. forMeet marks a real meeting
+// session: those must never run on GPUModeOff, because a GPU-less Chromium
+// gives Google Meet's publisher no WebGL and no video encoder path — the
+// session then shares a blank surface while audio keeps flowing. "off" is
+// still honoured for capture tests and media/publish probes, where WebGL is
+// irrelevant and the cheaper flags are what an operator asked for.
+func gpuMode(cfg BrowserConfig, forMeet bool) string {
 	switch strings.ToLower(strings.TrimSpace(cfg.GPU)) {
 	case "":
 		if cfg.Headless {
+			if forMeet {
+				return GPUModeCompatible
+			}
 			return GPUModeOff
 		}
 		return GPUModeAuto
 	case "default":
 		return GPUModeAuto
 	case GPUModeOff, "disable", "disabled", "none":
+		if forMeet {
+			// Never launch Meet without a GL context: it silently stops
+			// publishing video (see gpuMode's doc).
+			return GPUModeCompatible
+		}
 		return GPUModeOff
+	case GPUModeCompatible, "meet", "meet-safe", "webgl":
+		return GPUModeCompatible
 	case GPUModeSwiftShader, "angle", "swangle":
 		return GPUModeSwiftShader
 	case GPUModeAuto, "on", "hardware":
+		if forMeet && cfg.Headless {
+			return GPUModeCompatible
+		}
 		return GPUModeAuto
 	default:
 		return GPUModeAuto
@@ -87,7 +114,7 @@ func gpuMode(cfg BrowserConfig) string {
 
 // launchFlags is the Chromium command line for one browser (pure so the flag
 // contract is testable without launching anything).
-func launchFlags(cfg BrowserConfig, meet MeetOptions) []string {
+func launchFlags(cfg BrowserConfig, meet MeetOptions, forMeet bool) []string {
 	src := captureSource(cfg, meet)
 	out := []string{
 		"disable-dev-shm-usage",
@@ -115,9 +142,17 @@ func launchFlags(cfg BrowserConfig, meet MeetOptions) []string {
 		"accept-lang=" + languageOf(cfg),
 		"user-agent=" + userAgentOf(cfg),
 	}
-	switch gpuMode(cfg) {
+	switch gpuMode(cfg, forMeet) {
 	case GPUModeSwiftShader:
 		out = append(out, "enable-unsafe-swiftshader", "use-gl=angle", "use-angle=swiftshader", "disable-gpu-sandbox")
+	case GPUModeCompatible:
+		// SwiftShader exists only to hand pages a WebGL context; the frame
+		// pipeline (raster + display compositing) stays on the CPU paths that
+		// made gpu:off cheap, so a 2-core box keeps its headroom.
+		out = append(out,
+			"enable-unsafe-swiftshader", "use-gl=angle", "use-angle=swiftshader", "disable-gpu-sandbox",
+			"disable-gpu-compositing", "disable-gpu-rasterization",
+		)
 	case GPUModeOff:
 		out = append(out, "disable-gpu")
 	}
@@ -151,7 +186,7 @@ func launchBrowser(opts launchOptions, log Logger) (*rod.Browser, func(), error)
 		log.Infof("[PIPELINE:browser] media proxy enabled: %s (Meet bypassed)", proxy)
 	}
 
-	for _, f := range launchFlags(cfg, opts.meet) {
+	for _, f := range launchFlags(cfg, opts.meet, opts.forMeet) {
 		if name, vals, ok := splitArg(f); ok {
 			l.Set(flags.Flag(name), vals...)
 		}

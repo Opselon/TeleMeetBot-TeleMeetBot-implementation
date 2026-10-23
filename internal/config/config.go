@@ -295,9 +295,9 @@ func (c *Config) Validate() error {
 		problems = append(problems, `meet.present_mode must be "tab" or "screen"`)
 	}
 	switch strings.ToLower(strings.TrimSpace(c.Browser.GPU)) {
-	case "", "off", "disable", "disabled", "none", "swiftshader", "angle", "swangle", "auto", "default", "on", "hardware":
+	case "", "off", "disable", "disabled", "none", "swiftshader", "angle", "swangle", "compatible", "meet", "meet-safe", "webgl", "auto", "default", "on", "hardware":
 	default:
-		problems = append(problems, `browser.gpu must be "off", "swiftshader" or "auto"`)
+		problems = append(problems, `browser.gpu must be "off", "compatible", "swiftshader" or "auto"`)
 	}
 	if strings.TrimSpace(c.Meet.CaptureSource) == "" {
 		problems = append(problems, "meet.capture_source is empty")

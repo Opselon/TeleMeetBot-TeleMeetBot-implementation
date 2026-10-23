@@ -351,7 +351,7 @@ func (m *Manager) pruneFinishedLocked() {
 
 // acquireBrowser returns a browser for a session plus a release function.
 func (m *Manager) acquireBrowser() (*rod.Browser, func(), error) {
-	opts := launchOptions{browser: m.browserCfg, meet: m.meetCfg}
+	opts := launchOptions{browser: m.browserCfg, meet: m.meetCfg, forMeet: true}
 
 	if !m.browserCfg.PerSession {
 		m.sharedMu.Lock()
