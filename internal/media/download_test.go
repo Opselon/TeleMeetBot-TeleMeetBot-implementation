@@ -405,7 +405,13 @@ func TestDownloadCancel(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "video/mp4")
 		flusher, _ := w.(http.Flusher)
+		ctx := r.Context()
 		for i := 0; i < 1000; i++ {
+			select {
+			case <-ctx.Done():
+				return // the client cancelled: release the connection
+			default:
+			}
 			_, _ = w.Write(make([]byte, 1024))
 			if flusher != nil {
 				flusher.Flush()
@@ -587,7 +593,10 @@ func TestYTDLPCommandIsShellFree(t *testing.T) {
 		t.Fatalf("NewManager: %v", err)
 	}
 	t.Cleanup(func() { m.Close() })
+	// Force the fake to run even where no yt-dlp is installed (CI), and
+	// record the exact argv handed to the would-be subprocess.
 	var got []string
+	m.opts.YTDLPPath = "yt-dlp-probe"
 	m.ytdlpFn = func(ctx context.Context, args []string) ([]byte, []byte, error) {
 		got = args
 		return nil, nil, exec.ErrNotFound
