@@ -66,18 +66,31 @@ func (m *Manager) Download(ctx context.Context, req DownloadRequest) (*Result, e
 	// mid-download with a truncated file.
 	if m.diskFree != nil {
 		if free, ok := m.diskFree(m.opts.Dir); ok {
-			need := m.opts.MaxBytes
-			if need <= 0 {
-				need = 512 * 1024 * 1024
+			minFree := m.opts.MinFreeBytes
+			if minFree <= 0 {
+				minFree = 256 * 1024 * 1024
 			}
-			if free < need {
-				return nil, fmt.Errorf("insufficient disk space: %s free in %s", humanBytes(free), m.opts.Dir)
+			if m.opts.MaxBytes > 0 && m.opts.MaxBytes < minFree {
+				minFree = m.opts.MaxBytes
+			}
+			if free < minFree {
+				// Reclaim space from expired, orphan, and temp files first
+				m.Sweep(ctx)
+				if refreshed, ok2 := m.diskFree(m.opts.Dir); ok2 {
+					free = refreshed
+				}
+			}
+			if free < minFree {
+				return nil, fmt.Errorf("insufficient disk space: %s free in %s (minimum %s required)", humanBytes(free), m.opts.Dir, humanBytes(minFree))
 			}
 		}
 	}
 
 	release := m.acquireSlot()
 	defer release()
+
+	m.markInflight(id)
+	defer m.clearInflight(id)
 
 	var (
 		path, ct, via string
@@ -88,6 +101,7 @@ func (m *Manager) Download(ctx context.Context, req DownloadRequest) (*Result, e
 	case "direct":
 		res, err := m.fetchDirect(ctx, u, id)
 		if err != nil {
+			m.sweepIDFiles(id)
 			return nil, err
 		}
 		path, ct, bytes, via = res.Path, res.ContentType, res.Bytes, "http"
@@ -95,6 +109,7 @@ func (m *Manager) Download(ctx context.Context, req DownloadRequest) (*Result, e
 	case "youtube":
 		res, err := m.fetchYTDLP(ctx, u.String(), id)
 		if err != nil {
+			m.sweepIDFiles(id)
 			return nil, err
 		}
 		path, ct, bytes = res.Path, res.ContentType, res.Bytes
@@ -110,6 +125,7 @@ func (m *Manager) Download(ctx context.Context, req DownloadRequest) (*Result, e
 	// Re-verify what landed on disk before announcing it to the engine.
 	if err := verifyDownloadedFile(path, m.opts.MaxBytes); err != nil {
 		_ = m.deleteManaged(path, "verification failed")
+		m.sweepIDFiles(id)
 		return nil, err
 	}
 

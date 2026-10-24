@@ -25,6 +25,9 @@ type Options struct {
 	// MaxBytes is the per-file size ceiling. Zero disables the limit
 	// (not recommended).
 	MaxBytes int64
+	// MinFreeBytes is the minimum free disk space required on Dir before
+	// allowing a download. Zero defaults to 256 MiB.
+	MinFreeBytes int64
 	// Timeout bounds one whole download including transcode.
 	Timeout time.Duration
 	// MaxConcurrent bounds parallel downloads. Zero means one at a time.
@@ -55,6 +58,7 @@ func DefaultOptions(dir string) Options {
 		Dir:            dir,
 		TTL:            time.Hour,
 		MaxBytes:       2 * 1024 * 1024 * 1024,
+		MinFreeBytes:   256 * 1024 * 1024,
 		Timeout:        10 * time.Minute,
 		MaxConcurrent:  1,
 		AllowTranscode: true,
@@ -78,6 +82,9 @@ func (o Options) Validate() error {
 	}
 	if o.MaxBytes < 0 {
 		return errors.New("download.max_size_mb must not be negative")
+	}
+	if o.MinFreeBytes < 0 {
+		return errors.New("download.min_free_mb must not be negative")
 	}
 	if o.Timeout <= 0 {
 		return errors.New("download.timeout_seconds must be positive")

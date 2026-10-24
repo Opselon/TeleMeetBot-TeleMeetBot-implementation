@@ -631,3 +631,81 @@ func TestYTDLPCommandIsShellFree(t *testing.T) {
 	}
 	t.Fatalf("no argv element pointed inside the managed dir %q: %q", dir, got)
 }
+
+// TestManagerRemoveFreesFileImmediately proves m.Remove removes the file, drops
+// the entry from downloads.json, and clears the loopback route immediately.
+func TestManagerRemoveFreesFileImmediately(t *testing.T) {
+	testAllowLoopback(t)
+	m, dir := testManager(t, time.Hour) // 1-hour TTL
+	srv := serveMedia(t, 0, "video/mp4", smallMP4)
+
+	res, err := m.Download(context.Background(), DownloadRequest{URL: srv.URL, Kind: "direct", ID: "immed"})
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if _, err := os.Stat(res.Path); err != nil {
+		t.Fatalf("file should exist on disk: %v", err)
+	}
+
+	// Remove must delete the file immediately, not waiting for the 1-hour TTL.
+	if err := m.Remove("immed"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	if _, err := os.Stat(res.Path); !os.IsNotExist(err) {
+		t.Fatalf("file still exists after Remove: %v", err)
+	}
+	if _, ok := m.entries.Get("immed"); ok {
+		t.Fatal("manifest still tracks entry after Remove")
+	}
+
+	// Verify manifest file on disk
+	raw, err := os.ReadFile(filepath.Join(dir, manifestName))
+	if err == nil && strings.Contains(string(raw), `"immed"`) {
+		t.Fatal("manifest file on disk still contains entry")
+	}
+}
+
+// TestSweepOrphanFiles proves Sweep deletes untracked orphan files left in the download dir.
+func TestSweepOrphanFiles(t *testing.T) {
+	m, dir := testManager(t, time.Hour)
+
+	orphan := filepath.Join(dir, "ses-s-orphan.mp4")
+	if err := os.WriteFile(orphan, []byte("stale-media"), 0o600); err != nil {
+		t.Fatalf("write orphan: %v", err)
+	}
+	// Backdate the orphan file so it passes the grace cutoff
+	old := time.Now().Add(-1 * time.Minute)
+	_ = os.Chtimes(orphan, old, old)
+
+	n := m.Sweep(context.Background())
+	if n == 0 {
+		t.Fatal("Sweep did not report any removed files")
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("orphan file was not deleted by Sweep: %v", err)
+	}
+}
+
+// TestDiskCheckAllows1Point5GiBWith256MiBBuffer proves that when MinFreeBytes is
+// 256 MiB, 1.5 GiB free space passes download disk checks even with MaxBytes = 2 GiB.
+func TestDiskCheckAllows1Point5GiBWith256MiBBuffer(t *testing.T) {
+	testAllowLoopback(t)
+	m, _ := testManager(t, time.Hour)
+	srv := serveMedia(t, 0, "video/mp4", smallMP4)
+
+	// Simulate 1.5 GiB free space
+	m.diskFree = func(path string) (int64, bool) {
+		return int64(1.5 * 1024 * 1024 * 1024), true
+	}
+	m.opts.MaxBytes = 2 * 1024 * 1024 * 1024 // 2 GiB ceiling
+	m.opts.MinFreeBytes = 256 * 1024 * 1024  // 256 MiB requirement
+
+	res, err := m.Download(context.Background(), DownloadRequest{URL: srv.URL, Kind: "direct", ID: "clip-disk-ok"})
+	if err != nil {
+		t.Fatalf("Download failed with sufficient disk space: %v", err)
+	}
+	if _, err := os.Stat(res.Path); err != nil {
+		t.Fatalf("downloaded file missing: %v", err)
+	}
+}

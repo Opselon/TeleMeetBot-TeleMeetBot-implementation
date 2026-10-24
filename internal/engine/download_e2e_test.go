@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-rod/rod"
+
 	mediateam "github.com/Opselon/TeleMeetBot/internal/media"
 )
 
@@ -92,4 +94,107 @@ func TestSessionDownloadsAndExpires(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatal("the downloaded file was retained past its 1-hour-equivalent deadline")
+}
+
+// TestSessionStopFreesDownloadedFileImmediately proves that when a session stops/cleans up,
+// its downloaded media file is removed immediately from disk without waiting for the TTL.
+func TestSessionStopFreesDownloadedFileImmediately(t *testing.T) {
+	mediateam.SetAllowLoopbackForTest(true)
+	defer mediateam.SetAllowLoopbackForTest(false)
+
+	body := make([]byte, 4096)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	mgr := NewManager(BrowserConfig{}, MediaOptions{
+		DownloadEnabled: true, DownloadDir: dir, DownloadTTLMinutes: 60,
+		DownloadMaxSizeMB: 64, DownloadTimeoutSec: 30, DownloadConcurrent: 1,
+		DownloadBaseDir: dir,
+	}, MeetOptions{}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &Session{ID: "s-stop-immed", MediaURL: srv.URL, MediaKind: MediaDirect, mgr: mgr, ctx: ctx, cancel: cancel, done: make(chan struct{})}
+	if err := s.SetPlaybackMode(mediateam.ModeDownload); err != nil {
+		t.Fatalf("SetPlaybackMode: %v", err)
+	}
+	if err := s.prepareLocalMedia(); err != nil {
+		t.Fatalf("prepareLocalMedia: %v", err)
+	}
+	st := s.Snapshot()
+	if _, err := os.Stat(st.LocalFile.Path); err != nil {
+		t.Fatalf("downloaded file missing before stop: %v", err)
+	}
+
+	// Session stops / cleans up:
+	s.cleanup()
+
+	// The file MUST be deleted from disk immediately!
+	if _, err := os.Stat(st.LocalFile.Path); !os.IsNotExist(err) {
+		t.Fatalf("downloaded file was not removed immediately on session cleanup: %v", err)
+	}
+	if s.Snapshot().LocalFile.Path != "" {
+		t.Fatal("session still reports local file after cleanup")
+	}
+}
+
+// TestSessionSwitchMediaFreesOldDownloadedFileImmediately proves that switching media
+// in Download mode frees the previous download from disk.
+func TestSessionSwitchMediaFreesOldDownloadedFileImmediately(t *testing.T) {
+	mediateam.SetAllowLoopbackForTest(true)
+	defer mediateam.SetAllowLoopbackForTest(false)
+
+	body := make([]byte, 4096)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	mgr := NewManager(BrowserConfig{}, MediaOptions{
+		DownloadEnabled: true, DownloadDir: dir, DownloadTTLMinutes: 60,
+		DownloadMaxSizeMB: 64, DownloadTimeoutSec: 30, DownloadConcurrent: 1,
+		DownloadBaseDir: dir,
+	}, MeetOptions{}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	rec := newSwitchRecorder()
+	s := &Session{
+		ID:        "s-switch-immed",
+		MediaURL:  srv.URL + "/first.mp4",
+		MediaKind: MediaDirect,
+		mgr:       mgr,
+		ctx:       ctx,
+		cancel:    cancel,
+		done:      make(chan struct{}),
+		mediaPage: &rod.Page{},
+		switchRun: rec.run,
+		state:     StateStreaming,
+	}
+	if err := s.SetPlaybackMode(mediateam.ModeDownload); err != nil {
+		t.Fatalf("SetPlaybackMode: %v", err)
+	}
+	if err := s.prepareLocalMedia(); err != nil {
+		t.Fatalf("prepareLocalMedia: %v", err)
+	}
+	st1 := s.Snapshot()
+	oldPath := st1.LocalFile.Path
+	if _, err := os.Stat(oldPath); err != nil {
+		t.Fatalf("first download missing: %v", err)
+	}
+
+	// Switch to a new media URL:
+	if err := s.SwitchMedia(srv.URL + "/second.mp4"); err != nil {
+		t.Fatalf("SwitchMedia: %v", err)
+	}
+
+	// The old file must be freed from disk:
+	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
+		t.Fatalf("old downloaded file still exists after switch: %v", err)
+	}
 }

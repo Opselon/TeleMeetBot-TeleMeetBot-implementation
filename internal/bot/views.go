@@ -159,7 +159,7 @@ func mediaModeText(currentMode string) string {
 	sb.WriteString(fmt.Sprintf("Current mode: <b>%s</b>\n\n", esc(engine.PlaybackModeDisplay(mode))))
 	sb.WriteString("Choose how media reaches the share:\n\n")
 	sb.WriteString("• <b>🌐 Browser</b>\nPlays the link directly in the media tab, exactly as before.\n\n")
-	sb.WriteString("• <b>⬇️ Download &amp; Stream</b>\nDownloads supported media (YouTube via yt-dlp, direct mp4/webm/mkv/mov/mp3/m4a…) to the server first, then plays the local file. Downloaded files expire and are deleted after <b>1 hour</b>.\n\n")
+	sb.WriteString("• <b>⬇️ Download &amp; Stream</b>\nDownloads supported media (YouTube via yt-dlp, direct mp4/webm/mkv/mov/mp3/m4a…) to the server first, then plays the local file. Downloaded files are freed automatically when the session ends or switches (1-hour safety cap).\n\n")
 	sb.WriteString("• <b>🤖 Auto</b>\nPrefers browser playback; when the browser cannot play the link, it falls back to downloading once.\n\n")
 	sb.WriteString("<i>Your choice is saved across bot restarts and applies to every new stream. It does not change running sessions.</i>")
 	return sb.String()
@@ -404,7 +404,7 @@ func helpText() string {
 ⏹ Stop — leave the meeting
 
 <b>Download &amp; Stream</b>
-⬇️ Download &amp; Stream — fetch the media to the server first, then play the local file (YouTube via yt-dlp, direct mp4/webm/mkv/mov/mp3/m4a…). Files expire after <b>1 hour</b>.
+⬇️ Download &amp; Stream — fetch the media to the server first, then play the local file (YouTube via yt-dlp, direct mp4/webm/mkv/mov/mp3/m4a…). Files are freed when the session ends or switches (1-hour safety cap).
 🤖 Auto — browser first, download as a one-time fallback.
 
 <b>Notes</b>
@@ -480,7 +480,7 @@ func confirmText(meetLink, mediaLink string, kind engine.MediaKind, userAudioLan
 	mode := engine.NormalizePlaybackMode(userMediaMode)
 	sb.WriteString(fmt.Sprintf("\n%s Media mode: <b>%s</b>\n", engine.PlaybackModeEmoji(mode), esc(engine.PlaybackModeDisplay(mode))))
 	if (kind == engine.MediaYouTube || kind == engine.MediaDirect) && mode != engine.MediaModeBrowser {
-		sb.WriteString("<i>The media is downloaded before playback; the file expires after 1 hour.</i>\n")
+		sb.WriteString("<i>The media is downloaded before playback; file is freed when the session ends or switches.</i>\n")
 	}
 	sb.WriteString("\nThe bot will open Chromium, join as a guest, share a tab and play the media.")
 	return sb.String()

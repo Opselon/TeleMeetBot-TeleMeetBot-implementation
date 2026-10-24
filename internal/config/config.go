@@ -46,6 +46,9 @@ type DownloadConfig struct {
 	TTLMinutes int `yaml:"ttl_minutes"`
 	// MaxSizeMB is the per-file ceiling. Default 2048 (2 GiB).
 	MaxSizeMB int `yaml:"max_size_mb"`
+	// MinFreeMB is the minimum free disk space required on Dir before
+	// allowing a download. Default 256 (256 MiB).
+	MinFreeMB int `yaml:"min_free_mb"`
 	// TimeoutSeconds bounds one whole download, transcode included.
 	// Default 600 (10 min).
 	TimeoutSeconds int `yaml:"timeout_seconds"`
@@ -202,6 +205,7 @@ func Default() *Config {
 			Enabled:        true,
 			TTLMinutes:     60,
 			MaxSizeMB:      2048,
+			MinFreeMB:      256,
 			TimeoutSeconds: 600,
 			MaxConcurrent:  1,
 			AllowTranscode: true,
