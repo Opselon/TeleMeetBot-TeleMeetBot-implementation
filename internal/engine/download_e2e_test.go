@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -196,5 +197,33 @@ func TestSessionSwitchMediaFreesOldDownloadedFileImmediately(t *testing.T) {
 	// The old file must be freed from disk:
 	if _, err := os.Stat(oldPath); !os.IsNotExist(err) {
 		t.Fatalf("old downloaded file still exists after switch: %v", err)
+	}
+}
+
+// TestSessionCleanupFreesFilesEvenWhenLocalFileIsNil proves that even if s.localFile is nil
+// (e.g. download failed or was cancelled mid-way), session cleanup frees any files matching downloadID.
+func TestSessionCleanupFreesFilesEvenWhenLocalFileIsNil(t *testing.T) {
+	dir := t.TempDir()
+	mgr := NewManager(BrowserConfig{}, MediaOptions{
+		DownloadEnabled: true, DownloadDir: dir, DownloadTTLMinutes: 60,
+		DownloadMaxSizeMB: 64, DownloadTimeoutSec: 30, DownloadConcurrent: 1,
+		DownloadBaseDir: dir,
+	}, MeetOptions{}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s := &Session{ID: "s-fail-cleanup", mgr: mgr, ctx: ctx, cancel: cancel, done: make(chan struct{})}
+
+	// Simulate leftover partial file on disk for this session ID
+	leftover := filepath.Join(dir, s.downloadID()+".mp4.part")
+	if err := os.WriteFile(leftover, []byte("partial"), 0o600); err != nil {
+		t.Fatalf("write leftover: %v", err)
+	}
+
+	// s.localFile is nil!
+	s.cleanup()
+
+	// Leftover file must be deleted:
+	if _, err := os.Stat(leftover); !os.IsNotExist(err) {
+		t.Fatalf("leftover file %s was not deleted by cleanup when localFile was nil", leftover)
 	}
 }

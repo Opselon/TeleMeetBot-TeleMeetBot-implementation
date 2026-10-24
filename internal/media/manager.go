@@ -292,7 +292,8 @@ func (m *Manager) clearInflight(id string) {
 
 // Remove deletes a managed download immediately: deletes the file from disk,
 // unregisters it from the loopback file server, and drops it from the manifest.
-// Also sweeps any residual temporary or transcoded files for that id.
+// Also sweeps any residual temporary or transcoded files for that id or matching
+// generation prefix (e.g. id-g1, id-x).
 func (m *Manager) Remove(id string) error {
 	if m == nil || !m.opts.Enabled {
 		return nil
@@ -304,8 +305,13 @@ func (m *Manager) Remove(id string) error {
 	if err := m.entries.load(); err != nil {
 		m.log.Warnf("[PIPELINE:download] remove %s: cannot read manifest: %v", id, err)
 	}
-	if entry, ok := m.entries.Get(id); ok {
-		_ = m.entries.Remove(id)
+	removed, err := m.entries.RemoveIf(func(e Entry) bool {
+		return e.ID == id || strings.HasPrefix(e.ID, id+"-") || strings.HasPrefix(e.ID, id+".") || (len(id) > 4 && strings.Contains(e.ID, id))
+	})
+	if err != nil {
+		m.log.Warnf("[PIPELINE:download] remove %s: cannot persist manifest: %v", id, err)
+	}
+	for _, entry := range removed {
 		m.deleteManaged(entry.Path, "session stop or close")
 	}
 	m.sweepIDFiles(id)
@@ -343,7 +349,7 @@ func (m *Manager) Sweep(ctx context.Context) int {
 }
 
 // sweepIDFiles removes any files in m.opts.Dir matching the given id stem
-// (e.g. id.*, id-*, or .tmp-* containing id).
+// (e.g. id.*, id-*, or containing id).
 func (m *Manager) sweepIDFiles(id string) int {
 	if strings.TrimSpace(id) == "" || strings.TrimSpace(m.opts.Dir) == "" {
 		return 0
@@ -359,7 +365,8 @@ func (m *Manager) sweepIDFiles(id string) int {
 		}
 		name := ent.Name()
 		if strings.HasPrefix(name, id+".") || strings.HasPrefix(name, id+"-") ||
-			(strings.HasPrefix(name, ".tmp-") && strings.Contains(name, id)) {
+			(strings.HasPrefix(name, ".tmp-") && strings.Contains(name, id)) ||
+			(len(id) > 4 && strings.Contains(name, id)) {
 			if m.deleteManaged(filepath.Join(m.opts.Dir, name), "sweep id files") {
 				n++
 			}
@@ -409,7 +416,7 @@ func (m *Manager) sweepOrphanFiles() int {
 		}
 		inFlight := false
 		for id := range inflightIDs {
-			if strings.HasPrefix(name, id+".") || strings.HasPrefix(name, id+"-") {
+			if strings.HasPrefix(name, id+".") || strings.HasPrefix(name, id+"-") || (len(id) > 4 && strings.Contains(name, id)) {
 				inFlight = true
 				break
 			}

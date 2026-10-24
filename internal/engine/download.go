@@ -129,10 +129,14 @@ func (s *Session) releaseLocalMedia(why string) {
 	s.localFile = nil
 	s.mu.Unlock()
 
-	if local == nil {
-		return
+	if local != nil {
+		s.freeLocalMediaEntry(local, why)
 	}
-	s.freeLocalMediaEntry(local, why)
+	mgr := s.mediaManager()
+	if mgr != nil && mgr.Enabled() {
+		_ = mgr.Remove(s.downloadID())
+		_ = mgr.Sweep(context.Background())
+	}
 }
 
 // freeLocalMediaEntry deletes one downloaded file entry from disk and bookkeeping.
