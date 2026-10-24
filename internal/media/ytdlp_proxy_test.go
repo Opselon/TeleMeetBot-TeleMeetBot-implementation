@@ -221,14 +221,45 @@ func TestYTDLPRetryArguments(t *testing.T) {
 		}
 		return false
 	}
+	hasAny := func(flag string) bool {
+		for _, a := range got {
+			if a == flag {
+				return true
+			}
+		}
+		return false
+	}
 	if !hasFlag("--extractor-retries", "3") {
 		t.Fatalf("--extractor-retries 3 missing from argv: %q", got)
 	}
 	if !hasFlag("--file-access-retries", "3") {
 		t.Fatalf("--file-access-retries 3 missing from argv: %q", got)
 	}
-	if !hasFlag("--retry-sleep", "1") {
-		t.Fatalf("--retry-sleep 1 missing from argv: %q", got)
+	// Defect: a single dropped TLS handshake ("TLS/SSL connection has been
+	// closed (EOF)") killed the whole Download & Stream session because the
+	// general network retry count was left at its default and the sleep was
+	// untyped. -R/--retries is what covers HTTP/TLS resets, and the sleeps
+	// must be typed per retry kind.
+	if !hasFlag("--retries", "10") {
+		t.Fatalf("--retries 10 missing from argv: %q", got)
+	}
+	if !hasFlag("--retry-sleep", "http:1:4") {
+		t.Fatalf("typed http retry-sleep missing from argv: %q", got)
+	}
+	if !hasFlag("--retry-sleep", "extractor:1") {
+		t.Fatalf("typed extractor retry-sleep missing from argv: %q", got)
+	}
+	if !hasFlag("--retry-sleep", "file_access:1") {
+		t.Fatalf("typed file_access retry-sleep missing from argv: %q", got)
+	}
+	// A hung socket must not pin the download until the process timeout.
+	if !hasFlag("--socket-timeout", "30") {
+		t.Fatalf("--socket-timeout 30 missing from argv: %q", got)
+	}
+	// The WARP egress has no usable IPv6 route: IPv6-attempted handshakes fail
+	// outright, so force IPv4 through the proxy.
+	if !hasAny("--force-ipv4") {
+		t.Fatalf("--force-ipv4 missing from argv: %q", got)
 	}
 }
 
