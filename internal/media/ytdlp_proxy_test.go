@@ -24,6 +24,7 @@ func newYtdlpTestManager(t *testing.T, opts Options, fn func(context.Context, []
 	t.Cleanup(func() { m.Close() })
 	m.opts.YTDLPPath = "yt-dlp-probe"
 	m.ytdlpFn = fn
+	m.retryDelay = func(int) time.Duration { return 0 }
 	return m
 }
 
@@ -186,5 +187,75 @@ func TestFormatSelectorCapsResolution(t *testing.T) {
 	m := &Manager{opts: DefaultOptions(t.TempDir())}
 	if sel := m.formatSelector(); !strings.Contains(sel, "height<=720") {
 		t.Fatalf("selector does not cap resolution: %q", sel)
+	}
+}
+
+// Format selector must provide an ultimate fallback rung so yt-dlp never dies
+// with "Requested format is not available" when only single-stream or unusual formats exist.
+func TestFormatSelectorHasFallback(t *testing.T) {
+	m := &Manager{opts: DefaultOptions(t.TempDir())}
+	sel := m.formatSelector()
+	if !strings.HasSuffix(sel, "bv*/ba/b*") {
+		t.Fatalf("selector missing final single-stream fallback rung: %q", sel)
+	}
+}
+
+// Defect: transient network resets killed the download immediately. yt-dlp must
+// be configured to retry extraction and fragments before aborting.
+func TestYTDLPRetryArguments(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	var got []string
+	m := newYtdlpTestManager(t, opts, func(_ context.Context, args []string) ([]byte, []byte, error) {
+		got = append([]string(nil), args...)
+		return nil, nil, youtubeBotCheck
+	})
+	_, _ = m.Download(context.Background(), DownloadRequest{
+		URL: "https://www.youtube.com/watch?v=abcdefghijk", Kind: "youtube", ID: "vid",
+	})
+	hasFlag := func(flag, val string) bool {
+		for i, a := range got {
+			if a == flag && i+1 < len(got) && got[i+1] == val {
+				return true
+			}
+		}
+		return false
+	}
+	if !hasFlag("--extractor-retries", "3") {
+		t.Fatalf("--extractor-retries 3 missing from argv: %q", got)
+	}
+	if !hasFlag("--file-access-retries", "3") {
+		t.Fatalf("--file-access-retries 3 missing from argv: %q", got)
+	}
+	if !hasFlag("--retry-sleep", "1") {
+		t.Fatalf("--retry-sleep 1 missing from argv: %q", got)
+	}
+}
+
+// Subprocess failures should attempt retries with backoff.
+func TestYTDLPRetriesWithBackoff(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	attempts := 0
+	var delays []int
+	m := newYtdlpTestManager(t, opts, func(_ context.Context, args []string) ([]byte, []byte, error) {
+		attempts++
+		return nil, []byte("ERROR: [youtube] connection reset"), youtubeBotCheck
+	})
+	m.retryDelay = func(attempt int) time.Duration {
+		delays = append(delays, attempt)
+		return 0
+	}
+	_, err := m.Download(context.Background(), DownloadRequest{
+		URL: "https://www.youtube.com/watch?v=abcdefghijk", Kind: "youtube", ID: "vid",
+	})
+	if err == nil {
+		t.Fatal("expected failure after exhausted retries")
+	}
+	if attempts != 3 { // initial attempt + 2 retries
+		t.Fatalf("expected 3 attempts, got %d", attempts)
+	}
+	if len(delays) != 2 || delays[0] != 1 || delays[1] != 2 {
+		t.Fatalf("expected backoff delays for attempts 1 and 2, got %v", delays)
 	}
 }

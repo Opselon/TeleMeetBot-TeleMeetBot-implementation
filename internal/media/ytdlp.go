@@ -19,9 +19,8 @@ type ytdlpResult struct {
 	Note        string
 }
 
-// maxExecRetries bounds a retry on a transient yt-dlp failure. One retry only:
-// a persistent failure must surface as an error, not a spin.
-const maxExecRetries = 1
+// maxExecRetries bounds retries on a transient yt-dlp failure.
+const maxExecRetries = 2
 
 // fetchYTDLP runs yt-dlp to fetch url into the managed directory.
 //
@@ -50,6 +49,9 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id string) (*ytdlpResult, e
 		"--no-progress",
 		"--newline",
 		"--no-check-certificate", // the SSRF gate already validated the host
+		"--extractor-retries", "3",
+		"--file-access-retries", "3",
+		"--retry-sleep", "1",
 	}
 	// Datacenter egress is bot-blocked by YouTube, so the download must leave
 	// through the same proxy Chromium uses. Omitting it is the difference
@@ -81,6 +83,19 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id string) (*ytdlpResult, e
 	for attempt := 0; attempt <= maxExecRetries; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		if attempt > 0 {
+			d := time.Duration(attempt) * time.Second
+			if m.retryDelay != nil {
+				d = m.retryDelay(attempt)
+			}
+			if d > 0 {
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-time.After(d):
+				}
+			}
 		}
 		stdout, stderr, err := m.runYTDLP(ctx, bin, args)
 		if err == nil {
@@ -130,10 +145,12 @@ func (m *Manager) formatSelector() string {
 		// vCPUs with Meet's encoder, and it keeps the fetch well under the
 		// size ceiling.
 		"bv*[ext=mp4][vcodec^=avc1][height<=720]+ba[ext=m4a]",
+		"bv*[height<=720]+ba",
 		"bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]",
 		"bv*[ext=mp4]+ba[ext=m4a]",
 		"b[ext=mp4][acodec!=none]",
 		"bv*+ba/b",
+		"bv*/ba/b*",
 	}, "/")
 }
 
