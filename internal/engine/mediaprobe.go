@@ -49,6 +49,13 @@ type MediaProbeReport struct {
 	RequestedLang  string  `json:"requestedLang,omitempty"`
 	SelectedTrack  string  `json:"selectedTrack,omitempty"`
 	FallbackReason string  `json:"fallbackReason,omitempty"`
+
+	// Skippable-ad diagnostics: whether an ad was playing, and whether the
+	// probe pressed YouTube's own skip button. Ads are never blocked here —
+	// only dismissed through the page's official control.
+	AdPlaying  bool   `json:"adPlaying,omitempty"`
+	AdSkipped  bool   `json:"adSkipped,omitempty"`
+	AdSkipNote string `json:"adSkipNote,omitempty"`
 }
 
 // codecSupportJS reports which codecs this page's browser can decode via MSE —
@@ -209,6 +216,24 @@ func ProbeMediaWithLang(ctx context.Context, browserCfg BrowserConfig, link stri
 		rep.FallbackReason = atRep.FallbackReason
 		if atRep.Original != nil || atRep.Available > 1 {
 			log.Infof("[PIPELINE:media-probe] audio track %s", atRep.describe())
+		}
+	}
+
+	// Skippable ads: the probe reports whether one is playing and presses the
+	// page's own skip button when it is available. Diagnostics only — the
+	// verdict is not affected.
+	if srep, serr := scanSkipAds(p, log); serr != nil {
+		rep.AdSkipNote = "scan: " + serr.Error()
+		log.Debugf("[PIPELINE:media-probe] ad skip: %v", serr)
+	} else {
+		rep.AdPlaying = srep.AdPlaying
+		rep.AdSkipped = srep.Skipped
+		if srep.Skipped {
+			rep.AdSkipNote = "skipped via " + srep.Method + " (" + srep.Label + ")"
+			log.Infof("[PIPELINE:media-probe] ad skipped: %s", srep.describe())
+		} else if srep.AdPlaying {
+			rep.AdSkipNote = srep.Reason
+			log.Infof("[PIPELINE:media-probe] ad playing, no usable skip button: %s", srep.Reason)
 		}
 	}
 

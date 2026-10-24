@@ -87,6 +87,11 @@ type MediaConfig struct {
 	SeekStepSeconds    int     `yaml:"seek_step_seconds"`
 	Loop               bool    `yaml:"loop"`
 	DefaultAudioLang   string  `yaml:"default_audio_lang"`
+	// SkipYouTubeAds presses YouTube's own "Skip ads" button the moment it
+	// becomes available. It never blocks or hides ads: an ad without a visible,
+	// enabled skip button plays out in full, and non-YouTube media is not
+	// touched. Default true.
+	SkipYouTubeAds *bool `yaml:"skip_youtube_ads"`
 }
 
 // MeetConfig controls Google Meet join and screen-share behaviour.

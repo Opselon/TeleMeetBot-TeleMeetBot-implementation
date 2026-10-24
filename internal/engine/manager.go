@@ -48,6 +48,10 @@ type MediaOptions struct {
 	MuteUntilConnected bool
 	SeekStepSeconds    int
 	DefaultAudioLang   string
+	// SkipYouTubeAds enables the ad-skip monitor (default true when nil): the
+	// engine presses YouTube's own "Skip ads" button the moment it becomes
+	// available. It never blocks ads and never touches non-YouTube media.
+	SkipYouTubeAds *bool
 }
 
 // MeetOptions is the Google Meet configuration.
@@ -106,6 +110,10 @@ const (
 	EventError EventKind = "error"
 	// EventEnded fires when the session stopped for any reason.
 	EventEnded EventKind = "ended"
+	// EventAdSkipped fires when the session pressed YouTube's own skippable-ad
+	// button (adskip.go). The ad was dismissed through YouTube's UI, never
+	// blocked or hidden.
+	EventAdSkipped EventKind = "ad_skipped"
 )
 
 // Event is a session lifecycle notification.
@@ -308,6 +316,7 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (*Session, error)
 			Volume:   m.mediaCfg.DefaultVolume,
 			Speed:    m.mediaCfg.DefaultSpeed,
 		},
+		adSkipEnabled: m.mediaCfg.SkipYouTubeAds,
 	}
 
 	s.ctx, s.cancel = context.WithCancel(ctx)

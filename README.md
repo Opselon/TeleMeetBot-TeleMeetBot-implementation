@@ -213,6 +213,9 @@ media:
   mute_until_connected: true
   seek_step_seconds: 10
   loop: false
+  skip_youtube_ads: true              # press YouTube's own "Skip ads" button the
+                                      # moment it becomes available; never blocks
+                                      # or hides ads, non-YouTube media untouched
 
 meet:
   guest_name: "TeleMeet Bot"
