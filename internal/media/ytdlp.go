@@ -49,9 +49,21 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id string) (*ytdlpResult, e
 		"--no-progress",
 		"--newline",
 		"--no-check-certificate", // the SSRF gate already validated the host
+		// Network resilience. The proxied egress (WARP/free-pool xray inbound
+		// on 172.17.0.1:3339) periodically tears sockets down mid-handshake:
+		// the extractor then reports "Unable to download API page:
+		// TLS/SSL connection has been closed (EOF)" and, without retries below,
+		// the whole session dies on a single dropped TLS handshake.
+		"--retries", "10", // -R: HTTP/network attempts, covers TLS EOF resets
 		"--extractor-retries", "3",
 		"--file-access-retries", "3",
-		"--retry-sleep", "1",
+		// Typed sleeps use the TYPE:EXPR form (colon, not equals): yt-dlp
+		// rejects "file_access=1" with "invalid http retry sleep expression".
+		"--retry-sleep", "http:1:4", // bounded backoff between network retries
+		"--retry-sleep", "extractor:1",
+		"--retry-sleep", "file_access:1",
+		"--socket-timeout", "30", // a hung socket must not pin the download
+		"--force-ipv4", // the WARP egress has no working IPv6 route; AAAA attempts fail 100%
 	}
 	// Datacenter egress is bot-blocked by YouTube, so the download must leave
 	// through the same proxy Chromium uses. Omitting it is the difference
