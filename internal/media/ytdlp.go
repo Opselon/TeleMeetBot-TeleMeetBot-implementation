@@ -58,15 +58,22 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id string) (*ytdlpResult, e
 		args = append(args, "--proxy", p)
 	}
 	args = append(args,
-		"-f", m.formatSelector(), // best muxed mp4, else merged mp4/webm
+		"-f", m.formatSelector(), // merged mp4, else any video+audio
+		"--merge-output-format", "mp4", // pin the container ffmpeg produces
 		"-o", m.opts.Dir+string(os.PathSeparator)+id+".%(ext)s",
-		"--print-json",
-		"--encoding", "utf-8",
+		// NEVER add --print-json: it implies --simulate, so yt-dlp prints
+		// metadata and writes no file. That is exactly what made every
+		// Download & Stream session die at ~3s with "no output file with the
+		// expected name" and an empty stderr.
+		"--no-simulate",
 		u,
 	)
 	if m.opts.MaxBytes > 0 {
-		// Bail out early on obviously oversized files.
-		args = append([]string{"--match-filter", fmt.Sprintf(" filesize < %d", m.opts.MaxBytes)}, args...)
+		// Abort an oversized download while it runs. Never use --match-filter
+		// here: a DASH-merged selection has no exact `filesize` (only
+		// filesize_approx), so the filter rejected every format and yt-dlp
+		// exited 0 having written nothing.
+		args = append([]string{"--max-filesize", fmt.Sprintf("%d", m.opts.MaxBytes)}, args...)
 	}
 
 	var res *ytdlpResult
@@ -119,8 +126,11 @@ var ytDLPJoinOK error
 //  4. any video + audio, letting ffmpeg merge whatever containers exist.
 func (m *Manager) formatSelector() string {
 	return strings.Join([]string{
+		// 720p cap: software H.264 decode plus the MP4 merge has to share 2
+		// vCPUs with Meet's encoder, and it keeps the fetch well under the
+		// size ceiling.
+		"bv*[ext=mp4][vcodec^=avc1][height<=720]+ba[ext=m4a]",
 		"bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]",
-		"b[ext=mp4][vcodec^=avc1][acodec!=none]",
 		"bv*[ext=mp4]+ba[ext=m4a]",
 		"b[ext=mp4][acodec!=none]",
 		"bv*+ba/b",

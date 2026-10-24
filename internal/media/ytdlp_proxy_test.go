@@ -116,3 +116,75 @@ func TestYTDLPErrorCarriesStderr(t *testing.T) {
 		t.Fatalf("error lost the exec failure: %v", err)
 	}
 }
+
+// Defect 4: --print-json implies --simulate, so yt-dlp printed metadata and
+// wrote no file; the session died at ~3s with "no output file with the
+// expected name" and an empty stderr.
+func TestYTDLPNeverSimulates(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	var got []string
+	m := newYtdlpTestManager(t, opts, func(_ context.Context, args []string) ([]byte, []byte, error) {
+		got = append([]string(nil), args...)
+		return nil, nil, youtubeBotCheck
+	})
+	_, _ = m.Download(context.Background(), DownloadRequest{
+		URL: "https://www.youtube.com/watch?v=abcdefghijk", Kind: "youtube", ID: "vid",
+	})
+	for _, a := range got {
+		if a == "--print-json" || a == "--simulate" {
+			t.Fatalf("argv simulates instead of downloading: %q", got)
+		}
+	}
+	found := false
+	for _, a := range got {
+		if a == "--no-simulate" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("--no-simulate missing from argv: %q", got)
+	}
+}
+
+// Defect 5: the size guard used --match-filter on `filesize`, which does not
+// exist for DASH-merged selections (only filesize_approx), so every format was
+// rejected silently. The guard must abort the download instead of skipping it.
+func TestYTDLPSizeLimitUsesMaxFilesize(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.MaxBytes = 512 * 1024 * 1024
+	var got []string
+	m := newYtdlpTestManager(t, opts, func(_ context.Context, args []string) ([]byte, []byte, error) {
+		got = append([]string(nil), args...)
+		return nil, nil, youtubeBotCheck
+	})
+	_, _ = m.Download(context.Background(), DownloadRequest{
+		URL: "https://www.youtube.com/watch?v=abcdefghijk", Kind: "youtube", ID: "vid",
+	})
+	for _, a := range got {
+		if a == "--match-filter" {
+			t.Fatalf("--match-filter silently drops DASH formats: %q", got)
+		}
+	}
+	idx := -1
+	for i, a := range got {
+		if a == "--max-filesize" {
+			idx = i
+		}
+	}
+	if idx < 0 {
+		t.Fatalf("--max-filesize missing from argv: %q", got)
+	}
+	if idx+1 >= len(got) || got[idx+1] != "536870912" {
+		t.Fatalf("--max-filesize value wrong, want 536870912 (argv %q)", got)
+	}
+}
+
+// The merge rung must stay cheap enough for a 2-vCPU host.
+func TestFormatSelectorCapsResolution(t *testing.T) {
+	m := &Manager{opts: DefaultOptions(t.TempDir())}
+	if sel := m.formatSelector(); !strings.Contains(sel, "height<=720") {
+		t.Fatalf("selector does not cap resolution: %q", sel)
+	}
+}
