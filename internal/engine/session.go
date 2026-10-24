@@ -384,6 +384,7 @@ func (s *Session) cleanup() {
 	if meet != nil {
 		_ = meet.Close()
 	}
+	s.releaseLocalMedia("session stop or close")
 	s.mu.Lock()
 	if s.state != StateError {
 		s.state = StateEnded
@@ -1226,6 +1227,7 @@ func (s *Session) playerProblem() string {
 
 // localMedia is a downloaded file backing a session's media tab.
 type localMedia struct {
+	id        string
 	url       string // loopback URL the tab loads
 	path      string // absolute path inside the managed download dir
 	expiresAt time.Time
@@ -1273,9 +1275,14 @@ func (s *Session) PlaybackMode() mediateam.Mode {
 // SetPlaybackMode changes how the session sources its media. Browser restores
 // the remote URL; Download/Auto fetch through the media manager.
 func (s *Session) SetPlaybackMode(mode mediateam.Mode) error {
+	norm := mediateam.NormalizeMode(string(mode))
 	s.mu.Lock()
-	s.playMode = mediateam.NormalizeMode(string(mode))
+	oldMode := s.playMode
+	s.playMode = norm
 	s.mu.Unlock()
+	if norm == mediateam.ModeBrowser && oldMode != mediateam.ModeBrowser {
+		s.releaseLocalMedia("playback mode set to browser")
+	}
 	return nil
 }
 

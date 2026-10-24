@@ -61,6 +61,7 @@ type MediaOptions struct {
 	DownloadDir        string
 	DownloadTTLMinutes int
 	DownloadMaxSizeMB  int
+	DownloadMinFreeMB  int
 	DownloadTimeoutSec int
 	DownloadConcurrent int
 	DownloadYTDLP      string
@@ -225,6 +226,9 @@ func (m *Manager) initMediaManager() error {
 	}
 	if v := m.mediaCfg.DownloadMaxSizeMB; v > 0 {
 		opts.MaxBytes = int64(v) * 1024 * 1024
+	}
+	if v := m.mediaCfg.DownloadMinFreeMB; v > 0 {
+		opts.MinFreeBytes = int64(v) * 1024 * 1024
 	}
 	if v := m.mediaCfg.DownloadTimeoutSec; v > 0 {
 		opts.Timeout = time.Duration(v) * time.Second

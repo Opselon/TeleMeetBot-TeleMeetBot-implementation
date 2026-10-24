@@ -1,8 +1,11 @@
 package engine
 
 import (
+	"context"
 	"errors"
 	"fmt"
+
+	mediateam "github.com/Opselon/TeleMeetBot/internal/media"
 )
 
 // ---- SwitchMedia: change the shared URL without touching the meeting ------
@@ -102,6 +105,16 @@ func (s *Session) runSwitch(target MediaTarget, stale func() bool) error {
 
 	// The switch landed. Preserve "paused": a paused stream must not start
 	// playing just because its URL changed.
+	s.mu.Lock()
+	if s.switchRun != nil && s.localFile != nil {
+		old := s.localFile
+		s.localFile = nil
+		s.mu.Unlock()
+		s.freeLocalMediaEntry(old, "switch media completed (mocked)")
+	} else {
+		s.mu.Unlock()
+	}
+
 	next := prevState
 	if next != StatePaused && next != StateStreaming {
 		next = StateStreaming
@@ -126,24 +139,82 @@ func (s *Session) applySwitch(target MediaTarget, stale func() bool) error {
 	if media == nil {
 		return errors.New("media page is not available")
 	}
-	if err := s.navigateMediaTab(media, target.URL, target.Kind); err != nil {
+
+	navURL := target.URL
+	navKind := target.Kind
+
+	var newLocal *localMedia
+	if s.playMode == mediateam.ModeDownload && mediateam.IsDownloadable(string(target.Kind)) {
+		s.mu.RLock()
+		gen := s.switchGen
+		s.mu.RUnlock()
+		dlID := fmt.Sprintf("ses-%s-g%d", s.ID, gen)
+		mgr := s.mediaManager()
+		if mgr != nil && mgr.Enabled() {
+			res, err := s.runDownloadWithID(context.Background(), mgr, target, dlID)
+			if err != nil {
+				return fmt.Errorf("download switch media: %w", err)
+			}
+			if stale() {
+				s.freeLocalMediaEntry(&localMedia{id: res.ID, path: res.Path}, "switch superseded")
+				return errSwitchSuperseded
+			}
+			newLocal = &localMedia{
+				id:        res.ID,
+				url:       res.LocalURL,
+				path:      res.Path,
+				expiresAt: res.ExpiresAt,
+				via:       res.Via,
+				bytes:     res.Bytes,
+			}
+			navURL = res.LocalURL
+			navKind = MediaDirect
+		}
+	}
+
+	if err := s.navigateMediaTab(media, navURL, navKind); err != nil {
+		if newLocal != nil {
+			s.freeLocalMediaEntry(newLocal, "switch navigation failed")
+		}
 		return fmt.Errorf("navigate: %w", err)
 	}
 	if stale() {
+		if newLocal != nil {
+			s.freeLocalMediaEntry(newLocal, "switch superseded")
+		}
 		return errSwitchSuperseded
 	}
 	// Consent wall, viewport fit, buffered-video wait and the audio track: the
 	// same preparation a fresh session performs. The share keeps running
 	// throughout — this is the same tab Meet is capturing.
 	if err := s.prepareMedia(media); err != nil {
+		if newLocal != nil {
+			s.freeLocalMediaEntry(newLocal, "switch preparation failed")
+		}
 		return fmt.Errorf("prepare: %w", err)
 	}
 	if stale() {
+		if newLocal != nil {
+			s.freeLocalMediaEntry(newLocal, "switch superseded")
+		}
 		return errSwitchSuperseded
 	}
 	if err := s.playMedia(); err != nil {
+		if newLocal != nil {
+			s.freeLocalMediaEntry(newLocal, "switch playback failed")
+		}
 		return fmt.Errorf("playback: %w", err)
 	}
+
+	s.mu.Lock()
+	oldToFree := s.localFile
+	s.localFile = newLocal
+	s.mu.Unlock()
+
+	if oldToFree != nil {
+		s.freeLocalMediaEntry(oldToFree, "switch media completed")
+	}
+
 	return nil
 }
 

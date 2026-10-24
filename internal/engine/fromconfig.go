@@ -44,6 +44,7 @@ func FromConfig(c *config.Config) (BrowserConfig, MediaOptions, MeetOptions) {
 		DownloadDir:        c.Download.Dir,
 		DownloadTTLMinutes: c.Download.TTLMinutes,
 		DownloadMaxSizeMB:  c.Download.MaxSizeMB,
+		DownloadMinFreeMB:  c.Download.MinFreeMB,
 		DownloadTimeoutSec: c.Download.TimeoutSeconds,
 		DownloadConcurrent: c.Download.MaxConcurrent,
 		DownloadYTDLP:      c.Download.YTDLPPath,

@@ -278,6 +278,40 @@ func (m *Manager) janitorLoop(ctx context.Context) {
 	}
 }
 
+func (m *Manager) markInflight(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.inflight[id] = struct{}{}
+}
+
+func (m *Manager) clearInflight(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.inflight, id)
+}
+
+// Remove deletes a managed download immediately: deletes the file from disk,
+// unregisters it from the loopback file server, and drops it from the manifest.
+// Also sweeps any residual temporary or transcoded files for that id.
+func (m *Manager) Remove(id string) error {
+	if m == nil || !m.opts.Enabled {
+		return nil
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil
+	}
+	if err := m.entries.load(); err != nil {
+		m.log.Warnf("[PIPELINE:download] remove %s: cannot read manifest: %v", id, err)
+	}
+	if entry, ok := m.entries.Get(id); ok {
+		_ = m.entries.Remove(id)
+		m.deleteManaged(entry.Path, "session stop or close")
+	}
+	m.sweepIDFiles(id)
+	return nil
+}
+
 // Sweep deletes every expired entry and its file. It runs on the janitor
 // ticker, on startup and on demand; it is also the crash-recovery path. It
 // never deletes a file outside the managed directory and never throws.
@@ -303,6 +337,94 @@ func (m *Manager) Sweep(ctx context.Context) int {
 	// Partial downloads left by a crash or a cancel are nameless tmp files;
 	// the manifest never lists them, so reap them separately.
 	n += m.sweepTempFiles()
+	// Orphaned files that are untracked by the manifest and not in flight.
+	n += m.sweepOrphanFiles()
+	return n
+}
+
+// sweepIDFiles removes any files in m.opts.Dir matching the given id stem
+// (e.g. id.*, id-*, or .tmp-* containing id).
+func (m *Manager) sweepIDFiles(id string) int {
+	if strings.TrimSpace(id) == "" || strings.TrimSpace(m.opts.Dir) == "" {
+		return 0
+	}
+	ents, err := os.ReadDir(m.opts.Dir)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, ent := range ents {
+		if ent.IsDir() {
+			continue
+		}
+		name := ent.Name()
+		if strings.HasPrefix(name, id+".") || strings.HasPrefix(name, id+"-") ||
+			(strings.HasPrefix(name, ".tmp-") && strings.Contains(name, id)) {
+			if m.deleteManaged(filepath.Join(m.opts.Dir, name), "sweep id files") {
+				n++
+			}
+		}
+	}
+	return n
+}
+
+// sweepOrphanFiles removes unmanaged files in m.opts.Dir that are neither tracked
+// in the manifest nor currently in flight.
+func (m *Manager) sweepOrphanFiles() int {
+	if strings.TrimSpace(m.opts.Dir) == "" {
+		return 0
+	}
+	ents, err := os.ReadDir(m.opts.Dir)
+	if err != nil {
+		return 0
+	}
+	tracked := make(map[string]struct{})
+	for _, e := range m.entries.All() {
+		tracked[filepath.Clean(e.Path)] = struct{}{}
+	}
+
+	m.mu.Lock()
+	inflightIDs := make(map[string]struct{}, len(m.inflight))
+	for id := range m.inflight {
+		inflightIDs[id] = struct{}{}
+	}
+	m.mu.Unlock()
+
+	n := 0
+	cutoff := time.Now().Add(-15 * time.Second)
+	for _, ent := range ents {
+		if ent.IsDir() {
+			continue
+		}
+		name := ent.Name()
+		if name == manifestName || name == manifestName+".tmp" || strings.HasPrefix(name, manifestName+".corrupt") {
+			continue
+		}
+		if strings.HasPrefix(name, ".tmp-") {
+			continue // handled by sweepTempFiles
+		}
+		fullPath := filepath.Clean(filepath.Join(m.opts.Dir, name))
+		if _, ok := tracked[fullPath]; ok {
+			continue
+		}
+		inFlight := false
+		for id := range inflightIDs {
+			if strings.HasPrefix(name, id+".") || strings.HasPrefix(name, id+"-") {
+				inFlight = true
+				break
+			}
+		}
+		if inFlight {
+			continue
+		}
+		info, err := ent.Info()
+		if err == nil && info.ModTime().After(cutoff) {
+			continue
+		}
+		if m.deleteManaged(fullPath, "orphaned unmanaged file") {
+			n++
+		}
+	}
 	return n
 }
 

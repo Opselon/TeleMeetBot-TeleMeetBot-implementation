@@ -238,8 +238,9 @@ paths:
 download:
   enabled: true                      # Download & Stream feature (Browser mode always works)
   dir: ""                             # empty = <data_dir>/downloads (recommended)
-  ttl_minutes: 60                    # mandatory expiry: files are deleted after 1 hour
+  ttl_minutes: 60                    # safety cap: files are freed upon session stop/switch, max 1 hour
   max_size_mb: 2048                  # per-file ceiling (0 keeps the 2048 default)
+  min_free_mb: 256                   # minimum free disk space required before download
   timeout_seconds: 600               # one whole download, transcode included
   max_concurrent: 1                  # bounded parallel downloads (0..8)
   ytdlp_path: ""                     # empty = auto-detect yt-dlp on PATH

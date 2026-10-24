@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 
 // downloadResult is the engine-side view of one resolved download.
 type downloadResult struct {
+	ID          string
 	LocalURL    string
 	Path        string
 	ContentType string
@@ -74,6 +76,7 @@ func (s *Session) prepareLocalMedia() error {
 	}
 	s.mu.Lock()
 	s.localFile = &localMedia{
+		id:        res.ID,
 		url:       res.LocalURL,
 		path:      res.Path,
 		expiresAt: res.ExpiresAt,
@@ -90,6 +93,14 @@ func (s *Session) prepareLocalMedia() error {
 // runDownload performs the fetch through the media manager.
 func (s *Session) runDownload(ctx context.Context, mgr *mediateam.Manager, target MediaTarget) (*downloadResult, error) {
 	id := s.downloadID()
+	return s.runDownloadWithID(ctx, mgr, target, id)
+}
+
+// runDownloadWithID performs the fetch with a caller-chosen id stem.
+func (s *Session) runDownloadWithID(ctx context.Context, mgr *mediateam.Manager, target MediaTarget, id string) (*downloadResult, error) {
+	if strings.TrimSpace(id) == "" {
+		id = s.downloadID()
+	}
 	// The manager owns dedupe, concurrency gating, size/time limits and the
 	// expiry bookkeeping. The URL was already classified by the caller.
 	res, err := mgr.Download(ctx, mediateam.DownloadRequest{
@@ -101,6 +112,7 @@ func (s *Session) runDownload(ctx context.Context, mgr *mediateam.Manager, targe
 		return nil, err
 	}
 	return &downloadResult{
+		ID:          id,
 		LocalURL:    res.URL,
 		Path:        res.Path,
 		ContentType: res.ContentType,
@@ -108,6 +120,40 @@ func (s *Session) runDownload(ctx context.Context, mgr *mediateam.Manager, targe
 		ExpiresAt:   res.ExpiresAt,
 		Via:         res.FetchedVia,
 	}, nil
+}
+
+// releaseLocalMedia removes the session's active downloaded media from disk immediately.
+func (s *Session) releaseLocalMedia(why string) {
+	s.mu.Lock()
+	local := s.localFile
+	s.localFile = nil
+	s.mu.Unlock()
+
+	if local == nil {
+		return
+	}
+	s.freeLocalMediaEntry(local, why)
+}
+
+// freeLocalMediaEntry deletes one downloaded file entry from disk and bookkeeping.
+func (s *Session) freeLocalMediaEntry(local *localMedia, why string) {
+	if local == nil {
+		return
+	}
+	mgr := s.mediaManager()
+	if mgr != nil && mgr.Enabled() {
+		id := local.id
+		if id == "" {
+			id = s.downloadID()
+		}
+		if err := mgr.Remove(id); err != nil {
+			s.logger().Warnf("[PIPELINE:session] session %s: remove local media %s (%s): %v", s.ID, id, why, err)
+		} else {
+			s.logger().Infof("[PIPELINE:session] session %s: freed local media %s (%s)", s.ID, id, why)
+		}
+	} else if local.path != "" {
+		_ = os.Remove(local.path)
+	}
 }
 
 // humanBytesI renders a byte count for engine logs.
