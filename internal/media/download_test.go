@@ -597,6 +597,7 @@ func TestYTDLPCommandIsShellFree(t *testing.T) {
 	// record the exact argv handed to the would-be subprocess.
 	var got []string
 	m.opts.YTDLPPath = "yt-dlp-probe"
+	m.retryDelay = func(int) time.Duration { return 0 }
 	m.ytdlpFn = func(ctx context.Context, args []string) ([]byte, []byte, error) {
 		got = args
 		return nil, nil, exec.ErrNotFound

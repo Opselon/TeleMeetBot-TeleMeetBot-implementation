@@ -90,6 +90,8 @@ type Manager struct {
 	// ytdlpFn/ffmpegFn override the subprocess invocation (tests).
 	ytdlpFn  func(ctx context.Context, args []string) ([]byte, []byte, error)
 	ffmpegFn func(ctx context.Context, args []string) ([]byte, []byte, error)
+	// retryDelay overrides the sleep between yt-dlp attempts (tests).
+	retryDelay func(attempt int) time.Duration
 
 	// janitorOnce guards janitor startup; stopJanitor ends the loop.
 	janitorOnce sync.Once
