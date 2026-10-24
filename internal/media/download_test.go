@@ -709,3 +709,34 @@ func TestDiskCheckAllows1Point5GiBWith256MiBBuffer(t *testing.T) {
 		t.Fatalf("downloaded file missing: %v", err)
 	}
 }
+
+// TestManagerRemoveCleansUpGenerationsAndTempFiles proves Remove with a base ID
+// removes generated files (e.g. id-g1.mp4, id.part, .tmp-id) and manifest entries.
+func TestManagerRemoveCleansUpGenerationsAndTempFiles(t *testing.T) {
+	testAllowLoopback(t)
+	m, dir := testManager(t, time.Hour)
+
+	// Create generation and part files matching base ID "ses-test1234"
+	baseID := "ses-test1234"
+	f1 := filepath.Join(dir, baseID+"-g1.mp4")
+	f2 := filepath.Join(dir, baseID+".mp4.part")
+	f3 := filepath.Join(dir, ".tmp-"+baseID)
+	_ = os.WriteFile(f1, []byte("gen1"), 0o600)
+	_ = os.WriteFile(f2, []byte("part"), 0o600)
+	_ = os.WriteFile(f3, []byte("tmp"), 0o600)
+
+	_ = m.entries.Add(Entry{ID: baseID + "-g1", Path: f1, FetchedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)})
+
+	if err := m.Remove(baseID); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	for _, p := range []string{f1, f2, f3} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("file %s still exists after Remove(%s)", p, baseID)
+		}
+	}
+	if _, ok := m.entries.Get(baseID + "-g1"); ok {
+		t.Fatal("generation entry still exists in manifest")
+	}
+}
