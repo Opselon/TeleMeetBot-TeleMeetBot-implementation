@@ -1,6 +1,20 @@
 package engine
 
-import "github.com/Opselon/TeleMeetBot/internal/config"
+import (
+	"strings"
+
+	"github.com/Opselon/TeleMeetBot/internal/config"
+)
+
+// downloadProxyFor resolves the egress for media downloads: an explicit
+// download.proxy wins, otherwise the operator's browser.proxy is reused. One
+// setting is enough for a VPS where Chromium already needs a proxy.
+func downloadProxyFor(c *config.Config) string {
+	if p := strings.TrimSpace(c.Download.Proxy); p != "" {
+		return p
+	}
+	return strings.TrimSpace(c.Browser.Proxy)
+}
 
 // FromConfig maps the application config to engine option structs.
 func FromConfig(c *config.Config) (BrowserConfig, MediaOptions, MeetOptions) {
@@ -35,6 +49,7 @@ func FromConfig(c *config.Config) (BrowserConfig, MediaOptions, MeetOptions) {
 		DownloadYTDLP:      c.Download.YTDLPPath,
 		DownloadFFmpeg:     c.Download.FFmpegPath,
 		DownloadAllowXcode: c.Download.AllowTranscode,
+		DownloadProxy:      downloadProxyFor(c),
 
 		// The anchor for a relative download dir, so an operator writing
 		// "downloads" gets <data_dir>/downloads rather than a CWD-relative

@@ -4,6 +4,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,6 +58,12 @@ type DownloadConfig struct {
 	// AllowTranscode permits ffmpeg to remux containers Chromium cannot
 	// decode (mkv/avi/ogv) into mp4.
 	AllowTranscode bool `yaml:"allow_transcode"`
+	// Proxy is handed to yt-dlp (and the plain-HTTP fetcher). YouTube
+	// bot-blocks datacenter egress, so a VPS download without a proxy fails
+	// with "Sign in to confirm you're not a bot". Empty means a direct
+	// connection. Defaults to browser.proxy when unset, since that is the
+	// egress the operator already had to configure for Chromium.
+	Proxy string `yaml:"proxy"`
 }
 
 // TelegramConfig holds bot token and access control.
@@ -394,6 +401,15 @@ func (c *Config) Validate() error {
 		}
 		if c.Download.MaxConcurrent < 0 || c.Download.MaxConcurrent > 8 {
 			problems = append(problems, "download.max_concurrent must be within 0..8")
+		}
+		if p := strings.TrimSpace(c.Download.Proxy); p != "" {
+			u, err := url.Parse(p)
+			switch {
+			case err != nil || u.Host == "":
+				problems = append(problems, "download.proxy is not a valid proxy URL (want scheme://host:port)")
+			case u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5" && u.Scheme != "socks5h":
+				problems = append(problems, "download.proxy scheme must be http, https, socks5 or socks5h")
+			}
 		}
 		switch strings.ToLower(strings.TrimSpace(c.Download.Dir)) {
 		case "/", "/etc", "/usr", "/bin", "/sbin", "/var", "/root", "/home":
