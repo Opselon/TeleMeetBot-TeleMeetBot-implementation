@@ -24,9 +24,39 @@ type Config struct {
 	Limits   LimitsConfig   `yaml:"limits"`
 	Logging  LoggingConfig  `yaml:"logging"`
 	Paths    PathsConfig    `yaml:"paths"`
+	Download DownloadConfig `yaml:"download"`
 
 	// path is where the config was loaded from / should be saved to.
 	path string
+}
+
+// DownloadConfig controls the Download & Stream feature: fetching media to
+// local disk with yt-dlp or plain HTTP, and the mandatory expiry policy.
+type DownloadConfig struct {
+	// Enabled turns the feature on. Browser mode always works, with or
+	// without this.
+	Enabled bool `yaml:"enabled"`
+	// Dir is the managed download directory. Only files inside it are ever
+	// created or deleted. Empty defaults to <data_dir>/downloads.
+	Dir string `yaml:"dir"`
+	// TTLMinutes is the expiry lifetime of every downloaded file, counted
+	// from the moment the download completes. Default 60 (one hour), which
+	// is the production policy; a file can never outlive it.
+	TTLMinutes int `yaml:"ttl_minutes"`
+	// MaxSizeMB is the per-file ceiling. Default 2048 (2 GiB).
+	MaxSizeMB int `yaml:"max_size_mb"`
+	// TimeoutSeconds bounds one whole download, transcode included.
+	// Default 600 (10 min).
+	TimeoutSeconds int `yaml:"timeout_seconds"`
+	// MaxConcurrent bounds parallel downloads. Default 1.
+	MaxConcurrent int `yaml:"max_concurrent"`
+	// YTDLPPath overrides the yt-dlp binary location; empty auto-detects.
+	YTDLPPath string `yaml:"ytdlp_path"`
+	// FFmpegPath overrides the ffmpeg binary location; empty auto-detects.
+	FFmpegPath string `yaml:"ffmpeg_path"`
+	// AllowTranscode permits ffmpeg to remux containers Chromium cannot
+	// decode (mkv/avi/ogv) into mp4.
+	AllowTranscode bool `yaml:"allow_transcode"`
 }
 
 // TelegramConfig holds bot token and access control.
@@ -160,7 +190,15 @@ func Default() *Config {
 			PresentTimeoutSeconds: 45,
 			AdmitWaitSeconds:      300,
 		},
-		Limits:  LimitsConfig{MaxSessions: 2},
+		Limits: LimitsConfig{MaxSessions: 2},
+		Download: DownloadConfig{
+			Enabled:        true,
+			TTLMinutes:     60,
+			MaxSizeMB:      2048,
+			TimeoutSeconds: 600,
+			MaxConcurrent:  1,
+			AllowTranscode: true,
+		},
 		Logging: LoggingConfig{Level: "info"},
 		Paths:   PathsConfig{DataDir: "data"},
 	}
@@ -254,6 +292,18 @@ func (c *Config) normalize() {
 	if c.Limits.MaxSessions <= 0 {
 		c.Limits.MaxSessions = 1
 	}
+	if c.Download.TTLMinutes < 0 {
+		c.Download.TTLMinutes = 0
+	}
+	if c.Download.TimeoutSeconds < 0 {
+		c.Download.TimeoutSeconds = 0
+	}
+	if c.Download.MaxConcurrent < 0 {
+		c.Download.MaxConcurrent = 0
+	}
+	if c.Download.MaxSizeMB < 0 {
+		c.Download.MaxSizeMB = 0
+	}
 }
 
 // Save writes the config back to disk (0600, atomic replace).
@@ -326,6 +376,29 @@ func (c *Config) Validate() error {
 	}
 	if strings.TrimSpace(c.Paths.DataDir) == "" {
 		problems = append(problems, "paths.data_dir is empty")
+	}
+	if c.Download.Enabled {
+		switch {
+		case c.Download.TTLMinutes == 0:
+			// 0 keeps the built-in default of 60; only negative is an error.
+		case c.Download.TTLMinutes < 1:
+			problems = append(problems, "download.ttl_minutes must be positive")
+		case c.Download.TTLMinutes > 1440:
+			problems = append(problems, "download.ttl_minutes must be at most 1440 (24h); the default policy is 60")
+		}
+		if c.Download.TimeoutSeconds == 0 || c.Download.TimeoutSeconds > 3600 {
+			problems = append(problems, "download.timeout_seconds must be within 1..3600")
+		}
+		if c.Download.MaxSizeMB != 0 && (c.Download.MaxSizeMB < 1 || c.Download.MaxSizeMB > 8192) {
+			problems = append(problems, "download.max_size_mb must be within 1..8192 (0 keeps the 2048 default)")
+		}
+		if c.Download.MaxConcurrent < 0 || c.Download.MaxConcurrent > 8 {
+			problems = append(problems, "download.max_concurrent must be within 0..8")
+		}
+		switch strings.ToLower(strings.TrimSpace(c.Download.Dir)) {
+		case "/", "/etc", "/usr", "/bin", "/sbin", "/var", "/root", "/home":
+			problems = append(problems, "download.dir must not be a system directory")
+		}
 	}
 	if len(problems) > 0 {
 		return errors.New("invalid config: " + strings.Join(problems, "; "))

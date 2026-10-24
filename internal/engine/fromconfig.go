@@ -25,6 +25,21 @@ func FromConfig(c *config.Config) (BrowserConfig, MediaOptions, MeetOptions) {
 		SeekStepSeconds:    c.Media.SeekStepSeconds,
 		DefaultAudioLang:   c.Media.DefaultAudioLang,
 		SkipYouTubeAds:     c.Media.SkipYouTubeAds,
+
+		DownloadEnabled:    c.Download.Enabled,
+		DownloadDir:        c.Download.Dir,
+		DownloadTTLMinutes: c.Download.TTLMinutes,
+		DownloadMaxSizeMB:  c.Download.MaxSizeMB,
+		DownloadTimeoutSec: c.Download.TimeoutSeconds,
+		DownloadConcurrent: c.Download.MaxConcurrent,
+		DownloadYTDLP:      c.Download.YTDLPPath,
+		DownloadFFmpeg:     c.Download.FFmpegPath,
+		DownloadAllowXcode: c.Download.AllowTranscode,
+
+		// The anchor for a relative download dir, so an operator writing
+		// "downloads" gets <data_dir>/downloads rather than a CWD-relative
+		// path (a service may start from anywhere).
+		DownloadBaseDir: c.Paths.DataDir,
 	}
 	meet := MeetOptions{
 		GuestName:             c.Meet.GuestName,

@@ -19,6 +19,8 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
+
+	mediateam "github.com/Opselon/TeleMeetBot/internal/media"
 )
 
 // BrowserConfig is the browser subset of the app configuration.
@@ -52,6 +54,21 @@ type MediaOptions struct {
 	// engine presses YouTube's own "Skip ads" button the moment it becomes
 	// available. It never blocks ads and never touches non-YouTube media.
 	SkipYouTubeAds *bool
+
+	// Download & Stream knobs. The engine only forwards them to the media
+	// manager; enforcement lives in internal/media.
+	DownloadEnabled    bool
+	DownloadDir        string
+	DownloadTTLMinutes int
+	DownloadMaxSizeMB  int
+	DownloadTimeoutSec int
+	DownloadConcurrent int
+	DownloadYTDLP      string
+	DownloadFFmpeg     string
+	DownloadAllowXcode bool
+	// DownloadBaseDir is the anchor for a relative DownloadDir (the config's
+	// paths.data_dir). Empty means "resolve against the process CWD".
+	DownloadBaseDir string
 }
 
 // MeetOptions is the Google Meet configuration.
@@ -130,6 +147,9 @@ type StartRequest struct {
 	MediaLink string
 	TabTitle  string
 	AudioLang string
+	// PlayMode selects how the media reaches the share: browser playback,
+	// download-first, or auto (browser with a download fallback).
+	PlayMode string
 }
 
 // Manager owns browsers and sessions.
@@ -139,6 +159,10 @@ type Manager struct {
 	meetCfg    MeetOptions
 	log        Logger
 	events     chan Event
+
+	// mediaMgr serves Download & Stream. It is nil when the feature is off;
+	// sessions then always stream from the remote URL (Browser mode).
+	mediaMgr *mediateam.Manager
 
 	maxSessions int
 
@@ -166,7 +190,7 @@ func NewManager(browser BrowserConfig, media MediaOptions, meet MeetOptions, log
 	if log == nil {
 		log = noopLogger{}
 	}
-	return &Manager{
+	mgr := &Manager{
 		browserCfg:  browser,
 		mediaCfg:    media,
 		meetCfg:     meet,
@@ -175,7 +199,63 @@ func NewManager(browser BrowserConfig, media MediaOptions, meet MeetOptions, log
 		sessions:    map[SessionID]*Session{},
 		maxSessions: 1,
 	}
+	if err := mgr.initMediaManager(); err != nil {
+		log.Warnf("download & stream disabled: %v", err)
+	}
+	return mgr
 }
+
+// initMediaManager builds the Download & Stream manager from the media
+// options. A disabled or misconfigured feature degrades to Browser mode: the
+// engine still starts, and sessions keep streaming from remote URLs.
+func (m *Manager) initMediaManager() error {
+	if !m.mediaCfg.DownloadEnabled {
+		return nil
+	}
+	opts := mediateam.DefaultOptions("")
+	opts.Dir = strings.TrimSpace(m.mediaCfg.DownloadDir)
+	// An operator-facing zero means "keep the default"; the media package
+	// only ever sees explicit, sane values.
+	if v := m.mediaCfg.DownloadTTLMinutes; v > 0 {
+		opts.TTL = time.Duration(v) * time.Minute
+	}
+	if v := m.mediaCfg.DownloadMaxSizeMB; v > 0 {
+		opts.MaxBytes = int64(v) * 1024 * 1024
+	}
+	if v := m.mediaCfg.DownloadTimeoutSec; v > 0 {
+		opts.Timeout = time.Duration(v) * time.Second
+	}
+	if v := m.mediaCfg.DownloadConcurrent; v > 0 {
+		opts.MaxConcurrent = v
+	}
+	opts.YTDLPPath = m.mediaCfg.DownloadYTDLP
+	opts.FFmpegPath = m.mediaCfg.DownloadFFmpeg
+	opts.AllowTranscode = m.mediaCfg.DownloadAllowXcode
+	// Anchor the download dir on the data dir when the operator left it
+	// relative or empty: a managed dir relative to the process CWD is
+	// ambiguous for a service that may be started from anywhere.
+	if err := opts.ResolveDir(m.mediaCfg.DownloadBaseDir); err != nil {
+		return err
+	}
+	mm, err := mediateam.NewManager(opts, m.log)
+	if err != nil {
+		return err
+	}
+	m.mediaMgr = mm
+	return nil
+}
+
+// SetMediaTTLForTest overrides the expiry lifetime. Test-only seam: the
+// production TTL comes from the config and defaults to one hour.
+func (m *Manager) SetMediaTTLForTest(d time.Duration) {
+	if m.mediaMgr == nil {
+		return
+	}
+	m.mediaMgr.SetTTL(d)
+}
+
+// MediaManager returns the Download & Stream manager (nil when disabled).
+func (m *Manager) MediaManager() *mediateam.Manager { return m.mediaMgr }
 
 // SetMaxSessions caps concurrent sessions. The engine enforces the limit as a
 // hard fence so a session cannot be started past it even if a caller forgets to
@@ -286,6 +366,14 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (*Session, error)
 		tabTitle = m.meetCfg.CaptureSource
 	}
 
+	playMode := mediateam.NormalizeMode(req.PlayMode)
+	if playMode == mediateam.ModeDownload && m.mediaMgr == nil {
+		// Download was requested but the feature is unavailable: fail
+		// closed with an actionable error rather than silently streaming
+		// from the remote URL.
+		return nil, fmt.Errorf("%w: install yt-dlp or set download.enabled to use Download & Stream", ErrDownloadUnavailable)
+	}
+
 	audioLang := NormalizeAudioLang(req.AudioLang)
 	if strings.TrimSpace(req.AudioLang) == "" {
 		if m.mediaCfg.DefaultAudioLang != "" {
@@ -303,6 +391,7 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (*Session, error)
 		MediaKind: media.Kind,
 		TabTitle:  tabTitle,
 		AudioLang: audioLang,
+		playMode:  playMode,
 		state:     StateStarting,
 		detail:    "allocated",
 		created:   time.Now(),
@@ -490,3 +579,10 @@ func tempProfileDir() (string, error) {
 	}
 	return os.MkdirTemp(filepath.Join(base, "telemeetbot"), "profile-*")
 }
+
+// filepathIsAbs / filepathDir / filepathAbs are thin wrappers so the engine
+// does not import path/filepath twice under two names.
+func filepathIsAbs(p string) bool { return filepathAbs(p) == p && len(p) > 0 && p[0] == '/' }
+func filepathDir(p string) string { return pathDir(p) }
+func filepathAbs(p string) string { return p }
+func pathDir(p string) string     { return p }
