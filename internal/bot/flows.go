@@ -172,7 +172,7 @@ func (b *Bot) stepInput(chatID, userID int64, f *flow, text string) {
 		f.step = stepNone
 		b.setFlow(userID, f)
 		userLang := b.st.GetUserAudioLang(userID)
-		b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang), confirmKB(userLang))
+		b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang, b.st.GetUserMediaMode(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID)))
 	case stepSwitchMedia:
 		b.applyMediaSwitch(chatID, userID, f, text)
 	default:
@@ -245,7 +245,7 @@ func (b *Bot) startFlow(chatID, userID int64, args string) {
 		f.step = stepNone
 		b.setFlow(userID, f)
 		userLang := b.st.GetUserAudioLang(userID)
-		b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang), confirmKB(userLang))
+		b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang, b.st.GetUserMediaMode(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID)))
 		return
 	}
 	b.setFlow(userID, f)
@@ -268,6 +268,7 @@ func (b *Bot) launch(chatID, userID int64) {
 		MeetLink:  f.meet,
 		MediaLink: f.media,
 		AudioLang: userLang,
+		PlayMode:  b.st.GetUserMediaMode(userID),
 	})
 	if err != nil {
 		b.sendText(chatID, "❌ "+esc(err.Error()), mainMenuKB())
@@ -325,6 +326,17 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 		_ = b.api.AnswerCallback(q.ID, "")
 		lang := b.st.GetUserAudioLang(userID)
 		_ = b.api.Edit(chatID, msgID, audioLangText(lang), audioLangKB(lang))
+	case data == cbMediaMode:
+		_ = b.api.AnswerCallback(q.ID, "")
+		_ = b.api.Edit(chatID, msgID, mediaModeText(b.st.GetUserMediaMode(userID)), mediaModeKB(b.st.GetUserMediaMode(userID)))
+	case strings.HasPrefix(data, "mode:"):
+		chosen := strings.TrimPrefix(data, "mode:")
+		if err := b.st.SetUserMediaMode(userID, chosen); err != nil {
+			b.log.Warnf("set media mode %d: %v", userID, err)
+		}
+		norm := b.st.GetUserMediaMode(userID)
+		_ = b.api.AnswerCallback(q.ID, "Saved: "+engine.PlaybackModeDisplay(norm))
+		_ = b.api.Edit(chatID, msgID, mediaModeText(norm), mediaModeKB(norm))
 	case strings.HasPrefix(data, "lang:"):
 		chosen := strings.TrimPrefix(data, "lang:")
 		norm := engine.NormalizeAudioLang(chosen)

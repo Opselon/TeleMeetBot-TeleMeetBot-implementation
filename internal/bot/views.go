@@ -28,6 +28,9 @@ const (
 	cbLangEn    = "lang:en"
 	cbLangOrig  = "lang:orig"
 	cbLangAuto  = "lang:auto"
+	// cbMediaMode opens the Download & Stream mode picker; "mode:<choice>"
+	// selects one of browser/download/auto.
+	cbMediaMode = "menu:mediamode"
 )
 
 // stateEmoji maps engine states to dashboard emoji.
@@ -95,10 +98,11 @@ func mainMenuKB() *tgbotapi.InlineKeyboardMarkup {
 			tgbotapi.NewInlineKeyboardButtonData("📋 Sessions", cbSessions),
 		},
 		{
+			tgbotapi.NewInlineKeyboardButtonData("⬇️ Download & Stream", cbMediaMode),
 			tgbotapi.NewInlineKeyboardButtonData("🩺 Health", cbHealth),
-			tgbotapi.NewInlineKeyboardButtonData("⚙️ Settings", cbSettings),
 		},
 		{
+			tgbotapi.NewInlineKeyboardButtonData("⚙️ Settings", cbSettings),
 			tgbotapi.NewInlineKeyboardButtonData("ℹ️ Help", cbHelp),
 		},
 	}}
@@ -147,6 +151,37 @@ func audioLangKB(currentLang string) *tgbotapi.InlineKeyboardMarkup {
 	}}
 }
 
+// mediaModeText renders the Download & Stream mode selection screen.
+func mediaModeText(currentMode string) string {
+	mode := engine.NormalizePlaybackMode(currentMode)
+	var sb strings.Builder
+	sb.WriteString("⬇️ <b>Download &amp; Stream</b>\n\n")
+	sb.WriteString(fmt.Sprintf("Current mode: <b>%s</b>\n\n", esc(engine.PlaybackModeDisplay(mode))))
+	sb.WriteString("Choose how media reaches the share:\n\n")
+	sb.WriteString("• <b>🌐 Browser</b>\nPlays the link directly in the media tab, exactly as before.\n\n")
+	sb.WriteString("• <b>⬇️ Download &amp; Stream</b>\nDownloads supported media (YouTube via yt-dlp, direct mp4/webm/mkv/mov/mp3/m4a…) to the server first, then plays the local file. Downloaded files expire and are deleted after <b>1 hour</b>.\n\n")
+	sb.WriteString("• <b>🤖 Auto</b>\nPrefers browser playback; when the browser cannot play the link, it falls back to downloading once.\n\n")
+	sb.WriteString("<i>Your choice is saved across bot restarts and applies to every new stream. It does not change running sessions.</i>")
+	return sb.String()
+}
+
+// mediaModeKB provides inline buttons for mode selection.
+func mediaModeKB(currentMode string) *tgbotapi.InlineKeyboardMarkup {
+	mode := engine.NormalizePlaybackMode(currentMode)
+	mark := func(code, label string) string {
+		if mode == code {
+			return "✅ " + label
+		}
+		return label
+	}
+	return &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{
+		{tgbotapi.NewInlineKeyboardButtonData(mark("browser", "🌐 Browser"), "mode:browser")},
+		{tgbotapi.NewInlineKeyboardButtonData(mark("download", "⬇️ Download & Stream"), "mode:download")},
+		{tgbotapi.NewInlineKeyboardButtonData(mark("auto", "🤖 Auto"), "mode:auto")},
+		{tgbotapi.NewInlineKeyboardButtonData("⬅️ Dashboard", cbHome)},
+	}}
+}
+
 // backKB is a one-button "back to dashboard" keyboard.
 func backKB() *tgbotapi.InlineKeyboardMarkup {
 	return &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{
@@ -182,6 +217,14 @@ func sessionCardText(st engine.Status) string {
 		sb.WriteString(fmt.Sprintf("🎵 Audio: <b>%s</b>", esc(st.AudioTrack)))
 		if st.AudioLang != "" {
 			sb.WriteString(fmt.Sprintf(" (pref: %s)", esc(engine.NormalizeAudioLang(st.AudioLang))))
+		}
+		sb.WriteString("\n")
+	}
+	if st.PlayMode != "" {
+		mode := engine.NormalizePlaybackMode(st.PlayMode)
+		sb.WriteString(fmt.Sprintf("%s Mode: <b>%s</b>", engine.PlaybackModeEmoji(mode), esc(engine.PlaybackModeDisplay(mode))))
+		if st.LocalFile.Bytes > 0 {
+			sb.WriteString(fmt.Sprintf(" · 💾 %.1f MiB", float64(st.LocalFile.Bytes)/(1024*1024)))
 		}
 		sb.WriteString("\n")
 	}
@@ -296,6 +339,14 @@ func healthText(s health.Snapshot, browserErr string) string {
 	return sb.String()
 }
 
+// downloadMaxMB renders the configured size limit (default 2048).
+func downloadMaxMB(c *config.Config) int {
+	if c.Download.MaxSizeMB > 0 {
+		return c.Download.MaxSizeMB
+	}
+	return 2048
+}
+
 // settingsText shows read-only configuration.
 func settingsText(c *config.Config) string {
 	var sb strings.Builder
@@ -320,6 +371,15 @@ func settingsText(c *config.Config) string {
 	}
 	sb.WriteString(fmt.Sprintf("Default audio: <code>%s</code> (%s)\n", esc(defLang), esc(engine.AudioLangDisplayName(defLang))))
 	sb.WriteString(fmt.Sprintf("Data dir: <code>%s</code>\n", esc(c.Paths.DataDir)))
+	if c.Download.Enabled {
+		ttl := c.Download.TTLMinutes
+		if ttl <= 0 {
+			ttl = 60
+		}
+		sb.WriteString(fmt.Sprintf("Download &amp; Stream: <code>on</code> · expiry %dm · max %d MB\n", ttl, downloadMaxMB(c)))
+	} else {
+		sb.WriteString("Download &amp; Stream: <code>off</code>\n")
+	}
 	sb.WriteString("\nChange values in <code>telemeetbot.yml</code> and restart the service. Re-run <code>telemeetbot --wizard</code> for a guided edit.")
 	return sb.String()
 }
@@ -342,6 +402,10 @@ func helpText() string {
 ♻️ Restart — reload the media from the start
 🔀 Switch media — swap the shared URL without rejoining
 ⏹ Stop — leave the meeting
+
+<b>Download &amp; Stream</b>
+⬇️ Download &amp; Stream — fetch the media to the server first, then play the local file (YouTube via yt-dlp, direct mp4/webm/mkv/mov/mp3/m4a…). Files expire after <b>1 hour</b>.
+🤖 Auto — browser first, download as a one-time fallback.
 
 <b>Notes</b>
 • The bot joins as a guest; meetings that require a Google sign-in cannot be joined.
@@ -397,7 +461,7 @@ func switchMediaText(st engine.Status) string {
 }
 
 // confirmText summarises the pending stream.
-func confirmText(meetLink, mediaLink string, kind engine.MediaKind, userAudioLang string) string {
+func confirmText(meetLink, mediaLink string, kind engine.MediaKind, userAudioLang, userMediaMode string) string {
 	kindLabel := "web page"
 	switch kind {
 	case engine.MediaYouTube:
@@ -413,17 +477,26 @@ func confirmText(meetLink, mediaLink string, kind engine.MediaKind, userAudioLan
 		norm := engine.NormalizeAudioLang(userAudioLang)
 		sb.WriteString(fmt.Sprintf("🎵 Audio track: <b>%s</b>\n", esc(engine.AudioLangDisplayName(norm))))
 	}
+	mode := engine.NormalizePlaybackMode(userMediaMode)
+	sb.WriteString(fmt.Sprintf("\n%s Media mode: <b>%s</b>\n", engine.PlaybackModeEmoji(mode), esc(engine.PlaybackModeDisplay(mode))))
+	if (kind == engine.MediaYouTube || kind == engine.MediaDirect) && mode != engine.MediaModeBrowser {
+		sb.WriteString("<i>The media is downloaded before playback; the file expires after 1 hour.</i>\n")
+	}
 	sb.WriteString("\nThe bot will open Chromium, join as a guest, share a tab and play the media.")
 	return sb.String()
 }
 
 // confirmKB offers launch/cancel for a pending stream.
-func confirmKB(userAudioLang string) *tgbotapi.InlineKeyboardMarkup {
+func confirmKB(userAudioLang, userMediaMode string) *tgbotapi.InlineKeyboardMarkup {
 	norm := engine.NormalizeAudioLang(userAudioLang)
+	mode := engine.NormalizePlaybackMode(userMediaMode)
 	return &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{
 		{tgbotapi.NewInlineKeyboardButtonData("🚀 Launch", cbLaunch)},
 		{
 			tgbotapi.NewInlineKeyboardButtonData("🎵 Audio: "+engine.AudioLangDisplayName(norm), cbAudioLang),
+		},
+		{
+			tgbotapi.NewInlineKeyboardButtonData(engine.PlaybackModeEmoji(mode)+" Mode: "+engine.PlaybackModeDisplay(mode), cbMediaMode),
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData("✏️ Change links", cbAgain),

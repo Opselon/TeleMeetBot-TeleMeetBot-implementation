@@ -187,6 +187,18 @@ func run(cfg *config.Config, cfgPath string, log *slogLogger) error {
 	// Hard fence at the engine level: the dashboard also checks, but a session
 	// must never be able to start past limits.max_sessions.
 	eng.SetMaxSessions(cfg.Limits.MaxSessions)
+	// Download & Stream: the media manager sweeps expired files on startup
+	// (before the first download can land) and then on a ticker. Missing
+	// optional tools degrade to Browser mode with a warning, never a crash.
+	if mm := eng.MediaManager(); mm != nil {
+		mm.Start(ctx)
+		defer mm.Close()
+		log.Infof("download & stream enabled (dir=%s ttl=%s)", mm.Opts().Dir, mm.Opts().TTL)
+	} else if cfg.Download.Enabled {
+		log.Warnf("download & stream is enabled in the config but unavailable: check download.dir; sessions fall back to Browser mode")
+	} else {
+		log.Infof("download & stream disabled (download.enabled: false); Browser mode only")
+	}
 	// Keep the Go heap bounded on a small VPS: GOMEMLIMIT makes the GC work
 	// harder instead of letting the heap grow with browser JSON payloads.
 	// An explicit operator setting always wins.

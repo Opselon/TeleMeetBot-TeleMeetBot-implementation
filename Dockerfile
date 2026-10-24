@@ -21,15 +21,23 @@ ENV DEBIAN_FRONTEND=noninteractive \
     DISPLAY="" \
     GOMEMLIMIT=256MiB
 
+# yt-dlp and ffmpeg power the optional Download & Stream feature. Both are
+# optional at runtime: a missing binary degrades to Browser mode with an
+# actionable message and never breaks the bot.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       chromium \
       ca-certificates \
       tini \
       curl \
+      ffmpeg \
+      python3 \
       fonts-liberation \
       fonts-noto-core \
       fonts-noto-color-emoji \
       tzdata \
+    && curl -fsSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
+        -o /usr/local/bin/yt-dlp \
+    && chmod 0755 /usr/local/bin/yt-dlp \
     && rm -rf /var/lib/apt/lists/* \
     && fc-cache -f >/dev/null 2>&1 || true
 

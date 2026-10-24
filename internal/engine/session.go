@@ -11,6 +11,8 @@ import (
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
+
+	mediateam "github.com/Opselon/TeleMeetBot/internal/media"
 )
 
 // errHelpURL is a hint appended to "no media" failures.
@@ -65,6 +67,14 @@ type Session struct {
 
 	lastMeetLoad time.Time
 
+	// playMode selects how the media reaches the share (Browser default).
+	playMode mediateam.Mode
+	// localFile is the Download & Stream artifact, when the session plays
+	// from a downloaded file instead of the remote URL.
+	localFile *localMedia
+	// expiryWarned avoids repeating the "media expired" notice on the card.
+	expiryWarned bool
+
 	browser   *rod.Browser
 	mediaPage *rod.Page
 	meetPage  *rod.Page
@@ -106,6 +116,10 @@ type Status struct {
 	AudioLang      string
 	AudioTrack     string
 	FallbackReason string
+	// PlayMode is the Download & Stream mode of the session.
+	PlayMode string
+	// LocalFile reports the downloaded media backing the session, if any.
+	LocalFile localFileStatus
 }
 
 // Elapsed is how long the session has been running.
@@ -144,6 +158,8 @@ func (s *Session) Snapshot() Status {
 		AudioLang:      s.AudioLang,
 		AudioTrack:     s.audioRep.SelectedTrackLabel(),
 		FallbackReason: s.audioRep.FallbackReason,
+		PlayMode:       string(s.playMode),
+		LocalFile:      s.localFileStatus(),
 	}
 }
 
@@ -245,6 +261,26 @@ func (s *Session) run() {
 
 	s.log.Infof("[PIPELINE:session] [STEP 1/6] session %s: Chromium ready", s.ID)
 
+	// Download & Stream: fetch the media to disk BEFORE the tab is opened so
+	// the media tab loads a local, always-available file. The download honours
+	// its own size/time/concurrency limits and starts the expiry clock on
+	// completion; a failure here is terminal for Download mode, a fallback
+	// signal for Auto, and a no-op for Browser.
+	if mode := s.playMode; mode == mediateam.ModeDownload || mode == mediateam.ModeAuto {
+		if err := s.prepareLocalMedia(); err != nil {
+			if mode == mediateam.ModeDownload {
+				if s.ctx.Err() == nil {
+					s.setError(err)
+				}
+				return
+			}
+			// Auto: keep the browser pipeline, record why. No retry loop —
+			// the browser path is the primary, this was the fallback.
+			s.log.Warnf("[PIPELINE:session] session %s: download fallback failed, continuing with browser playback: %v", s.ID, err)
+			s.setDetail("download unavailable: " + truncateStr(err.Error(), 80))
+		}
+	}
+
 	s.setState(StateJoining, "[2/6] Loading media")
 	s.log.Infof("[PIPELINE:session] [STEP 2/6] session %s: opening media tab (url=%s kind=%s)...", s.ID, s.MediaURL, s.MediaKind)
 	if err := s.openMedia(); err != nil {
@@ -303,6 +339,16 @@ func (s *Session) run() {
 	s.log.Infof("[PIPELINE:session] [STEP 6/6] session %s: unmuting & playing media...", s.ID)
 	if err := s.playMedia(); err != nil {
 		s.log.Warnf("[PIPELINE:session] [STEP 6/6] session %s: media play failed after share: %v", s.ID, err)
+		// Auto fallback: the browser pipeline could not play the remote
+		// source, so try the downloaded file — exactly once, bounded, and
+		// only when nothing was already downloaded (Download mode already
+		// tried, and Auto never retries a failed fallback).
+		if s.playMode == mediateam.ModeAuto && s.localFile == nil {
+			s.log.Infof("[PIPELINE:session] session %s: auto fallback — downloading media after browser playback failed", s.ID)
+			if ferr := s.fallbackToDownload(); ferr != nil {
+				s.log.Warnf("[PIPELINE:session] session %s: auto fallback download failed: %v", s.ID, ferr)
+			}
+		}
 		s.setDetail("[6/6] Sharing, media start retry: " + err.Error())
 	} else {
 		s.setDetail("[6/6] Streaming live")
@@ -335,6 +381,14 @@ func (s *Session) cleanup() {
 	}
 	s.mu.Unlock()
 	s.emit(EventEnded, "session closed")
+}
+
+// localexpiresAtText renders the deadline for a log line.
+func localexpiresAtText(l *localMedia) string {
+	if l == nil {
+		return "?"
+	}
+	return l.expiresAt.Format(time.RFC3339)
 }
 
 // maxMediaRecoveries bounds self-healing so a genuinely broken link cannot spin
@@ -374,6 +428,18 @@ func (s *Session) watch() {
 		case <-s.ctx.Done():
 			return
 		case <-ticker.C:
+		}
+		// The one-hour expiry is mandatory: an active session never extends
+		// it. When the downloaded file is gone, playback must stop rather
+		// than silently switch back to the remote URL.
+		if local := s.localFile; local != nil && !local.expiresAt.IsZero() && time.Now().After(local.expiresAt) {
+			if !s.expiryWarned {
+				s.expiryWarned = true
+				s.log.Warnf("[PIPELINE:session] session %s: downloaded media expired (%s) — stopping playback", s.ID, localexpiresAtText(local))
+				s.setDetail("downloaded media expired after the 1-hour limit")
+			}
+			s.setError(errors.New("downloaded media expired (1-hour limit)"))
+			return
 		}
 		st, err := s.queryMedia()
 		if err != nil {
@@ -542,8 +608,21 @@ func (s *Session) openMedia() error {
 	s.mu.Unlock()
 
 	target := s.MediaURL
-	if s.MediaKind == MediaDirect {
-		doc, err := PlayerHTML(MediaTarget{URL: s.MediaURL, Kind: s.MediaKind}, s.playerOpts)
+	kind := s.MediaKind
+	sourceURL := s.MediaURL
+	// Download & Stream: when a local file backs the session, the media tab
+	// loads the loopback URL of that file instead of the remote one. The
+	// player document is the same, only the src changes.
+	s.mu.RLock()
+	local := s.localFile
+	s.mu.RUnlock()
+	if local != nil && strings.TrimSpace(local.url) != "" {
+		target = local.url
+		kind = MediaDirect
+		sourceURL = local.path
+	}
+	if kind == MediaDirect {
+		doc, err := PlayerHTML(MediaTarget{URL: target, Kind: kind}, s.playerOpts)
 		if err != nil {
 			return fmt.Errorf("build player: %w", err)
 		}
@@ -578,7 +657,7 @@ func (s *Session) openMedia() error {
 	s.setState(StateJoining, "[2/6] Loading media")
 	s.log.Infof("[PIPELINE:media] session %s: navigating to target %s...", s.ID, target)
 	if err := p.Timeout(50 * time.Second).Navigate(target); err != nil {
-		return fmt.Errorf("load media %s: %w", s.MediaURL, err)
+		return fmt.Errorf("load media %s: %w", sourceURL, err)
 	}
 	_ = p.WaitLoad()
 
@@ -1129,3 +1208,69 @@ func (s *Session) playerProblem() string {
 }
 
 // Consent walls are handled by dismissConsent (consent.go).
+
+// localMedia is a downloaded file backing a session's media tab.
+type localMedia struct {
+	url       string // loopback URL the tab loads
+	path      string // absolute path inside the managed download dir
+	expiresAt time.Time
+	via       string
+	bytes     int64
+}
+
+// localFileStatus is the card-friendly view of a downloaded file.
+type localFileStatus struct {
+	URL       string    `json:"url,omitempty"`
+	Path      string    `json:"path,omitempty"`
+	Bytes     int64     `json:"bytes,omitempty"`
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
+	Via       string    `json:"via,omitempty"`
+}
+
+func (s *Session) localFileStatus() localFileStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.localFile == nil {
+		return localFileStatus{}
+	}
+	return localFileStatus{
+		URL:       s.localFile.url,
+		Path:      s.localFile.path,
+		Bytes:     s.localFile.bytes,
+		ExpiresAt: s.localFile.expiresAt,
+		Via:       s.localFile.via,
+	}
+}
+
+// PlaybackMode returns the session's Download & Stream mode. An unset mode is
+// Browser so every session built before the feature existed keeps the original
+// behaviour.
+func (s *Session) PlaybackMode() mediateam.Mode {
+	s.mu.RLock()
+	mode := s.playMode
+	s.mu.RUnlock()
+	if string(mode) == "" {
+		return mediateam.ModeBrowser
+	}
+	return mode
+}
+
+// SetPlaybackMode changes how the session sources its media. Browser restores
+// the remote URL; Download/Auto fetch through the media manager.
+func (s *Session) SetPlaybackMode(mode mediateam.Mode) error {
+	s.mu.Lock()
+	s.playMode = mediateam.NormalizeMode(string(mode))
+	s.mu.Unlock()
+	return nil
+}
+
+// MediaExpiresAt returns the expiry deadline of the session's downloaded
+// media (zero when streaming from the remote URL).
+func (s *Session) MediaExpiresAt() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.localFile == nil {
+		return time.Time{}
+	}
+	return s.localFile.expiresAt
+}

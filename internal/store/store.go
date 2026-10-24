@@ -26,6 +26,48 @@ const (
 	AudioLangAuto     = "auto"
 )
 
+// DefaultMediaMode is the default playback mode: Browser (the original
+// behaviour), so an upgrade changes nothing for existing users.
+const DefaultMediaMode = "browser"
+
+// NormalizeMediaMode normalizes a Download & Stream mode, falling back to
+// Browser for anything unknown or empty.
+func NormalizeMediaMode(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "download", "download-stream", "download_stream", "downloadandstream", "local":
+		return "download"
+	case "auto", "fallback", "smart":
+		return "auto"
+	case "browser", "direct", "play", "off", "none", "no":
+		return "browser"
+	default:
+		return DefaultMediaMode
+	}
+}
+
+// GetUserMediaMode returns the user's preferred media mode (Browser default).
+func (s *Store) GetUserMediaMode(userID int64) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if pref, ok := s.prefs[userID]; ok && pref.MediaMode != "" {
+		return NormalizeMediaMode(pref.MediaMode)
+	}
+	return DefaultMediaMode
+}
+
+// SetUserMediaMode sets and persists the user's preferred media mode.
+func (s *Store) SetUserMediaMode(userID int64, mode string) error {
+	normalized := NormalizeMediaMode(mode)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current := s.prefs[userID]
+	if current.MediaMode == normalized {
+		return nil
+	}
+	s.prefs[userID] = UserPreference{AudioLang: current.AudioLang, MediaMode: normalized}
+	return s.saveLocked()
+}
+
 // NormalizeAudioLang normalizes language input, falling back to DefaultAudioLang.
 func NormalizeAudioLang(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
@@ -45,6 +87,7 @@ func NormalizeAudioLang(s string) string {
 // UserPreference stores persistent settings for one Telegram user.
 type UserPreference struct {
 	AudioLang string `json:"audio_lang"`
+	MediaMode string `json:"media_mode,omitempty"`
 }
 
 // Record is one streaming session.

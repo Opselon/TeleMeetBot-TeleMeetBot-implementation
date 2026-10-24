@@ -230,7 +230,18 @@ logging:
   file: ""                            # empty = stdout
 
 paths:
-  data_dir: "data"                    # state.json lives here
+  data_dir: "data"                    # state.json + downloads/ live here
+
+download:
+  enabled: true                      # Download & Stream feature (Browser mode always works)
+  dir: ""                             # empty = <data_dir>/downloads (recommended)
+  ttl_minutes: 60                    # mandatory expiry: files are deleted after 1 hour
+  max_size_mb: 2048                  # per-file ceiling (0 keeps the 2048 default)
+  timeout_seconds: 600               # one whole download, transcode included
+  max_concurrent: 1                  # bounded parallel downloads (0..8)
+  ytdlp_path: ""                     # empty = auto-detect yt-dlp on PATH
+  ffmpeg_path: ""                    # empty = auto-detect ffmpeg on PATH
+  allow_transcode: true              # remux mkv/avi/ogv to mp4 for Chromium
 ```
 
 Validation is strict (`internal/config/config.go`): invalid token shape, no reachable admins
