@@ -40,6 +40,11 @@ type Options struct {
 	HTTPTimeout time.Duration
 	// UserAgent is used for plain HTTP fetches; empty uses a stock UA.
 	UserAgent string
+	// Proxy is handed to yt-dlp (e.g. "http://172.17.0.1:3339"). YouTube
+	// bot-blocks datacenter egress ("Sign in to confirm you're not a bot"),
+	// so a download from a VPS without the operator's proxy can never
+	// extract a YouTube URL. Empty means a direct connection.
+	Proxy string
 }
 
 // DefaultOptions returns the production policy: one hour TTL, 2 GiB ceiling,

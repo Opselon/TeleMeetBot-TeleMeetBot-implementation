@@ -66,6 +66,10 @@ type MediaOptions struct {
 	DownloadYTDLP      string
 	DownloadFFmpeg     string
 	DownloadAllowXcode bool
+	// DownloadProxy is the egress handed to yt-dlp/HTTP fetches. Empty
+	// means direct; FromConfig falls back to browser.proxy so a VPS that
+	// already proxies Chromium does not need a second setting.
+	DownloadProxy string
 	// DownloadBaseDir is the anchor for a relative DownloadDir (the config's
 	// paths.data_dir). Empty means "resolve against the process CWD".
 	DownloadBaseDir string
@@ -230,6 +234,11 @@ func (m *Manager) initMediaManager() error {
 	}
 	opts.YTDLPPath = m.mediaCfg.DownloadYTDLP
 	opts.FFmpegPath = m.mediaCfg.DownloadFFmpeg
+	opts.Proxy = strings.TrimSpace(m.mediaCfg.DownloadProxy)
+	if opts.Proxy == "" {
+		// Same egress Chromium already uses: one proxy setting is enough.
+		opts.Proxy = strings.TrimSpace(m.browserCfg.Proxy)
+	}
 	opts.AllowTranscode = m.mediaCfg.DownloadAllowXcode
 	// Anchor the download dir on the data dir when the operator left it
 	// relative or empty: a managed dir relative to the process CWD is

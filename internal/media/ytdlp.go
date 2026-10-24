@@ -50,12 +50,20 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id string) (*ytdlpResult, e
 		"--no-progress",
 		"--newline",
 		"--no-check-certificate", // the SSRF gate already validated the host
-		"-f", m.formatSelector(), // best progressive mp4, else best
-		"-o", m.opts.Dir + string(os.PathSeparator) + id + ".%(ext)s",
+	}
+	// Datacenter egress is bot-blocked by YouTube, so the download must leave
+	// through the same proxy Chromium uses. Omitting it is the difference
+	// between "Sign in to confirm you're not a bot" and a working download.
+	if p := strings.TrimSpace(m.opts.Proxy); p != "" {
+		args = append(args, "--proxy", p)
+	}
+	args = append(args,
+		"-f", m.formatSelector(), // best muxed mp4, else merged mp4/webm
+		"-o", m.opts.Dir+string(os.PathSeparator)+id+".%(ext)s",
 		"--print-json",
 		"--encoding", "utf-8",
 		u,
-	}
+	)
 	if m.opts.MaxBytes > 0 {
 		// Bail out early on obviously oversized files.
 		args = append([]string{"--match-filter", fmt.Sprintf(" filesize < %d", m.opts.MaxBytes)}, args...)
@@ -81,7 +89,10 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id string) (*ytdlpResult, e
 		if errors.As(err, &missing) {
 			return nil, err
 		}
-		last = fmt.Errorf("yt-dlp: %w", err)
+		// Carry yt-dlp's own diagnosis into the error: "exit status 1" alone
+		// tells the operator nothing, while stderr names the real cause
+		// (bot check, unsupported URL, missing format).
+		last = fmt.Errorf("yt-dlp: %w%s", err, stderrSuffix(stderr))
 		m.log.Warnf("[PIPELINE:download] %s: yt-dlp attempt %d failed: %s", id, attempt+1, truncateForLog(string(stderr), 200))
 	}
 	if last == nil {
@@ -93,10 +104,27 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id string) (*ytdlpResult, e
 // ytDLPJoinOK is the nil sentinel the output-path check compares against.
 var ytDLPJoinOK error
 
-// formatSelector asks yt-dlp for the best progressive stream that Chromium can
-// decode, falling back to any best stream (ffmpeg can transcode it).
+// formatSelector asks yt-dlp for the best stream combination Chromium can play.
+//
+// Modern YouTube uploads are DASH-only: there is no progressive (muxed) format
+// at all, so any selector that requires `acodec!=none` on a single stream fails
+// with "Requested format is not available". The ladder therefore merges a
+// video-only stream with an audio-only one first, and only then falls back to a
+// progressive file for sources that still ship one:
+//
+//  1. h264 mp4 video + m4a audio — cheap to decode on a 2-vCPU host, where
+//     AV1/VP9 1080p software decode would compete with Meet's encoder;
+//  2. any mp4 video + m4a audio;
+//  3. progressive mp4 with audio (older uploads, live captures);
+//  4. any video + audio, letting ffmpeg merge whatever containers exist.
 func (m *Manager) formatSelector() string {
-	return "best[ext=mp4][acodec!=none]/best[ext=webm][acodec!=none]/best"
+	return strings.Join([]string{
+		"bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]",
+		"b[ext=mp4][vcodec^=avc1][acodec!=none]",
+		"bv*[ext=mp4]+ba[ext=m4a]",
+		"b[ext=mp4][acodec!=none]",
+		"bv*+ba/b",
+	}, "/")
 }
 
 // collectYTDLP finds the file yt-dlp wrote (its name carries the real
@@ -320,6 +348,21 @@ func firstNonEmpty(values ...string) string {
 		if strings.TrimSpace(v) != "" {
 			return v
 		}
+	}
+	return ""
+}
+
+// stderrSuffix renders the last meaningful stderr line as an error suffix, so
+// the caller sees yt-dlp's reason instead of a bare exit status. Empty when
+// stderr carries nothing usable.
+func stderrSuffix(stderr []byte) string {
+	lines := strings.Split(strings.TrimSpace(string(stderr)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if line == "" {
+			continue
+		}
+		return ": " + truncateForLog(line, 300)
 	}
 	return ""
 }
