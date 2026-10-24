@@ -721,6 +721,16 @@ func (s *Session) prepareMedia(p *rod.Page) error {
 	if s.MediaKind == MediaYouTube {
 		s.log.Infof("[PIPELINE:audio-track] session %s: %s", s.ID, audioRep.describe())
 	}
+	// A skippable pre-roll that was still counting down during waitMediaReady
+	// may have become available by now: press it before the share sees it.
+	// This is best-effort diagnostics: the monitor already covers this path.
+	if s.MediaKind == MediaYouTube {
+		if rep, err := s.skipAdsOnce(); err != nil {
+			s.log.Debugf("[PIPELINE:adskip] session %s: prepare scan: %v", s.ID, err)
+		} else if rep.Skipped {
+			s.log.Infof("[PIPELINE:adskip] session %s: skipped a YouTube ad before playback (%s)", s.ID, rep.describe())
+		}
+	}
 	return nil
 }
 
@@ -788,6 +798,20 @@ func (s *Session) recoverMedia(reason string) error {
 	}
 	s.log.Warnf("[PIPELINE:recovery] media tab unhealthy (%s); recovering without touching the share", reason)
 	s.setDetail("[6/6] Recovering media: " + reason)
+
+	// A mid-roll ad can be the actual reason the tab looks unhealthy: a playing
+	// ad freezes the media position while still painting. Pressing YouTube's own
+	// skip button (only when it is available) is strictly cheaper than a refit
+	// or a reload, so it goes first and never blocks recovery on failure.
+	if s.MediaKind == MediaYouTube {
+		if rep, err := s.skipAdsOnce(); err != nil {
+			s.log.Debugf("[PIPELINE:adskip] session %s: recovery scan: %v", s.ID, err)
+		} else if rep.Skipped {
+			s.log.Infof("[PIPELINE:adskip] session %s: skipped a YouTube ad during recovery (%s)", s.ID, rep.describe())
+		} else if rep.AdPlaying {
+			s.log.Infof("[PIPELINE:adskip] session %s: ad playing during recovery, no usable skip button (%s)", s.ID, rep.Reason)
+		}
+	}
 
 	if res, err := dismissConsent(media, s.log, 20*time.Second); err != nil {
 		s.log.Warnf("[PIPELINE:recovery] consent dismissal: %v", err)

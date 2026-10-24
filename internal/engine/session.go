@@ -65,6 +65,11 @@ type Session struct {
 
 	lastMeetLoad time.Time
 
+	// adSkipEnabled gates the ad-skip monitor. A nil config value (the default)
+	// means "on": pressing YouTube's own skip button is what a human viewer
+	// does, so it takes an explicit opt-out to disable it.
+	adSkipEnabled *bool
+
 	browser   *rod.Browser
 	mediaPage *rod.Page
 	meetPage  *rod.Page
@@ -244,6 +249,16 @@ func (s *Session) run() {
 	s.mu.Unlock()
 
 	s.log.Infof("[PIPELINE:session] [STEP 1/6] session %s: Chromium ready", s.ID)
+
+	// Skippable ads: the monitor watches the media tab from the moment it
+	// exists, so a pre-roll is dismissed before it ever reaches the share.
+	// Non-YouTube media makes the probe a no-op on the first sample. An
+	// explicit media.skip_youtube_ads: false disables it.
+	if !s.adSkipDisabled() {
+		adSkipStop := make(chan struct{})
+		go s.MonitorSkipAds(adSkipStop)
+		defer close(adSkipStop)
+	}
 
 	s.setState(StateJoining, "[2/6] Loading media")
 	s.log.Infof("[PIPELINE:session] [STEP 2/6] session %s: opening media tab (url=%s kind=%s)...", s.ID, s.MediaURL, s.MediaKind)
