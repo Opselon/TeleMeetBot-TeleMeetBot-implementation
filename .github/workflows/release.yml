@@ -110,7 +110,11 @@ jobs:
       matrix:
         include:
           # Run the binary on a real OS runner and assert --version works.
-          # Windows/macOS runners are x86_64 or arm64 native — no emulation.
+          # Windows/macOS runners are arm64 or x86_64 native — no emulation.
+          # The Intel macOS smoke runs on macos-14 (Apple Silicon) under
+          # Rosetta: the macos-13 pool is being retired and queues for hours,
+          # and Rosetta executes the real amd64 binary natively, not an
+          # emulated build.
           - goos: linux
             goarch: amd64
             runner: ubuntu-latest
@@ -121,7 +125,7 @@ jobs:
             archive: telemeetbot-darwin-arm64.tar.gz
           - goos: darwin
             goarch: amd64
-            runner: macos-13
+            runner: macos-14
             archive: telemeetbot-darwin-amd64.tar.gz
           - goos: windows
             goarch: amd64
