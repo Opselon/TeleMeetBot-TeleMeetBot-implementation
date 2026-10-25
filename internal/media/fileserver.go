@@ -94,6 +94,26 @@ func newToken() string {
 	return hex.EncodeToString(buf)
 }
 
+// pathOf resolves a loopback URL back to the absolute path it serves, or ""
+// when the URL is not a registered file (or the file has been reaped).
+func (f *fileServer) pathOf(url string) string {
+	if f == nil {
+		return ""
+	}
+	i := strings.LastIndex(url, "/d/")
+	if i < 0 {
+		return ""
+	}
+	token := strings.TrimPrefix(url[i:], "/d/")
+	f.mu.RLock()
+	path, ok := f.tokens[token]
+	f.mu.RUnlock()
+	if !ok {
+		return ""
+	}
+	return path
+}
+
 // forget drops a file registration (used when a file is reaped).
 func (f *fileServer) forget(path string) {
 	if f == nil {

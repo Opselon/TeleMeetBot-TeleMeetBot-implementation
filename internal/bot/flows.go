@@ -134,13 +134,21 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 		return
 	}
 
+	// A message with no usable text is not necessarily empty: forwarded media
+	// (audio/video/document/voice) arrives with an empty caption. Ingest it
+	// instead of dropping it, so a user can forward a file to present it.
+	if text == "" && tgHasMedia(m) {
+		b.handleTelegramMedia(chatID, userID, m)
+		return
+	}
+
 	// Free text belongs to the wizard when one is open.
 	f := b.getFlow(userID)
 	if f == nil || f.step == stepNone {
 		// A bare media link while a session is live is most likely an attempt
 		// to change what is on screen: point at the switch flow instead of
 		// pretending the message was meaningless.
-		if target, err := engine.ClassifyMedia(text); err == nil && len(b.eng.Active()) > 0 {
+		if target, err := b.classify(text); err == nil && len(b.eng.Active()) > 0 {
 			b.sendText(chatID, fmt.Sprintf("🔀 Got <code>%s</code>.\n\nOpen the session card and press <b>Switch media</b> to put it on the share — the meeting and the share stay up.", esc(truncate(target.URL, 120))), sessionsKB(b.statuses()))
 			return
 		}
@@ -164,16 +172,12 @@ func (b *Bot) stepInput(chatID, userID int64, f *flow, text string) {
 		b.setFlow(userID, f)
 		b.sendText(chatID, flowText(stepMedia, f.meet), cancelKB())
 	case stepMedia:
-		target, err := engine.ClassifyMedia(text)
+		target, err := b.classify(text)
 		if err != nil {
 			b.sendText(chatID, "❌ "+esc(err.Error())+"\n\nSend an http(s) media link.", cancelKB())
 			return
 		}
-		f.media = target.URL
-		f.step = stepNone
-		b.setFlow(userID, f)
-		userLang := b.st.GetUserAudioLang(userID)
-		b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang, b.st.GetUserMediaMode(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID)))
+		b.applyWizardMedia(chatID, userID, f, target)
 	case stepSwitchMedia:
 		b.applyMediaSwitch(chatID, userID, f, text)
 	default:
@@ -182,16 +186,44 @@ func (b *Bot) stepInput(chatID, userID int64, f *flow, text string) {
 	}
 }
 
+// classify validates and classifies a media link, using a live HTTP probe so
+// the server's actual Content-Type wins over an extension guess: an ".mp3"
+// URL serving HTML is a page, and a bare CDN URL serving video/mp4 is direct
+// media. A network failure (offline, timeout) falls back to the offline
+// heuristics, so behaviour in an isolated environment is unchanged.
+func (b *Bot) classify(raw string) (engine.MediaTarget, error) {
+	return engine.ClassifyMediaWithProbe(raw, nil)
+}
+
+// applyWizardMedia completes the wizard's media step with an already
+// classified target. It is shared by the text path (a typed link) and the
+// Telegram-ingestion path (a downloaded local file) so both end in the same
+// confirmation card.
+func (b *Bot) applyWizardMedia(chatID, userID int64, f *flow, target engine.MediaTarget) {
+	f.media = target.URL
+	f.step = stepNone
+	b.setFlow(userID, f)
+	userLang := b.st.GetUserAudioLang(userID)
+	b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang, b.st.GetUserMediaMode(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID)))
+}
+
 // applyMediaSwitch hands a validated replacement link to the engine, which
 // repoints the live session's media tab at it. The Meet session, the screen
 // share and every other session field are left alone, so the flow only waits
 // for a URL and then gets out of the way.
 func (b *Bot) applyMediaSwitch(chatID, userID int64, f *flow, text string) {
-	target, err := engine.ClassifyMedia(text)
+	target, err := b.classify(text)
 	if err != nil {
 		b.sendText(chatID, "❌ "+esc(err.Error())+"\n\nSend an http(s) media link, or /cancel.", cancelKB())
 		return
 	}
+	b.applyMediaSwitchTarget(chatID, userID, f, target)
+}
+
+// applyMediaSwitchTarget is the shared tail of the switch flow: it takes an
+// already classified target (a typed link or an ingested Telegram file) and
+// repoints the live session at it.
+func (b *Bot) applyMediaSwitchTarget(chatID, userID int64, f *flow, target engine.MediaTarget) {
 	s := b.eng.Get(engine.SessionID(f.sessionID))
 	if s == nil {
 		b.clearFlow(userID)
@@ -236,7 +268,7 @@ func (b *Bot) startFlow(chatID, userID int64, args string) {
 		f.step = stepMedia
 	}
 	if len(fields) >= 2 {
-		target, err := engine.ClassifyMedia(fields[1])
+		target, err := b.classify(fields[1])
 		if err != nil {
 			b.setFlow(userID, f)
 			b.sendText(chatID, "❌ "+esc(err.Error())+"\n\n"+flowText(stepMedia, f.meet), cancelKB())

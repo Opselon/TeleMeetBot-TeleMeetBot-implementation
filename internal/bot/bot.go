@@ -15,6 +15,7 @@ import (
 	"github.com/Opselon/TeleMeetBot/internal/config"
 	"github.com/Opselon/TeleMeetBot/internal/engine"
 	"github.com/Opselon/TeleMeetBot/internal/health"
+	"github.com/Opselon/TeleMeetBot/internal/media"
 	"github.com/Opselon/TeleMeetBot/internal/store"
 )
 
@@ -50,6 +51,10 @@ type Engine interface {
 	Active() []*engine.Session
 	List() []*engine.Session
 	Events() <-chan engine.Event
+	// MediaManager returns the Download & Stream manager, or nil when the
+	// feature is disabled. The bot uses it to register Telegram-ingested
+	// files so they follow the same directory, TTL and cleanup as downloads.
+	MediaManager() *media.Manager
 }
 
 // Bot is the Telegram front end.

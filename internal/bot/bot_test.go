@@ -13,6 +13,7 @@ import (
 
 	"github.com/Opselon/TeleMeetBot/internal/config"
 	"github.com/Opselon/TeleMeetBot/internal/engine"
+	"github.com/Opselon/TeleMeetBot/internal/media"
 	"github.com/Opselon/TeleMeetBot/internal/store"
 )
 
@@ -38,6 +39,9 @@ type fakeAPI struct {
 	seq     int
 	// failEdits makes the next N Edit calls fail (transient Telegram errors).
 	failEdits int
+	// filePath is the FilePath getFile returns for any file_id (empty = the
+	// file is too big for the Bot API to serve).
+	filePath string
 }
 
 func (f *fakeAPI) Send(chatID int64, text string, kb *tgbotapi.InlineKeyboardMarkup) (int, error) {
@@ -69,6 +73,18 @@ func (f *fakeAPI) AnswerCallback(id, text string) error {
 func (f *fakeAPI) BotUsername() string { return "telemeet_test_bot" }
 
 func (f *fakeAPI) Updates(int) tgbotapi.UpdatesChannel { return make(tgbotapi.UpdatesChannel) }
+
+// File fakes getFile: tests record the FilePath to return (empty means the
+// file is too large for the Bot API to serve).
+func (f *fakeAPI) File(fileID string) (*tgbotapi.File, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return &tgbotapi.File{FileID: fileID, FilePath: f.filePath}, nil
+}
+
+func (f *fakeAPI) FileDirectURL(filePath string) string {
+	return "https://api.telegram.org/file/botTEST/" + filePath
+}
 
 func (f *fakeAPI) lastSent() sentMsg {
 	f.mu.Lock()
@@ -140,6 +156,10 @@ func (f *fakeEngine) Active() []*engine.Session {
 func (f *fakeEngine) List() []*engine.Session { return f.Active() }
 
 func (f *fakeEngine) Events() <-chan engine.Event { return make(chan engine.Event) }
+
+// MediaManager returns nil: the fake engine has no Download & Stream
+// manager, which is also what a bot sees when the feature is disabled.
+func (f *fakeEngine) MediaManager() *media.Manager { return nil }
 
 // ---- harness --------------------------------------------------------------
 

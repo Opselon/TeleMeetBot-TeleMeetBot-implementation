@@ -67,6 +67,26 @@ func (s *Session) prepareLocalMedia() error {
 		return ErrDownloadUnavailable
 	}
 	target := MediaTarget{URL: s.MediaURL, Kind: s.MediaKind}
+	// A Telegram-ingested file is already local: its URL is the loopback URL
+	// of a managed entry. Re-fetching it through the downloader would both
+	// duplicate the file and point the session at a second copy; instead
+	// adopt the existing entry directly.
+	if entry, ok := mgr.FindByURL(s.MediaURL); ok {
+		s.mu.Lock()
+		s.localFile = &localMedia{
+			id:        entry.ID,
+			url:       s.MediaURL,
+			path:      entry.Path,
+			expiresAt: entry.ExpiresAt,
+			via:       "telegram",
+			bytes:     entry.Bytes,
+		}
+		playMode := s.playMode
+		s.mu.Unlock()
+		s.logger().Infof("[PIPELINE:session] session %s: media already local (%s, mode=%s, expires %s)",
+			s.ID, humanBytesI(entry.Bytes), playMode, entry.ExpiresAt.Format(time.RFC3339))
+		return nil
+	}
 	res, err := s.downloadMedia(context.Background(), target)
 	if err != nil {
 		return err
