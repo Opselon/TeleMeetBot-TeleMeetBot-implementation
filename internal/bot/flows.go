@@ -22,6 +22,10 @@ const (
 	// stepSwitchMedia waits for a replacement media link for a live session;
 	// unlike the wizard it never changes the Meet link or creates a session.
 	stepSwitchMedia
+	// stepMeetPick is the /new landing screen: saved meetings, new Meet, cancel.
+	stepMeetPick
+	// stepMeetRename waits for the text message that renames a saved meeting.
+	stepMeetRename
 )
 
 // flowTimeout drops half-finished wizards after inactivity.
@@ -31,6 +35,11 @@ type flow struct {
 	step  int
 	meet  string
 	media string
+	// meetName is the display name of a saved meeting selected from the
+	// picker, so the confirmation card can show what the user chose.
+	meetName string
+	// meetID is the SQLite row id of the meeting being renamed.
+	meetID int64
 	// sessionID is set only by stepSwitchMedia: the live session whose media
 	// tab will be pointed at the new link.
 	sessionID string
@@ -155,12 +164,28 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 		b.sendText(chatID, "Use /new (or ➕ New stream) to start a session.", mainMenuKB())
 		return
 	}
+	// The saved-meeting rename step consumes the next text message.
+	if b.tryMeetingsInput(chatID, userID, f, text) {
+		return
+	}
 	b.stepInput(chatID, userID, f, text)
 }
 
 // stepInput handles a wizard answer.
 func (b *Bot) stepInput(chatID, userID int64, f *flow, text string) {
 	switch f.step {
+	case stepMeetPick:
+		// The picker is up; a typed link is accepted as the meet link and
+		// the flow continues at media selection.
+		normalized, err := engine.NormalizeMeetURL(text)
+		if err != nil {
+			b.sendText(chatID, "❌ "+esc(err.Error())+"\n\nSend a Meet link like <code>meet.google.com/abc-defg-hij</code>, or pick a saved meeting.", cancelKB())
+			return
+		}
+		f.meet = normalized
+		f.step = stepMedia
+		b.setFlow(userID, f)
+		b.sendText(chatID, flowText(stepMedia, f.meet), cancelKB())
 	case stepMeet:
 		normalized, err := engine.NormalizeMeetURL(text)
 		if err != nil {
@@ -255,8 +280,14 @@ func (b *Bot) startFlow(chatID, userID int64, args string) {
 		b.sendText(chatID, fmt.Sprintf("⚠️ <b>Limit reached</b>\n\nActive sessions: %d/%d. Stop one first.", active, b.cfg.Limits.MaxSessions), sessionsKB(b.statuses()))
 		return
 	}
-	f := &flow{step: stepMeet}
 	fields := strings.Fields(args)
+	if len(fields) == 0 {
+		// Plain /new lands on the saved-meetings picker: saved links first,
+		// then New Google Meet, then Cancel.
+		b.startMeetPicker(chatID, userID)
+		return
+	}
+	f := &flow{step: stepMeet}
 	if len(fields) >= 1 {
 		normalized, err := engine.NormalizeMeetURL(fields[0])
 		if err != nil {
@@ -320,6 +351,10 @@ func (b *Bot) launch(chatID, userID int64) {
 	b.mu.Lock()
 	b.sessionChats[string(sess.ID)] = chatID
 	b.mu.Unlock()
+	// Remember the Meet link for the owner so /new can offer it next time.
+	// The save is best-effort: a store failure must never block a session
+	// that is already running.
+	b.saveCurrentMeet(userID, sess.MeetURL)
 	b.sendSessionCard(chatID, sess)
 }
 
@@ -400,6 +435,9 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 		b.bindCard(chatID, msgID, s, st)
 	case strings.HasPrefix(data, "act:"):
 		b.handleAction(chatID, msgID, q, data)
+	case strings.HasPrefix(data, cbMeetPick) || strings.HasPrefix(data, cbMeetDelete) ||
+		strings.HasPrefix(data, cbMeetRename) || data == cbMeetNew || data == cbMeetList || data == cbMeetDone:
+		b.handleMeetCallback(chatID, userID, msgID, data)
 	default:
 		_ = b.api.AnswerCallback(q.ID, "unknown action")
 	}

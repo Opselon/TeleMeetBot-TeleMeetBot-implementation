@@ -56,6 +56,8 @@ func (f *fakeAPI) Edit(chatID int64, messageID int, text string, kb *tgbotapi.In
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.edits = append(f.edits, editMsg{chatID, messageID, text})
+	f.seq++
+	f.sent = append(f.sent, sentMsg{chatID, text, kb})
 	if f.failEdits > 0 {
 		f.failEdits--
 		return errors.New("telegram: too many requests (simulated)")
@@ -169,6 +171,7 @@ type harness struct {
 	eng  *fakeEngine
 	cfg  *config.Config
 	st   *store.Store
+	ms   *store.MeetingStore
 	path string
 }
 
@@ -188,8 +191,23 @@ func newHarness(t *testing.T, admins []int64, maxSessions int) *harness {
 	st := store.Load(filepath.Join(cfg.Paths.DataDir, "state.json"))
 	api := &fakeAPI{}
 	eng := &fakeEngine{}
-	b := New(api, cfg, eng, st, nil, path, "/usr/bin/chromium", "")
+	b := New(api, cfg, eng, st, nil, nil, path, "/usr/bin/chromium", "")
 	return &harness{bot: b, api: api, eng: eng, cfg: cfg, st: st, path: path}
+}
+
+// newHarnessWithMeetings is newHarness plus a real SQLite meeting store, for
+// tests that exercise the saved-meetings flow.
+func newHarnessWithMeetings(t *testing.T, admins []int64, maxSessions int) *harness {
+	t.Helper()
+	h := newHarness(t, admins, maxSessions)
+	ms, err := store.NewMeetingStore(context.Background(), filepath.Join(h.cfg.Paths.DataDir, "meetings.db"))
+	if err != nil {
+		t.Fatalf("NewMeetingStore: %v", err)
+	}
+	t.Cleanup(func() { _ = ms.Close() })
+	h.ms = ms
+	h.bot.ms = ms
+	return h
 }
 
 func (h *harness) message(userID int64, text string) {
@@ -264,6 +282,12 @@ func TestNewStreamHappyPath(t *testing.T) {
 	h := newHarness(t, []int64{42}, 2)
 
 	h.message(42, "/new")
+	// Plain /new lands on the saved-meetings picker, not the raw link prompt.
+	if !strings.Contains(h.api.lastSent().text, "New stream") {
+		t.Fatalf("picker missing: %q", h.api.lastSent().text)
+	}
+	// "New Google Meet" moves to the link step.
+	h.callback(42, cbMeetNew)
 	if !strings.Contains(h.api.lastSent().text, "step 1/2") {
 		t.Fatalf("step 1 missing: %q", h.api.lastSent().text)
 	}
@@ -311,7 +335,8 @@ func TestWizardRejectsInvalidLinks(t *testing.T) {
 	if !strings.Contains(h.api.lastSent().text, "❌") {
 		t.Fatalf("zoom link accepted: %q", h.api.lastSent().text)
 	}
-	if f := h.bot.getFlow(42); f == nil || f.step != stepMeet {
+	// The wizard stays on the picker step until a valid Meet link arrives.
+	if f := h.bot.getFlow(42); f == nil || f.step != stepMeetPick {
 		t.Fatal("flow moved on after an invalid meet link")
 	}
 
