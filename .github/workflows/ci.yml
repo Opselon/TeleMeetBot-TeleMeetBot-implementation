@@ -155,15 +155,10 @@ jobs:
             echo "OK: installer refused a non-tag version"
           fi
 
-          echo "--- 5: --uninstall converges on a host with no service system ---"
-          # CI runners have no usable systemd inside the runner container, so
-          # the installer must report "nothing to remove" and still succeed.
-          if bash scripts/install.sh --version v0.0.0-ci --prefix "$prefix" \
-            --config-dir "$prefix/etc/telemeetbot" --no-wizard --no-service </dev/null; then
-            echo "OK: re-install idempotent"
-          else
-            echo "FAIL: re-install failed"; exit 1
-          fi
+          echo "--- 5: the install root is a real install, not only a download ---"
+          test -x "$prefix/bin/telemeetbot" || { echo "FAIL: no binary in $prefix/bin"; exit 1; }
+          test -f "$prefix/etc/telemeetbot/config.yml" || { echo "FAIL: no staged config"; exit 1; }
+          echo "OK: binary + staged config present after three installs"
 
       - name: lifecycle — backup, restore, uninstall
         run: |
