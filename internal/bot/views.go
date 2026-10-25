@@ -259,6 +259,14 @@ func sessionCardKB(st engine.Status) *tgbotapi.InlineKeyboardMarkup {
 			tgbotapi.NewInlineKeyboardButtonData("⏩ +10s", "act:"+id+":fwd10"),
 		},
 		{
+			tgbotapi.NewInlineKeyboardButtonData("⏪ -30s", "act:"+id+":back30"),
+			tgbotapi.NewInlineKeyboardButtonData("⏩ +30s", "act:"+id+":fwd30"),
+		},
+		{
+			tgbotapi.NewInlineKeyboardButtonData("⏪ -60s", "act:"+id+":back60"),
+			tgbotapi.NewInlineKeyboardButtonData("⏩ +60s", "act:"+id+":fwd60"),
+		},
+		{
 			tgbotapi.NewInlineKeyboardButtonData("🔉 Vol-", "act:"+id+":voldown"),
 			tgbotapi.NewInlineKeyboardButtonData("🔊 Vol+", "act:"+id+":volup"),
 		},

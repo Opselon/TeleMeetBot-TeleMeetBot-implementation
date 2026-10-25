@@ -8,6 +8,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"github.com/Opselon/TeleMeetBot/internal/config"
 	"github.com/Opselon/TeleMeetBot/internal/engine"
 	"github.com/Opselon/TeleMeetBot/internal/health"
 	"github.com/Opselon/TeleMeetBot/internal/store"
@@ -372,6 +373,54 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 	}
 }
 
+// seekStepFor maps a seek button to its delta in seconds. The ±10s buttons
+// honour media.seek_step_seconds so the existing configured behaviour is
+// preserved; ±30s/±60s are the fixed finer/coarser steps.
+func seekStepFor(action string, cfg *config.Config) int {
+	switch action {
+	case "back30", "fwd30":
+		return 30
+	case "back60", "fwd60":
+		return 60
+	default:
+		step := int(cfg.Media.SeekStepSeconds)
+		if step <= 0 {
+			step = 10
+		}
+		return step
+	}
+}
+
+// seekAction runs one verified seek and describes the outcome honestly. The
+// toast always carries the position the player actually reported; a seek that
+// the player refused (live stream, not ready, past the end) becomes a clear
+// reason instead of a silent "skipped".
+func (b *Bot) seekAction(s *engine.Session, action string) (error, string) {
+	delta := -seekStepFor(action, b.cfg)
+	if strings.HasPrefix(action, "fwd") {
+		delta = seekStepFor(action, b.cfg)
+	}
+	rep, err := s.SeekBy(delta)
+	if err != nil {
+		b.log.Warnf("seek %s %d s: %v", s.ID, delta, err)
+		return err, ""
+	}
+	if !rep.OK {
+		// Not an engine error: the call reached the player and the player
+		// declined. Tell the operator why and where it actually is — on a
+		// refusal the position is unchanged, so report Before (After is 0).
+		pos := rep.After
+		if pos == 0 {
+			pos = rep.Before
+		}
+		return nil, fmt.Sprintf("%s · %s", fmtClock(pos), truncate(rep.Error, 80))
+	}
+	if delta < 0 {
+		return nil, fmt.Sprintf("⏪ %s · %s", fmtClock(rep.After), fmtClock(rep.Duration))
+	}
+	return nil, fmt.Sprintf("⏩ %s / %s", fmtClock(rep.After), fmtClock(rep.Duration))
+}
+
 // handleAction performs a session control press.
 func (b *Bot) handleAction(chatID int64, msgID int, q *tgbotapi.CallbackQuery, data string) {
 	parts := strings.SplitN(strings.TrimPrefix(data, "act:"), ":", 2)
@@ -413,10 +462,8 @@ func (b *Bot) handleAction(chatID int64, msgID int, q *tgbotapi.CallbackQuery, d
 		err, toast = s.SetVolume(st.Volume-10), fmt.Sprintf("volume %d%%", max(0, st.Volume-10))
 	case "volup":
 		err, toast = s.SetVolume(st.Volume+10), fmt.Sprintf("volume %d%%", min(100, st.Volume+10))
-	case "back10":
-		err, toast = s.Seek(-b.cfg.Media.SeekStepSeconds), "rewound"
-	case "fwd10":
-		err, toast = s.Seek(b.cfg.Media.SeekStepSeconds), "skipped"
+	case "back10", "fwd10", "back30", "fwd30", "back60", "fwd60":
+		err, toast = b.seekAction(s, action)
 	case "restart":
 		err, toast = s.RestartMedia(), "restarting"
 	case "refresh":
