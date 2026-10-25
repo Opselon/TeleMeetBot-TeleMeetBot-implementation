@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -375,9 +374,9 @@ func validateTgMedia(path string, max int64) error {
 
 // diskFreeBytes reports free space on the volume holding dir (0 = unknown).
 func diskFreeBytes(dir string) int64 {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(dir, &st); err != nil {
+	free, _, ok := media.DiskUsageForPathPublic(dir)
+	if !ok {
 		return 0
 	}
-	return int64(st.Bavail) * int64(st.Bsize)
+	return int64(free)
 }

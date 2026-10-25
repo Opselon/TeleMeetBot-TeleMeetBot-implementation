@@ -86,14 +86,57 @@ curl http://127.0.0.1:18080/healthz
 
 ### Option B — one-command install (bare metal)
 
+**Linux / macOS:**
+
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/main/scripts/install.sh | bash
+curl -fsSL https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/latest/download/install.sh | sh
 ```
 
-The installer detects arch (`amd64`/`arm64`/`arm v6, v7`/`386`), downloads + verifies the
-latest release archive, drops `/usr/local/bin/telemeetbot`, installs the systemd unit,
-stages a template config at `/etc/telemeetbot/config.yml` (from
-`deploy/config.example.yml`) and launches the wizard.
+**Windows (PowerShell):**
+
+```powershell
+irm https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/latest/download/install.ps1 | iex
+```
+
+The installer detects the OS and CPU arch (`amd64`/`arm64`/`arm v6, v7`/`386`), resolves the
+latest **release tag**, downloads the matching archive and **verifies it against the release's
+published SHA-256 checksums** before touching anything. It then installs the binary
+(`/usr/local/bin/telemeetbot` or `%ProgramFiles%\TeleMeetBot`), stages a template config
+(`deploy/config.example.yml`) without overwriting an existing one, installs the OS service
+(systemd on Linux, a Windows service via the SCM, a launchd agent on macOS) and launches the
+setup wizard.
+
+Pin a specific release (recommended for unattended installs):
+
+```bash
+curl -fsSL https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.1.0/install.sh | sh -s -- --version v1.1.0
+```
+
+Other flags: `--version vX.Y.Z` · `--prefix DIR` · `--config-dir DIR` · `--data-dir DIR`
+· `--no-wizard` · `--no-service` · `--no-start` · `--dry-run`.
+
+Verify a downloaded archive yourself before installing:
+
+```bash
+curl -fsSLO https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.1.0/SHA256SUMS
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+**Lifecycle after install:**
+
+```bash
+telemeetbot --wizard                         # re-run setup (backs up the previous config to .bak)
+telemeetbot --restore-backup                 # roll the config back to that backup
+telemeetbot --check                          # doctor: config, browser, permissions, disk, network
+telemeetbot --uninstall                      # stop + remove the service and the binary
+telemeetbot --uninstall --keep-binary        # remove only the service registration
+# Linux:   systemctl status telemeetbot | journalctl -u telemeetbot -f
+# macOS:   launchctl print gui/$(id -u)/telemeetbot
+# Windows: sc.exe query telemeetbot | Get-EventLog -LogName Application -Source telemeetbot
+```
+
+> The uninstall never deletes your config, data directory or session history — those hold the
+> bot token and your saved meetings. Remove them manually for a full purge.
 
 ### Option C — build from source
 

@@ -574,11 +574,11 @@ func (m *Manager) deleteManaged(path, why string) bool {
 
 // diskFreeBytes reports free bytes on the filesystem holding path.
 func diskFreeBytes(path string) (int64, bool) {
-	var st syscallStatfs
-	if err := statfs(path, &st); err != nil {
+	free, _, ok := diskUsageBytes(path)
+	if !ok {
 		return 0, false
 	}
-	return int64(st.Bavail) * int64(st.Bsize), true
+	return int64(free), true
 }
 
 // Status reports the manager state for the health/dashboard surface.

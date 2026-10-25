@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -216,8 +217,8 @@ func Default() *Config {
 }
 
 // ResolvePath picks the config file: explicit flag, env var, ./telemeetbot.yml,
-// /etc/telemeetbot/config.yml. The first existing candidate wins; otherwise the
-// first candidate is returned so the wizard can create it.
+// the platform's system config, in that order. The first existing candidate
+// wins; otherwise the first candidate is returned so the wizard can create it.
 func ResolvePath(explicit string) string {
 	if explicit != "" {
 		return explicit
@@ -225,7 +226,16 @@ func ResolvePath(explicit string) string {
 	if p := os.Getenv("TELEMEETBOT_CONFIG"); p != "" {
 		return p
 	}
-	candidates := []string{"telemeetbot.yml", "/etc/telemeetbot/config.yml"}
+	candidates := []string{"telemeetbot.yml", filepath.Join(SystemConfigDir(), "config.yml")}
+	if runtime.GOOS == "windows" {
+		// A per-user config wins over the machine-wide one when both exist:
+		// the wizard writes LOCALAPPDATA for a non-admin Windows install.
+		candidates = []string{"telemeetbot.yml"}
+		if local := os.Getenv("LOCALAPPDATA"); strings.TrimSpace(local) != "" {
+			candidates = append(candidates, filepath.Join(local, "TeleMeetBot", "config.yml"))
+		}
+		candidates = append(candidates, filepath.Join(SystemConfigDir(), "config.yml"))
+	}
 	for _, c := range candidates {
 		if _, err := os.Stat(c); err == nil {
 			abs, err := filepath.Abs(c)
@@ -262,6 +272,43 @@ func Load(path string) (*Config, error) {
 func Exists(path string) bool {
 	st, err := os.Stat(path)
 	return err == nil && !st.IsDir()
+}
+
+// Backup copies the config at path to "<path>.bak" (overwriting any previous
+// backup) so a wizard re-run or an upgrade can be rolled back by hand. It is
+// best-effort: a missing file or an unwritable directory returns an error the
+// caller may warn about, never one that aborts an install.
+func Backup(path string) (string, error) {
+	if path == "" {
+		return "", errors.New("no config path given")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read config for backup: %w", err)
+	}
+	dst := path + ".bak"
+	if err := os.WriteFile(dst, raw, 0o600); err != nil {
+		return "", fmt.Errorf("write backup %s: %w", dst, err)
+	}
+	return dst, nil
+}
+
+// RestoreBackup moves the .bak file created by Backup back over the config.
+// It is the rollback half of the pair; a missing backup is reported as an
+// error rather than silently clearing the live config.
+func RestoreBackup(path string) error {
+	if path == "" {
+		return errors.New("no config path given")
+	}
+	bak := path + ".bak"
+	raw, err := os.ReadFile(bak)
+	if err != nil {
+		return fmt.Errorf("read backup %s: %w", bak, err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		return fmt.Errorf("restore %s: %w", path, err)
+	}
+	return nil
 }
 
 // Path returns the file the config was loaded from.
