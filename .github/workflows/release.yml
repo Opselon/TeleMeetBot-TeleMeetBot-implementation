@@ -228,10 +228,62 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download every artifact
+      # Download one artifact per step rather than all at once: the bulk
+      # download action gives up on the whole set when one item fails its
+      # retries, which would lose a release over a single flaky item.
+      - name: Download the linux/amd64 artifact
         uses: actions/download-artifact@v4
-        with:
-          path: dist
+        with: { name: linux-amd64, path: dist/linux-amd64 }
+      - name: Download the linux/arm64 artifact
+        uses: actions/download-artifact@v4
+        with: { name: linux-arm64, path: dist/linux-arm64 }
+      - name: Download the linux/arm/v6 artifact
+        uses: actions/download-artifact@v4
+        with: { name: linux-arm-6, path: dist/linux-arm-6 }
+      - name: Download the linux/arm/v7 artifact
+        uses: actions/download-artifact@v4
+        with: { name: linux-arm-7, path: dist/linux-arm-7 }
+      - name: Download the linux/386 artifact
+        uses: actions/download-artifact@v4
+        with: { name: linux-386, path: dist/linux-386 }
+      - name: Download the darwin/amd64 artifact
+        uses: actions/download-artifact@v4
+        with: { name: darwin-amd64, path: dist/darwin-amd64 }
+      - name: Download the darwin/arm64 artifact
+        uses: actions/download-artifact@v4
+        with: { name: darwin-arm64, path: dist/darwin-arm64 }
+      - name: Download the windows/amd64 artifact
+        uses: actions/download-artifact@v4
+        with: { name: windows-amd64, path: dist/windows-amd64 }
+      - name: Download the windows/arm64 artifact
+        uses: actions/download-artifact@v4
+        with: { name: windows-arm64, path: dist/windows-arm64 }
+
+      - name: Verify every platform artifact arrived
+        run: |
+          set -euo pipefail
+          # Each artifact is one archive; a missing one means a platform
+          # silently drops out of the release, which is worse than failing.
+          missing=0
+          check() { # check <dir> <expected-file>
+            if [ ! -f "dist/$1/$2" ]; then echo "MISSING: dist/$1/$2"; missing=1; fi
+          }
+          check linux-amd64  telemeetbot-linux-amd64.tar.gz
+          check linux-arm64  telemeetbot-linux-arm64.tar.gz
+          check linux-arm-6  telemeetbot-linux-armv6.tar.gz
+          check linux-arm-7  telemeetbot-linux-armv7.tar.gz
+          check linux-386    telemeetbot-linux-386.tar.gz
+          check darwin-amd64 telemeetbot-darwin-amd64.tar.gz
+          check darwin-arm64 telemeetbot-darwin-arm64.tar.gz
+          check windows-amd64 telemeetbot-windows-amd64.zip
+          check windows-arm64 telemeetbot-windows-arm64.zip
+          if [ "$missing" -ne 0 ]; then
+            echo "One or more platform archives are absent; refusing to publish a partial release."
+            find dist -type f | sort
+            exit 1
+          fi
+          echo "All 9 platform archives are present."
+          find dist -type f | sort
 
       - name: Assemble the release directory
         run: |
