@@ -181,7 +181,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve version
+      - name: Resolve version and image name
         id: ver
         run: |
           version="${{ github.ref_name }}"
@@ -189,6 +189,9 @@ jobs:
             version="${{ inputs.version }}"
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
+          # ghcr.io rejects mixed-case repository names: this repo is
+          # Opselon/TeleMeetBot-..., which is not a valid image tag as-is.
+          echo "image=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -198,8 +201,8 @@ jobs:
           push: true
           build-args: VERSION=${{ steps.ver.outputs.version }}
           tags: |
-            ghcr.io/${{ github.repository }}:${{ steps.ver.outputs.version }}
-            ghcr.io/${{ github.repository }}:latest
+            ${{ steps.ver.outputs.image }}:${{ steps.ver.outputs.version }}
+            ${{ steps.ver.outputs.image }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
