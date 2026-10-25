@@ -134,6 +134,16 @@ jobs:
           name: ${{ matrix.goos }}-${{ matrix.goarch }}
           path: smoke
 
+      # The artifact backend is occasionally slow to serve an artifact that
+      # plainly exists; retry the download once instead of letting a
+      # transient failure kill the release.
+      - name: Retry the download
+        if: failure()
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.goos }}-${{ matrix.goarch }}
+          path: smoke
+
       - name: Verify the binary runs
         shell: bash
         run: |
