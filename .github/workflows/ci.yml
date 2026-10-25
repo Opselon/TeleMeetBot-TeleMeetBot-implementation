@@ -166,15 +166,16 @@ jobs:
 
           echo "--- 5: the install root is a real install, not only a download ---"
           # A fresh prefix must end up with the binary and a fail-closed
-          # template config. Use -e (not -f): the runner's /tmp is a real
-          # directory but config.yml may resolve through a symlink, and -f
-          # would then deny a file that is plainly there.
+          # template config. The config dir is 0750 root-owned (fail-closed
+          # by design), so a non-root step cannot stat inside it; read the
+          # file instead — that proves both the content and the install.
           prefix2="$(mktemp -d)"
           bash scripts/install.sh --version v0.0.0-ci --prefix "$prefix2" \
             --config-dir "$prefix2/etc/telemeetbot" --no-wizard --no-service </dev/null
           test -x "$prefix2/bin/telemeetbot" || { echo "FAIL: no binary in $prefix2/bin"; exit 1; }
-          test -e "$prefix2/etc/telemeetbot/config.yml" || { echo "FAIL: no staged config"; ls -la "$prefix2/etc/telemeetbot" || true; exit 1; }
           "$prefix2/bin/telemeetbot" --version
+          sudo cat "$prefix2/etc/telemeetbot/config.yml" > /dev/null \
+            || { echo "FAIL: no readable staged config"; exit 1; }
           echo "OK: binary + staged config present on a fresh prefix"
 
       - name: lifecycle — backup, restore, uninstall
