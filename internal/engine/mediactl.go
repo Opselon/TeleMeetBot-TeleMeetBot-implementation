@@ -19,6 +19,12 @@ type mediaStatus struct {
 	Duration     float64 `json:"duration"`
 	Title        string  `json:"title"`
 	Src          string  `json:"src"`
+	// Ready is HTMLMediaElement.readyState (0..4). Seek decisions read it: a
+	// seek below HAVE_METADATA has no timeline to move along.
+	Ready int `json:"readyState,omitempty"`
+	// Seekable is the number of ranges in media.seekable. A live stream has
+	// zero; treating its seek button as a success would be a lie.
+	Seekable int `json:"seekable,omitempty"`
 }
 
 // mediaControlJS builds a self-contained script that finds the best media
@@ -106,6 +112,23 @@ func mediaControlJS(action string, arg float64) string {
         m.currentTime = Math.min(Math.max(0, m.currentTime + arg), d > 0 ? d : 1e9);
         break;
       }
+      case "seekTo": {
+        // Absolute seek with boundary clamping. arg is the target position;
+        // readyState is checked by the caller, so here the job is to apply the
+        // clamp the same way for every player and never throw.
+        const d = isFinite(m.duration) ? m.duration : 0;
+        let t = arg;
+        if (!(t >= 0)) t = 0;
+        if (d > 0 && t > d) t = d;
+        try { m.currentTime = t; } catch (e) { out.error = String(e); }
+        break;
+      }
+      case "seekStatus": {
+        // Read-only probe: position, duration, readyState and the seekable
+        // ranges. A live stream reports seekable.length == 0, which is what
+        // tells the engine the seek buttons cannot do anything.
+        break;
+      }
       case "restart": {
         m.currentTime = 0;
         const p = m.play(); if (p && p.catch) p.catch(() => {});
@@ -124,6 +147,8 @@ func mediaControlJS(action string, arg float64) string {
   out.playbackRate = m.playbackRate || 1;
   out.currentTime = m.currentTime || 0;
   out.duration = isFinite(m.duration) ? m.duration : 0;
+  out.readyState = m.readyState || 0;
+  try { out.seekable = (m.seekable && m.seekable.length) ? m.seekable.length : 0; } catch (e) { out.seekable = 0; }
   out.src = String(m.currentSrc || m.src || "").slice(0, 300);
   let real = "";
   try {

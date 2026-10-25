@@ -15,6 +15,11 @@ type API interface {
 	AnswerCallback(id, text string) error
 	BotUsername() string
 	Updates(timeoutSeconds int) tgbotapi.UpdatesChannel
+	// File resolves a file_id to its Telegram File (FilePath is set when the
+	// file is small enough for the Bot API to serve). Used to download
+	// forwarded media; the derived URL is signed and must never be logged.
+	File(fileID string) (*tgbotapi.File, error)
+	FileDirectURL(filePath string) string
 }
 
 // tgAPI is the real implementation backed by go-telegram-bot-api.
@@ -67,6 +72,22 @@ func (t *tgAPI) AnswerCallback(id, text string) error {
 
 // BotUsername returns the bot's @username.
 func (t *tgAPI) BotUsername() string { return t.username }
+
+// File resolves a file_id through getFile. The FilePath is present only when
+// the file is under the Bot API's 20 MB ceiling.
+func (t *tgAPI) File(fileID string) (*tgbotapi.File, error) {
+	file, err := t.api.GetFile(tgbotapi.FileConfig{FileID: fileID})
+	if err != nil {
+		return nil, fmt.Errorf("telegram getFile: %w", err)
+	}
+	return &file, nil
+}
+
+// FileDirectURL builds the download URL for a FilePath. The link is signed
+// and short-lived; callers must use it immediately and never log it.
+func (t *tgAPI) FileDirectURL(filePath string) string {
+	return fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", t.api.Token, filePath)
+}
 
 // Updates starts the long-poll channel.
 func (t *tgAPI) Updates(timeoutSeconds int) tgbotapi.UpdatesChannel {

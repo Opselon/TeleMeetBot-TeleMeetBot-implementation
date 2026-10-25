@@ -451,6 +451,11 @@ func (c *Config) StateFile() string {
 	return filepath.Join(c.Paths.DataDir, "state.json")
 }
 
+// MeetingsFile returns the SQLite database path for saved meetings.
+func (c *Config) MeetingsFile() string {
+	return filepath.Join(c.Paths.DataDir, "meetings.db")
+}
+
 // TokenPreview redacts the bot token for logs and UI.
 func (c *Config) TokenPreview() string {
 	t := strings.TrimSpace(c.Telegram.Token)

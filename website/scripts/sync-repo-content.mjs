@@ -80,7 +80,7 @@ const COMMAND_DOCS = {
 };
 const flowsGo = read('internal/bot/flows.go');
 const INLINE_ACTIONS = new Set([
-  'pause', 'resume', 'mute', 'unmute', 'voldown', 'volup', 'back10', 'fwd10', 'restart', 'refresh', 'stop',
+  'pause', 'resume', 'mute', 'unmute', 'voldown', 'volup', 'back10', 'fwd10', 'back30', 'fwd30', 'back60', 'fwd60', 'restart', 'refresh', 'stop',
 ]);
 const commands = [];
 for (const m of flowsGo.matchAll(/case\s+"([a-z0-9]+)"(?:,\s*"([a-z0-9]+)")?:/g)) {
@@ -102,7 +102,7 @@ for (const m of flowsGo.matchAll(/case\s+"([a-z0-9]+)"(?:,\s*"([a-z0-9]+)")?:/g)
     description: COMMAND_DOCS[primary],
     alias: names[1] ? `/${names[1]}` : null,
     context:
-      /case\s+"(pause|resume|mute|unmute|voldown|volup|back10|fwd10|restart|refresh|stop)":/.test(m[0])
+      /case\s+"(pause|resume|mute|unmute|voldown|volup|back10|fwd10|back30|fwd30|back60|fwd60|restart|refresh|stop)":/.test(m[0])
         ? 'inline'
         : 'command',
   });
@@ -117,12 +117,16 @@ const inlineActions = [
   { action: 'volup', label: '🔊 Vol+', description: 'Raise the player volume by 10 percentage points.' },
   { action: 'back10', label: '⏪ -10s', description: 'Seek back by media.seek_step_seconds (default 10).' },
   { action: 'fwd10', label: '⏩ +10s', description: 'Seek forward by media.seek_step_seconds (default 10).' },
+  { action: 'back30', label: '⏪ -30s', description: 'Seek back by a fixed 30 seconds.' },
+  { action: 'fwd30', label: '⏩ +30s', description: 'Seek forward by a fixed 30 seconds.' },
+  { action: 'back60', label: '⏪ -60s', description: 'Seek back by a fixed 60 seconds.' },
+  { action: 'fwd60', label: '⏩ +60s', description: 'Seek forward by a fixed 60 seconds.' },
   { action: 'restart', label: '♻️ Restart media', description: 'Reload the media tab and start playback from the beginning.' },
   { action: 'refresh', label: '🔄 Refresh', description: 'Re-render the session card from live state.' },
   { action: 'stop', label: '⏹ Stop', description: 'End the session and close its Chromium.' },
 ];
 const actionSet = new Set();
-for (const m of flowsGo.matchAll(/case\s+"(pause|resume|mute|unmute|voldown|volup|back10|fwd10|restart|refresh|stop)":/g)) {
+for (const m of flowsGo.matchAll(/case\s+"(pause|resume|mute|unmute|voldown|volup|back10|fwd10|back30|fwd30|back60|fwd60|restart|refresh|stop)":/g)) {
   actionSet.add(m[1]);
 }
 const missingActions = [...actionSet].filter((a) => !inlineActions.some((i) => i.action === a));

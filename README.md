@@ -52,8 +52,11 @@ For a **screen** (Xvfb) mode instead of headless, set `present_mode: "screen"`, 
 
 * **2-minute onboarding wizard** — `telemeetbot --wizard` (token, admins, Chromium detection, save, optional systemd/capture-test)
 * **Telegram dashboard** — home, sessions, settings, health, per-session control cards that refresh automatically
-* **Playback control** — pause/resume, mute/unmute, volume 0–100, speed 0.25–4×, seek ±(n)s, loop, restart
+* **Playback control** — pause/resume, mute/unmute, volume 0–100, speed 0.25–4×, seek ±10s/±30s/±60s (verified against the live player), loop, restart
 * **Any link** — YouTube (`watch`/`youtu.be`/`shorts`/`live`), direct media (`.mp4 .m4v .webm .mkv .mov .ogv .mp3 .m4a .aac .flac .wav .opus .oga`), and generic pages via a built-in player
+* **Smart source detection** — a live HTTP probe (Content-Type, redirects, HEAD→GET fallback) classifies links by what the server actually serves, not by extension: an `.mp3` URL serving HTML is a page; a bare CDN link serving `video/mp4` is direct media
+* **Telegram media** — forward an audio/video/document to the bot: it is downloaded through the Bot API, content-sniffed, and played as direct media (never routed through YouTube logic)
+* **Saved meetings** — `/new` offers your saved Meet links first (`meetings.db`, SQLite in the data dir); pick one to jump straight to media selection, or start a fresh meeting. Save/list/rename/delete from the same screen
 * **Session store** — `state.json` history (max 50 records), survives restarts (corrupt file → kept aside as `*.corrupt-*`, fresh store)
 * **Health surface** — `/healthz` (JSON with sessions/uptime/browser/disk/config) + `/livez`; **no** remote control endpoints
 * **Diagnostics** — `--check` (doctor) and `--check --capture-test` verifies real `getDisplayMedia` capture: frame changes + audio track
@@ -110,10 +113,16 @@ go build -o telemeetbot ./cmd/telemeetbot   # Go 1.26+
 
 ```
 /start            → dashboard (Active sessions, uptime, keyboard)
-/new              → step 1/2: paste the Meet link
-                  → step 2/2: paste the media link
+/new              → saved meetings picker (📌 your links, 🆕 New Google Meet, ✖️ Cancel)
+                  → pick a saved link → step 2/2: paste the media link
+                  → or 🆕 New Google Meet → step 1/2: paste the Meet link
                   → "Ready to launch" → 🚀 Launch
 ```
+
+You can also just type or paste a Meet link while the picker is up — it is
+accepted directly. Meeting links used by a launched session are saved
+automatically and offered by `/new` next time (rename or delete them from
+**📋 Manage saved**).
 
 The bot then: launches Chromium → opens the media tab (title-locked) → opens Meet → joins as
 guest → clicks Present → shares the media tab → turns playback on → sends you a session card
@@ -322,6 +331,9 @@ frames — i.e. the share is never restarted.
 * Chromium profiles are per-session temp dirs removed at end; `--no-sandbox` is required
   (standard for containers) — run the bot as a dedicated, low-privileged user.
 * `state.json` contains meeting URLs — cap history and protect the data dir like any secret.
+* `meetings.db` (SQLite, WAL mode) holds saved meeting links per owner; every read and write is
+  scoped by `owner_id`, so one user can never list, rename or delete another user's rows. It lives
+  in the configured `data_dir` next to `state.json` and is backed up (`*.bak-<unix>`) at startup.
 
 ---
 

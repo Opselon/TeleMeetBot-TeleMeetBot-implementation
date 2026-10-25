@@ -65,6 +65,12 @@ type Session struct {
 	mediaErr string
 	audioRep AudioTrackReport
 
+	// seekMu serializes seek calls on one session: rapid button presses
+	// (and a seek racing a switch) must not interleave their
+	// read-position → seekTo → verify round-trips, or the second call can
+	// compute its target from a position the first one already left.
+	seekMu sync.Mutex
+
 	lastMeetLoad time.Time
 
 	// adSkipEnabled gates the ad-skip monitor. A nil config value (the default)
@@ -98,6 +104,13 @@ type Session struct {
 	// latest-wins handoff, the state transitions and the rollback — can be
 	// exercised without Chromium.
 	switchRun func(target MediaTarget, stale func() bool) error
+
+	// mediaRun is the browser-facing half of a media action (seek, pause,
+	// volume...). It is nil in production, where the real CDP page is driven
+	// directly; package tests may substitute a fake player so the seek state
+	// machine — readiness, clamping, verification, rapid presses — can be
+	// exercised without Chromium.
+	mediaRun func(action string, arg float64) (mediaStatus, error)
 }
 
 // Status is a dashboard-friendly snapshot.
@@ -1112,18 +1125,9 @@ func (s *Session) SetRate(r float64) error {
 	return nil
 }
 
-// Seek skips by delta seconds.
-func (s *Session) Seek(delta int) error {
-	st, err := s.mediaAction("seek", float64(delta))
-	if err != nil {
-		return err
-	}
-	s.mu.Lock()
-	s.cur = st.CurrentTime
-	s.dur = st.Duration
-	s.mu.Unlock()
-	return nil
-}
+// Seek skips by delta seconds. The implementation lives in seek.go: it reads
+// the real player position, clamps to the duration, verifies the result and
+// reports failures honestly.
 
 // RestartMedia reloads the media tab from the beginning (keeps the share up,
 // Chromium's tab capture follows the same tab).
@@ -1193,8 +1197,37 @@ func truncateStr(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// mediaAction evaluates a media-control script and decodes its result.
+// mediaAction evaluates a media-control script and decodes its result. A CDP
+// round-trip can fail transiently (a tab reload mid-press, a navigation, the
+// browser reclaiming the target) — those look identical to a genuinely dead
+// tab, so one retry after re-reading the tab pointer keeps rapid seek presses
+// working through a reload without hiding a real failure: the retry only runs
+// when the first attempt errored, and the last error is what the caller sees.
 func (s *Session) mediaAction(action string, arg float64) (mediaStatus, error) {
+	st, err := s.mediaActionOnce(action, arg)
+	if err == nil {
+		return st, nil
+	}
+	if s.ctx != nil && s.ctx.Err() != nil {
+		return mediaStatus{}, err
+	}
+	// Re-read the pointer: a navigate/reload may have replaced the page object
+	// the first attempt used. Only retry once, and only for round-trip errors
+	// (a decode failure would just fail the same way twice).
+	if second, err2 := s.mediaActionOnce(action, arg); err2 == nil {
+		s.log.Debugf("[PIPELINE:media] session %s: media %q action recovered after retry: %v", s.ID, action, err)
+		return second, nil
+	}
+	return mediaStatus{}, err
+}
+
+// mediaActionOnce performs a single CDP round-trip for a media action.
+func (s *Session) mediaActionOnce(action string, arg float64) (mediaStatus, error) {
+	// mediaRun is the browser-facing half of a media action. Tests substitute
+	// a fake player; production always goes through the real rod page.
+	if s.mediaRun != nil {
+		return s.mediaRun(action, arg)
+	}
 	media := s.mediaTab()
 	if media == nil {
 		return mediaStatus{}, errors.New("media page is not available")

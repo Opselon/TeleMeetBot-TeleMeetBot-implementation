@@ -175,6 +175,18 @@ func run(cfg *config.Config, cfgPath string, log *slogLogger) error {
 		log.Warnf("%d session(s) from a previous run were interrupted", len(interrupted))
 	}
 
+	// Saved meetings live in SQLite next to state.json. A failure here is
+	// fatal: a missing meeting store would silently revert users to typing
+	// Meet links, and an unreadable database must not be papered over.
+	if _, err := store.BackupDB(cfg.MeetingsFile()); err != nil {
+		log.Warnf("meeting db backup: %v", err)
+	}
+	meetings, err := store.NewMeetingStore(ctx, cfg.MeetingsFile())
+	if err != nil {
+		return fmt.Errorf("open meeting store %s: %w", cfg.MeetingsFile(), err)
+	}
+	defer meetings.Close()
+
 	bCfg, mCfg, meetCfg := engine.FromConfig(cfg)
 	browserPath, browserErr := engine.ResolveBrowser(bCfg, log)
 	if browserErr != nil {
@@ -210,7 +222,7 @@ func run(cfg *config.Config, cfgPath string, log *slogLogger) error {
 	if err != nil {
 		return err
 	}
-	b := bot.New(api, cfg, eng, st, log, cfgPath, browserPath, errorText(browserErr))
+	b := bot.New(api, cfg, eng, st, meetings, log, cfgPath, browserPath, errorText(browserErr))
 	if len(interrupted) > 0 {
 		b.Broadcast(fmt.Sprintf("⚠️ <b>Restarted</b>\n\n%d session(s) were interrupted by the previous shutdown and are no longer in their meetings.", len(interrupted)))
 	}

@@ -8,6 +8,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"github.com/Opselon/TeleMeetBot/internal/config"
 	"github.com/Opselon/TeleMeetBot/internal/engine"
 	"github.com/Opselon/TeleMeetBot/internal/health"
 	"github.com/Opselon/TeleMeetBot/internal/store"
@@ -21,6 +22,10 @@ const (
 	// stepSwitchMedia waits for a replacement media link for a live session;
 	// unlike the wizard it never changes the Meet link or creates a session.
 	stepSwitchMedia
+	// stepMeetPick is the /new landing screen: saved meetings, new Meet, cancel.
+	stepMeetPick
+	// stepMeetRename waits for the text message that renames a saved meeting.
+	stepMeetRename
 )
 
 // flowTimeout drops half-finished wizards after inactivity.
@@ -30,6 +35,11 @@ type flow struct {
 	step  int
 	meet  string
 	media string
+	// meetName is the display name of a saved meeting selected from the
+	// picker, so the confirmation card can show what the user chose.
+	meetName string
+	// meetID is the SQLite row id of the meeting being renamed.
+	meetID int64
 	// sessionID is set only by stepSwitchMedia: the live session whose media
 	// tab will be pointed at the new link.
 	sessionID string
@@ -133,17 +143,29 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 		return
 	}
 
+	// A message with no usable text is not necessarily empty: forwarded media
+	// (audio/video/document/voice) arrives with an empty caption. Ingest it
+	// instead of dropping it, so a user can forward a file to present it.
+	if text == "" && tgHasMedia(m) {
+		b.handleTelegramMedia(chatID, userID, m)
+		return
+	}
+
 	// Free text belongs to the wizard when one is open.
 	f := b.getFlow(userID)
 	if f == nil || f.step == stepNone {
 		// A bare media link while a session is live is most likely an attempt
 		// to change what is on screen: point at the switch flow instead of
 		// pretending the message was meaningless.
-		if target, err := engine.ClassifyMedia(text); err == nil && len(b.eng.Active()) > 0 {
+		if target, err := b.classify(text); err == nil && len(b.eng.Active()) > 0 {
 			b.sendText(chatID, fmt.Sprintf("🔀 Got <code>%s</code>.\n\nOpen the session card and press <b>Switch media</b> to put it on the share — the meeting and the share stay up.", esc(truncate(target.URL, 120))), sessionsKB(b.statuses()))
 			return
 		}
 		b.sendText(chatID, "Use /new (or ➕ New stream) to start a session.", mainMenuKB())
+		return
+	}
+	// The saved-meeting rename step consumes the next text message.
+	if b.tryMeetingsInput(chatID, userID, f, text) {
 		return
 	}
 	b.stepInput(chatID, userID, f, text)
@@ -152,6 +174,18 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 // stepInput handles a wizard answer.
 func (b *Bot) stepInput(chatID, userID int64, f *flow, text string) {
 	switch f.step {
+	case stepMeetPick:
+		// The picker is up; a typed link is accepted as the meet link and
+		// the flow continues at media selection.
+		normalized, err := engine.NormalizeMeetURL(text)
+		if err != nil {
+			b.sendText(chatID, "❌ "+esc(err.Error())+"\n\nSend a Meet link like <code>meet.google.com/abc-defg-hij</code>, or pick a saved meeting.", cancelKB())
+			return
+		}
+		f.meet = normalized
+		f.step = stepMedia
+		b.setFlow(userID, f)
+		b.sendText(chatID, flowText(stepMedia, f.meet), cancelKB())
 	case stepMeet:
 		normalized, err := engine.NormalizeMeetURL(text)
 		if err != nil {
@@ -163,16 +197,12 @@ func (b *Bot) stepInput(chatID, userID int64, f *flow, text string) {
 		b.setFlow(userID, f)
 		b.sendText(chatID, flowText(stepMedia, f.meet), cancelKB())
 	case stepMedia:
-		target, err := engine.ClassifyMedia(text)
+		target, err := b.classify(text)
 		if err != nil {
 			b.sendText(chatID, "❌ "+esc(err.Error())+"\n\nSend an http(s) media link.", cancelKB())
 			return
 		}
-		f.media = target.URL
-		f.step = stepNone
-		b.setFlow(userID, f)
-		userLang := b.st.GetUserAudioLang(userID)
-		b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang, b.st.GetUserMediaMode(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID)))
+		b.applyWizardMedia(chatID, userID, f, target)
 	case stepSwitchMedia:
 		b.applyMediaSwitch(chatID, userID, f, text)
 	default:
@@ -181,16 +211,44 @@ func (b *Bot) stepInput(chatID, userID int64, f *flow, text string) {
 	}
 }
 
+// classify validates and classifies a media link, using a live HTTP probe so
+// the server's actual Content-Type wins over an extension guess: an ".mp3"
+// URL serving HTML is a page, and a bare CDN URL serving video/mp4 is direct
+// media. A network failure (offline, timeout) falls back to the offline
+// heuristics, so behaviour in an isolated environment is unchanged.
+func (b *Bot) classify(raw string) (engine.MediaTarget, error) {
+	return engine.ClassifyMediaWithProbe(raw, nil)
+}
+
+// applyWizardMedia completes the wizard's media step with an already
+// classified target. It is shared by the text path (a typed link) and the
+// Telegram-ingestion path (a downloaded local file) so both end in the same
+// confirmation card.
+func (b *Bot) applyWizardMedia(chatID, userID int64, f *flow, target engine.MediaTarget) {
+	f.media = target.URL
+	f.step = stepNone
+	b.setFlow(userID, f)
+	userLang := b.st.GetUserAudioLang(userID)
+	b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang, b.st.GetUserMediaMode(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID)))
+}
+
 // applyMediaSwitch hands a validated replacement link to the engine, which
 // repoints the live session's media tab at it. The Meet session, the screen
 // share and every other session field are left alone, so the flow only waits
 // for a URL and then gets out of the way.
 func (b *Bot) applyMediaSwitch(chatID, userID int64, f *flow, text string) {
-	target, err := engine.ClassifyMedia(text)
+	target, err := b.classify(text)
 	if err != nil {
 		b.sendText(chatID, "❌ "+esc(err.Error())+"\n\nSend an http(s) media link, or /cancel.", cancelKB())
 		return
 	}
+	b.applyMediaSwitchTarget(chatID, userID, f, target)
+}
+
+// applyMediaSwitchTarget is the shared tail of the switch flow: it takes an
+// already classified target (a typed link or an ingested Telegram file) and
+// repoints the live session at it.
+func (b *Bot) applyMediaSwitchTarget(chatID, userID int64, f *flow, target engine.MediaTarget) {
 	s := b.eng.Get(engine.SessionID(f.sessionID))
 	if s == nil {
 		b.clearFlow(userID)
@@ -222,8 +280,14 @@ func (b *Bot) startFlow(chatID, userID int64, args string) {
 		b.sendText(chatID, fmt.Sprintf("⚠️ <b>Limit reached</b>\n\nActive sessions: %d/%d. Stop one first.", active, b.cfg.Limits.MaxSessions), sessionsKB(b.statuses()))
 		return
 	}
-	f := &flow{step: stepMeet}
 	fields := strings.Fields(args)
+	if len(fields) == 0 {
+		// Plain /new lands on the saved-meetings picker: saved links first,
+		// then New Google Meet, then Cancel.
+		b.startMeetPicker(chatID, userID)
+		return
+	}
+	f := &flow{step: stepMeet}
 	if len(fields) >= 1 {
 		normalized, err := engine.NormalizeMeetURL(fields[0])
 		if err != nil {
@@ -235,7 +299,7 @@ func (b *Bot) startFlow(chatID, userID int64, args string) {
 		f.step = stepMedia
 	}
 	if len(fields) >= 2 {
-		target, err := engine.ClassifyMedia(fields[1])
+		target, err := b.classify(fields[1])
 		if err != nil {
 			b.setFlow(userID, f)
 			b.sendText(chatID, "❌ "+esc(err.Error())+"\n\n"+flowText(stepMedia, f.meet), cancelKB())
@@ -287,6 +351,10 @@ func (b *Bot) launch(chatID, userID int64) {
 	b.mu.Lock()
 	b.sessionChats[string(sess.ID)] = chatID
 	b.mu.Unlock()
+	// Remember the Meet link for the owner so /new can offer it next time.
+	// The save is best-effort: a store failure must never block a session
+	// that is already running.
+	b.saveCurrentMeet(userID, sess.MeetURL)
 	b.sendSessionCard(chatID, sess)
 }
 
@@ -367,9 +435,60 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 		b.bindCard(chatID, msgID, s, st)
 	case strings.HasPrefix(data, "act:"):
 		b.handleAction(chatID, msgID, q, data)
+	case strings.HasPrefix(data, cbMeetPick) || strings.HasPrefix(data, cbMeetDelete) ||
+		strings.HasPrefix(data, cbMeetRename) || data == cbMeetNew || data == cbMeetList || data == cbMeetDone:
+		b.handleMeetCallback(chatID, userID, msgID, data)
 	default:
 		_ = b.api.AnswerCallback(q.ID, "unknown action")
 	}
+}
+
+// seekStepFor maps a seek button to its delta in seconds. The ±10s buttons
+// honour media.seek_step_seconds so the existing configured behaviour is
+// preserved; ±30s/±60s are the fixed finer/coarser steps.
+func seekStepFor(action string, cfg *config.Config) int {
+	switch action {
+	case "back30", "fwd30":
+		return 30
+	case "back60", "fwd60":
+		return 60
+	default:
+		step := int(cfg.Media.SeekStepSeconds)
+		if step <= 0 {
+			step = 10
+		}
+		return step
+	}
+}
+
+// seekAction runs one verified seek and describes the outcome honestly. The
+// toast always carries the position the player actually reported; a seek that
+// the player refused (live stream, not ready, past the end) becomes a clear
+// reason instead of a silent "skipped".
+func (b *Bot) seekAction(s *engine.Session, action string) (error, string) {
+	delta := -seekStepFor(action, b.cfg)
+	if strings.HasPrefix(action, "fwd") {
+		delta = seekStepFor(action, b.cfg)
+	}
+	rep, err := s.SeekBy(delta)
+	if err != nil {
+		b.log.Warnf("seek %s %d s: %v", s.ID, delta, err)
+		return err, ""
+	}
+	if !rep.OK {
+		// Not an engine error: the call reached the player and the player
+		// declined. Tell the operator why and where it actually is — on a
+		// refusal the position is unchanged, so report Before (After is 0).
+		pos := rep.After
+		if pos == 0 {
+			pos = rep.Before
+		}
+		return nil, fmt.Sprintf("%s · %s", fmtClock(pos), truncate(rep.Error, 80))
+	}
+	if delta < 0 {
+		return nil, fmt.Sprintf("⏪ %s · %s", fmtClock(rep.After), fmtClock(rep.Duration))
+	}
+	return nil, fmt.Sprintf("⏩ %s / %s", fmtClock(rep.After), fmtClock(rep.Duration))
 }
 
 // handleAction performs a session control press.
@@ -413,10 +532,8 @@ func (b *Bot) handleAction(chatID int64, msgID int, q *tgbotapi.CallbackQuery, d
 		err, toast = s.SetVolume(st.Volume-10), fmt.Sprintf("volume %d%%", max(0, st.Volume-10))
 	case "volup":
 		err, toast = s.SetVolume(st.Volume+10), fmt.Sprintf("volume %d%%", min(100, st.Volume+10))
-	case "back10":
-		err, toast = s.Seek(-b.cfg.Media.SeekStepSeconds), "rewound"
-	case "fwd10":
-		err, toast = s.Seek(b.cfg.Media.SeekStepSeconds), "skipped"
+	case "back10", "fwd10", "back30", "fwd30", "back60", "fwd60":
+		err, toast = b.seekAction(s, action)
 	case "restart":
 		err, toast = s.RestartMedia(), "restarting"
 	case "refresh":

@@ -15,6 +15,7 @@ import (
 	"github.com/Opselon/TeleMeetBot/internal/config"
 	"github.com/Opselon/TeleMeetBot/internal/engine"
 	"github.com/Opselon/TeleMeetBot/internal/health"
+	"github.com/Opselon/TeleMeetBot/internal/media"
 	"github.com/Opselon/TeleMeetBot/internal/store"
 )
 
@@ -50,6 +51,21 @@ type Engine interface {
 	Active() []*engine.Session
 	List() []*engine.Session
 	Events() <-chan engine.Event
+	// MediaManager returns the Download & Stream manager, or nil when the
+	// feature is disabled. The bot uses it to register Telegram-ingested
+	// files so they follow the same directory, TTL and cleanup as downloads.
+	MediaManager() *media.Manager
+}
+
+// Meetings is the saved-meetings surface the bot needs (store.MeetingStore
+// implements it; tests fake it). A nil meeting store is valid: the /new flow
+// simply omits the saved-links picker.
+type Meetings interface {
+	Save(ctx context.Context, ownerID int64, name, meetURL string) (store.Meeting, error)
+	List(ctx context.Context, ownerID int64) ([]store.Meeting, error)
+	Get(ctx context.Context, ownerID, id int64) (store.Meeting, error)
+	Rename(ctx context.Context, ownerID, id int64, name string) (store.Meeting, error)
+	Delete(ctx context.Context, ownerID, id int64) error
 }
 
 // Bot is the Telegram front end.
@@ -58,6 +74,7 @@ type Bot struct {
 	cfg     *config.Config
 	eng     Engine
 	st      *store.Store
+	ms      Meetings
 	log     Logger
 	cfgPath string
 
@@ -74,7 +91,7 @@ type Bot struct {
 }
 
 // New wires a Telegram bot. (api can be a fake in tests.)
-func New(api API, cfg *config.Config, eng Engine, st *store.Store, log Logger, cfgPath, browserPath, browserErr string) *Bot {
+func New(api API, cfg *config.Config, eng Engine, st *store.Store, ms Meetings, log Logger, cfgPath, browserPath, browserErr string) *Bot {
 	if log == nil {
 		log = noopLogger{}
 	}
@@ -83,6 +100,7 @@ func New(api API, cfg *config.Config, eng Engine, st *store.Store, log Logger, c
 		cfg:          cfg,
 		eng:          eng,
 		st:           st,
+		ms:           ms,
 		log:          log,
 		cfgPath:      cfgPath,
 		browserPath:  browserPath,

@@ -93,8 +93,12 @@ type Manager struct {
 	// retryDelay overrides the sleep between yt-dlp attempts (tests).
 	retryDelay func(attempt int) time.Duration
 
-	// janitorOnce guards janitor startup; stopJanitor ends the loop.
+	// janitorOnce guards janitor startup; stopMu guards the stop channel
+	// itself: Start's goroutine reads stopJanitor while Stop closes it, and
+	// those two must not race (the -race detector caught them sharing the
+	// field without synchronization).
 	janitorOnce sync.Once
+	stopMu      sync.Mutex
 	stopJanitor chan struct{}
 
 	// diskFree returns the bytes free on the download filesystem. Overridable
@@ -233,6 +237,8 @@ func (m *Manager) Start(ctx context.Context) {
 // Stop ends the janitor. Downloads in flight are cancelled by their own ctx.
 func (m *Manager) Stop() {
 	m.janitorOnce.Do(func() {}) // never start after a stop
+	m.stopMu.Lock()
+	defer m.stopMu.Unlock()
 	if m.stopJanitor != nil {
 		close(m.stopJanitor)
 		m.stopJanitor = nil
@@ -262,13 +268,19 @@ func janitorInterval(ttl time.Duration) time.Duration {
 
 // janitorLoop removes expired files on a ticker until Stop or ctx cancel.
 func (m *Manager) janitorLoop(ctx context.Context) {
+	m.stopMu.Lock()
+	stop := m.stopJanitor
+	m.stopMu.Unlock()
+	if stop == nil { // Stop already ran
+		return
+	}
 	t := time.NewTicker(janitorInterval(m.opts.TTL))
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-m.stopJanitor:
+		case <-stop:
 			return
 		case <-t.C:
 			if n := m.Sweep(ctx); n > 0 {
@@ -316,6 +328,82 @@ func (m *Manager) Remove(id string) error {
 	}
 	m.sweepIDFiles(id)
 	return nil
+}
+
+// RegisterLocal registers an already-downloaded file (one that did not come
+// through Download — e.g. a file ingested from Telegram through the Bot API)
+// with the manifest and the loopback file server, and returns the loopback
+// URL the media tab should load.
+//
+// The path must already be inside the managed directory: the caller copies
+// the file there first, so the janitor's ownership and TTL rules apply
+// unchanged. Registering is idempotent for an ID; re-registering the same ID
+// replaces the entry (and its token, which expires with the old one).
+func (m *Manager) RegisterLocal(id, path, source, contentType string, bytes int64) (string, error) {
+	if m == nil || !m.opts.Enabled {
+		return "", ErrDisabled
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", fmt.Errorf("register local: empty id")
+	}
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("register local: empty path")
+	}
+	// The file must live in the managed directory: the janitor only deletes
+	// paths it owns, and a path outside Dir would be served but never swept.
+	if !strings.HasPrefix(path, m.opts.Dir) {
+		return "", fmt.Errorf("register local: %s is outside the managed directory %s", path, m.opts.Dir)
+	}
+	if _, err := os.Stat(path); err != nil {
+		return "", fmt.Errorf("register local: %w", err)
+	}
+	now := time.Now()
+	entry := Entry{
+		ID:          id,
+		Path:        path,
+		URL:         source,
+		Kind:        "direct",
+		ContentType: contentType,
+		Bytes:       bytes,
+		FetchedAt:   now,
+		ExpiresAt:   now.Add(m.opts.TTL),
+	}
+	if err := m.entries.Add(entry); err != nil {
+		m.log.Warnf("[PIPELINE:download] %s: cannot persist manifest: %v", id, err)
+	}
+	m.log.Infof("[PIPELINE:download] %s: registered local file (%s, expires in %s)", id, humanBytes(bytes), m.opts.TTL)
+	return m.localURL(entry), nil
+}
+
+// FindByURL looks up a managed entry by its loopback URL. The engine uses it
+// to recognize a session whose media is already a local file (a
+// Telegram-ingested attachment) so it does not "download" its own loopback
+// URL. Returns the entry and true when found, Entry{} and false otherwise.
+func (m *Manager) FindByURL(url string) (Entry, bool) {
+	if m == nil || !m.opts.Enabled {
+		return Entry{}, false
+	}
+	url = strings.TrimSpace(url)
+	if url == "" {
+		return Entry{}, false
+	}
+	// The loopback URL carries an unguessable token; only the file server can
+	// resolve it back to a path.
+	path := m.fileServer.pathOf(url)
+	if path == "" {
+		return Entry{}, false
+	}
+	if err := m.entries.load(); err != nil {
+		m.log.Warnf("[PIPELINE:download] find by url: cannot read manifest: %v", err)
+		return Entry{}, false
+	}
+	for _, e := range m.entries.All() {
+		if e.Path == path {
+			return e, true
+		}
+	}
+	return Entry{}, false
 }
 
 // Sweep deletes every expired entry and its file. It runs on the janitor

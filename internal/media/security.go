@@ -105,9 +105,10 @@ func ValidateResolvedDestination(host string, port string, lookup func(string) (
 	return nil
 }
 
-// isPrivateIP reports whether ip is in a blocked range. Unknown input is
-// treated as blocked (fail-closed).
-func isPrivateIP(ip net.IP) bool {
+// IsPrivateIP reports whether ip is in a blocked range. Unknown input is
+// treated as blocked (fail-closed). Exported so other layers (the engine's
+// classification probe) can apply the exact same gate.
+func IsPrivateIP(ip net.IP) bool {
 	if ip == nil {
 		return true
 	}
@@ -131,6 +132,20 @@ func isRoutableIP(ip net.IP) bool {
 		return false
 	}
 	return true
+}
+
+// IsBlockedIP reports whether a resolved destination IP must be refused,
+// honouring the test-only loopback exemption. Callers outside the media
+// package (the engine's classification probe) should use this single check
+// for a resolved address so every layer refuses the same destinations.
+func IsBlockedIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if isPrivateIP(ip) && !(loopbackAllowed() && (ip.IsLoopback() || ip.Equal(net.ParseIP("127.0.0.1")))) {
+		return true
+	}
+	return !isRoutableIP(ip)
 }
 
 // isBareIP reports whether host is an IP literal without brackets.
@@ -301,3 +316,6 @@ func SecureDelete(dir, path string) (string, error) {
 	}
 	return target, nil
 }
+
+// isPrivateIP is the internal alias for IsPrivateIP.
+func isPrivateIP(ip net.IP) bool { return IsPrivateIP(ip) }
