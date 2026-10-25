@@ -1,7 +1,7 @@
 {
   "live": true,
   "source": "api",
-  "fetchedAt": "2026-10-23T02:52:18.152Z",
+  "fetchedAt": "2026-10-25T15:59:18.613Z",
   "repo": {
     "stars": 0,
     "forks": 1,
@@ -10,7 +10,7 @@
     "language": "Go",
     "license": "MIT",
     "defaultBranch": "main",
-    "pushedAt": "2026-10-23T02:47:36Z"
+    "pushedAt": "2026-10-25T11:32:09Z"
   },
   "releases": [
     {
@@ -26,37 +26,37 @@
         {
           "name": "SHA256SUMS",
           "size": 483,
-          "downloads": 0,
+          "downloads": 1,
           "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.1.0/SHA256SUMS"
         },
         {
           "name": "telemeetbot-linux-386.tar.gz",
           "size": 5687901,
-          "downloads": 0,
+          "downloads": 1,
           "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.1.0/telemeetbot-linux-386.tar.gz"
         },
         {
           "name": "telemeetbot-linux-amd64.tar.gz",
           "size": 5807269,
-          "downloads": 0,
+          "downloads": 1,
           "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.1.0/telemeetbot-linux-amd64.tar.gz"
         },
         {
           "name": "telemeetbot-linux-arm64.tar.gz",
           "size": 5434715,
-          "downloads": 0,
+          "downloads": 1,
           "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.1.0/telemeetbot-linux-arm64.tar.gz"
         },
         {
           "name": "telemeetbot-linux-armv6.tar.gz",
           "size": 5646881,
-          "downloads": 0,
+          "downloads": 1,
           "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.1.0/telemeetbot-linux-armv6.tar.gz"
         },
         {
           "name": "telemeetbot-linux-armv7.tar.gz",
           "size": 5646163,
-          "downloads": 0,
+          "downloads": 1,
           "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.1.0/telemeetbot-linux-armv7.tar.gz"
         }
       ]

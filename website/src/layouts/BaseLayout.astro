@@ -17,12 +17,13 @@ type Props = {
 const { title, description, noindex, type, jsonLd = [], bodyClass = '' } = Astro.props;
 ---
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="dark" class="no-js">
   <head>
     <BaseHead title={title} description={description} noindex={noindex} type={type} jsonLd={jsonLd} />
   </head>
   <body class={bodyClass}>
     <a class="skip-link" href="#main">Skip to content</a>
+    <div class="reading-progress" aria-hidden="true"><div class="reading-progress-bar" data-reading-progress></div></div>
     <Header />
     <main id="main">
       <slot />

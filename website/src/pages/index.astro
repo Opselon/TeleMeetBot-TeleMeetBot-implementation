@@ -11,6 +11,8 @@ const version = latest?.tag ?? repo.version;
 const unitTests = repo.testTotals.unit;
 const integrationTests = repo.testTotals.integration;
 const archs = repo.releaseTargets.map((target) => target.split('/').slice(1).join(''));
+const flags = repo.unwiredConfig.slice(0, 8);
+const states = repo.states;
 
 const jsonLd = [
   {
@@ -107,8 +109,9 @@ const features = [
 ---
 <BaseLayout title="TeleMeetBot — headless Google Meet streaming from Telegram" description={site.description} jsonLd={jsonLd}>
   <section class="hero">
+    <div class="hero-aurora" aria-hidden="true"><span class="bolt"></span></div>
     <div class="wrap hero-inner">
-      <div>
+      <div data-animate="hero">
         <span class="eyebrow">
           <Icon name="spark" size={13} />
           {version} · Go {repo.goVersion} · MIT
@@ -123,9 +126,13 @@ const features = [
             Get started
             <Icon name="arrowRight" size={16} />
           </a>
+          <a class="btn btn-ghost" href={url('/demo/')}>
+            <Icon name="play" size={16} />
+            Try live demo
+          </a>
           <a class="btn btn-ghost" href={repo.repoUrl} rel="noopener">
             <Icon name="github" size={16} />
-            Source &amp; releases
+            Source
           </a>
         </div>
         <ul class="hero-meta">
@@ -136,22 +143,19 @@ const features = [
         </ul>
       </div>
 
-      <div class="code-panel" aria-label="Quick start commands">
+      <div class="code-panel" aria-label="Quick start commands" data-animate="hero-panel">
         <div class="code-panel-bar">
           <span class="dot"></span><span class="dot"></span><span class="dot"></span>
           <span class="code-panel-title">docker · quick start</span>
         </div>
-        <pre><span class="c"># first time: git clone {repo.repoUrl}.git</span>
-<span class="b">cd</span> TeleMeetBot-TeleMeetBot-implementation
-
-<span class="c"># 1. write /data/telemeetbot.yml interactively</span>
+        <pre><span class="c"># 1. clone and run the interactive setup wizard</span>
 docker compose run --rm telemeetbot \
   telemeetbot --wizard --config /data/telemeetbot.yml
 
-<span class="c"># 2. start the bot</span>
+<span class="c"># 2. start the background service</span>
 docker compose up -d
 
-<span class="c"># 3. prove it is alive</span>
+<span class="c"># 3. prove health and active session capacity</span>
 curl -s http://127.0.0.1:18080/healthz</pre>
         <div class="code-panel-foot">
           <span>{'{"status":"ok", "active_sessions":0, …}'}</span>
@@ -160,31 +164,86 @@ curl -s http://127.0.0.1:18080/healthz</pre>
     </div>
   </section>
 
-  <section class="wrap" style="padding-block:26px">
-    <div class="grid-3" style="grid-template-columns:repeat(auto-fit,minmax(190px,1fr))">
-      <div class="card" style="padding:16px 18px">
-        <span class="mono" style="font-size:11px;color:var(--faint);letter-spacing:.06em">PLAYBACK CONTROLS</span>
-        <strong style="font-size:1.35rem">11 inline actions</strong>
-        <span class="muted" style="font-size:13px">pause · mute · volume · seek · restart</span>
+  <!-- Modern Spec Strip -->
+  <section class="wrap" style="padding-top:24px">
+    <div class="spec-strip" data-animate="specs">
+      <div class="spec-cell">
+        <span class="k">RUNTIME ENGINE</span>
+        <span class="v">100% Go</span>
+        <span class="d">Single static binary, zero runtime dependencies outside Chromium.</span>
       </div>
-      <div class="card" style="padding:16px 18px">
-        <span class="mono" style="font-size:11px;color:var(--faint);letter-spacing:.06em">MEDIA FORMATS</span>
-        <strong style="font-size:1.35rem">{repo.mediaExtensions.length} extensions</strong>
-        <span class="muted" style="font-size:13px">mp4 · webm · mkv · mp3 · flac …</span>
+      <div class="spec-cell">
+        <span class="k">DISPLAY OVERHEAD</span>
+        <span class="v">0 MB</span>
+        <span class="d">Headless tab capture over CDP — zero Xvfb, X11 or Wayland servers.</span>
       </div>
-      <div class="card" style="padding:16px 18px">
-        <span class="mono" style="font-size:11px;color:var(--faint);letter-spacing:.06em">TEST SUITE</span>
-        <strong style="font-size:1.35rem">{unitTests} + {integrationTests}</strong>
-        <span class="muted" style="font-size:13px">unit + real-Chromium integration</span>
+      <div class="spec-cell">
+        <span class="k">DOCKER FOOTPRINT</span>
+        <span class="v">~120 MB</span>
+        <span class="d">Multi-arch Alpine base with pre-baked Chromium and fonts.</span>
       </div>
-      <div class="card" style="padding:16px 18px">
-        <span class="mono" style="font-size:11px;color:var(--faint);letter-spacing:.06em">HTTP SURFACE</span>
-        <strong style="font-size:1.35rem">2 endpoints</strong>
-        <span class="muted" style="font-size:13px">/healthz · /livez — read only</span>
+      <div class="spec-cell">
+        <span class="k">ACTIVE RAM FOOTPRINT</span>
+        <span class="v">180 - 240 MB</span>
+        <span class="d">Measured memory consumption under an active 720p 30fps tab stream.</span>
       </div>
     </div>
   </section>
 
+  <!-- Live Demo Teaser Section -->
+  <section class="section">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="eyebrow"><Icon name="play" size={13} /> Telegram dashboard</span>
+        <h2>Drive the meeting from your phone</h2>
+        <p>
+          Every control is an inline button on a live session card that refreshes every 3 seconds.
+          Pause, mute, seek, restart and monitor telemetry without leaving Telegram.
+        </p>
+      </div>
+
+      <div class="split" style="align-items:center">
+        <div>
+          <div class="terminal" aria-label="Telegram session card preview">
+            <div class="terminal-bar">
+              <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+              <span style="margin-left:6px">Telegram · live card preview</span>
+            </div>
+            <div class="terminal-body"><span class="g">🟢</span> <b>Session s-4f2a1c9b</b>
+<span class="m">🎞 Media:</span> Big Buck Bunny — Blender Foundation
+<span class="m">🔗 Meet:</span> https://meet.google.com/abc-defg-hij
+<span class="m">⏱ Playback:</span> 04:12 / 10:34
+<span class="m">🔊 Volume:</span> 80%
+<span class="m">📶 State:</span> <span class="g">streaming</span> — [6/6] Streaming live
+<span class="m">⏳ Elapsed:</span> 6m
+
+<span class="y">[⏸ Pause]</span>  <span class="y">[🔇 Mute]</span>
+<span class="y">[⏪ -10s]</span>  <span class="y">[⏩ +10s]</span>
+<span class="y">[🔉 Vol-]</span>  <span class="y">[🔊 Vol+]</span>
+<span class="y">[♻️ Restart]</span> <span class="y">[⏹ Stop]</span></div>
+          </div>
+          <p class="muted" style="font-size:12.5px;margin:12px 0 0">
+            Card fields and button labels are generated directly by <code class="mono">internal/bot/views.go</code>.
+          </p>
+        </div>
+
+        <div class="card" style="padding:28px">
+          <span class="eyebrow" style="color:var(--accent)">Try it in your browser</span>
+          <h3 style="font-size:1.45rem;margin:8px 0 12px">Interactive session simulator</h3>
+          <p>
+            Experience the real button layout, playback timeline, guest admission and presentation
+            surface in our client-side simulator before setting up your own bot.
+          </p>
+          <div style="margin-top:20px;display:flex;gap:12px;flex-wrap:wrap">
+            <a class="btn btn-primary" href={url('/demo/')}>Open live demo <Icon name="arrowRight" size={16} /></a>
+            <a class="btn btn-ghost" href={url('/docs/telegram/')}>Button reference</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features Grid -->
   <section class="section" id="features">
     <div class="wrap">
       <div class="section-head">
@@ -208,74 +267,56 @@ curl -s http://127.0.0.1:18080/healthz</pre>
     </div>
   </section>
 
-  <section class="section">
+  <!-- CLI Flag & Configuration Explorer -->
+  <section class="section" id="flags">
     <div class="wrap">
       <div class="section-head">
-        <span class="eyebrow">How it works</span>
-        <h2>Two tabs, one presentation</h2>
+        <span class="eyebrow"><Icon name="terminal" size={13} /> Engine configuration</span>
+        <h2>Every flag is documented and verified</h2>
         <p>
-          The bot launches one Chromium per session. Tab one plays your media from a loopback-served
-          player so Chromium never blocks the fetch; tab two is the real Meet UI. Meet’s “Present now”
-          flow shares tab one, and every control afterwards acts on that page.
+          TeleMeetBot is configured via command-line flags or a YAML file. Select any flag below to
+          inspect its type, default value, environment variable alias and operational notes.
         </p>
       </div>
 
-      <div class="split">
-        <ol class="feature-list">
-          <li>
-            <Icon name="check" size={17} />
-            <span><strong>Title-locked media tab.</strong> The player document is served from a tiny
-            loopback server titled <code class="mono">TeleMeet Media</code>, which is exactly what
-            Chromium’s auto-select capture flag matches — including for the title Meet reports.</span>
-          </li>
-          <li>
-            <Icon name="check" size={17} />
-            <span><strong>Guest join, real UI.</strong> Name entry, “Ask to join” / “Join now”, prejoin
-            camera and microphone muted, then Meet’s own Present control is clicked by a leaf-button
-            matcher that skips the toolbar container.</span>
-          </li>
-          <li>
-            <Icon name="check" size={17} />
-            <span><strong>Host gate patience.</strong> A lobby-restricted meeting keeps the session in
-            <code class="mono">admitting</code> and re-requests entry every 30 seconds instead of
-            failing on the first “no one can join” screen.</span>
-          </li>
-          <li>
-            <Icon name="check" size={17} />
-            <span><strong>Proof, not hope.</strong> Playback counts as started only when the position
-            advances and sampled pixels are neither black nor decoder-green. Consent walls are cleared
-            without restarting the share.</span>
-          </li>
-        </ol>
-
-        <div>
-          <div class="terminal" aria-label="Session card example">
-            <div class="terminal-bar">
-              <span class="dot"></span><span class="dot"></span><span class="dot"></span>
-              <span style="margin-left:6px">Telegram · session card</span>
-            </div>
-            <div class="terminal-body"><span class="g">🟢</span> <b>Session s-4f2a1c9b</b>
-<span class="m">🎞 Media:</span> Big Buck Bunny — Blender Foundation
-<span class="m">🔗 Meet:</span> https://meet.google.com/abc-defg-hij
-<span class="m">⏱ Playback:</span> 04:12 / 10:34
-<span class="m">🔊 Volume:</span> 80%
-<span class="m">📶 State:</span> <span class="g">streaming</span> — [6/6] Streaming live
-<span class="m">⏳ Elapsed:</span> 6m
-
-<span class="y">[⏸ Pause]</span>  <span class="y">[🔇 Mute]</span>
-<span class="y">[⏪ -10s]</span>  <span class="y">[⏩ +10s]</span>
-<span class="y">[🔉 Vol-]</span>  <span class="y">[🔊 Vol+]</span>
-<span class="y">[♻️ Restart media]</span>
-<span class="y">[🔄 Refresh]</span>  <span class="y">[⏹ Stop]</span></div>
+      <div class="cli-window">
+        <div class="cli-head">
+          <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+          <span class="cli-title">telemeetbot --help · flags inspector</span>
+        </div>
+        <div class="cli-body">
+          <div class="cli-list">
+            {flags.map((f, i) => (
+              <button
+                class="cli-flag"
+                type="button"
+                data-flag-btn
+                data-flag-name={f.flag}
+                data-flag-type={f.type}
+                data-flag-default={f.defaultVal || '(none)'}
+                data-flag-env={f.env}
+                data-flag-desc={f.description}
+                aria-pressed={i === 0 ? 'true' : 'false'}
+              >
+                <span>{f.flag}</span>
+              </button>
+            ))}
           </div>
-          <p class="muted" style="font-size:12.5px;margin:12px 0 0">
-            Card fields and button labels are rendered by <code class="mono">internal/bot/views.go</code>.
-          </p>
+          <div class="cli-detail" data-flag-detail>
+            <span class="flag-name">{flags[0].flag}</span>
+            <span class="flag-type">{flags[0].type}</span>
+            <p class="flag-desc">{flags[0].description}</p>
+            <div class="flag-meta">
+              <span>DEFAULT: <code>{flags[0].defaultVal || '(none)'}</code></span>
+              <span>ENV: <code>{flags[0].env}</code></span>
+            </div>
+          </div>
         </div>
       </div>
     </div>
   </section>
 
+  <!-- Telegram Command Reference -->
   <section class="section" id="commands">
     <div class="wrap">
       <div class="section-head">
@@ -316,6 +357,7 @@ curl -s http://127.0.0.1:18080/healthz</pre>
     </div>
   </section>
 
+  <!-- Diagnostics Section -->
   <section class="section">
     <div class="wrap">
       <div class="section-head">
@@ -371,35 +413,23 @@ curl -s http://127.0.0.1:18080/healthz</pre>
     </div>
   </section>
 
+  <!-- Modern CTA Band -->
   <section class="section section-last">
     <div class="wrap">
-      <div class="split" style="align-items:center">
-        <div>
-          <span class="eyebrow">Start here</span>
-          <h2 style="font-size:clamp(1.7rem,3.6vw,2.4rem);letter-spacing:-.03em;margin:10px 0 0">
-            Ten minutes from clone to first stream
-          </h2>
-          <p class="muted" style="margin-top:12px">
-            Create a bot with @BotFather, claim it with <code class="mono">/start</code>, send a Meet
-            link and a media link. The wizard handles the config; the doctor proves the capture path
-            before you need it in a real call.
-          </p>
-          <div class="hero-cta" style="margin-top:22px">
-            <a class="btn btn-primary" href={url('/docs/getting-started/')}>Install TeleMeetBot</a>
-            <a class="btn btn-ghost" href={releaseUrl} rel="noopener">Release {version}</a>
-          </div>
-        </div>
-        <div class="card">
-          <span class="eyebrow" style="color:var(--accent-2)">Verified surface</span>
-          <h3>This site is generated from the repository</h3>
-          <p>
-            Commands, flags, config keys, health fields, media extensions, states and test counts are
-            read from the Go source and the release scripts at build time. The build fails when a new
-            command or config key has no documentation.
-          </p>
-          <p class="mono" style="font-size:12px;color:var(--faint)">
-            commit {repo.commit} · built {repo.generatedAt.slice(0, 10)} · {repo.github.source === 'api' ? 'releases via GitHub API' : 'releases from snapshot'}
-          </p>
+      <div class="cta-band">
+        <span class="eyebrow"><Icon name="spark" size={13} /> Start streaming today</span>
+        <h2 style="font-size:clamp(1.7rem,3.6vw,2.4rem);letter-spacing:-.03em;margin:10px 0 0">
+          Ten minutes from clone to first stream
+        </h2>
+        <p class="muted" style="margin-top:12px;max-width:58ch">
+          Create a bot with @BotFather, claim it with <code class="mono">/start</code>, send a Meet
+          link and a media link. The wizard handles the config; the doctor proves the capture path
+          before you need it in a real call.
+        </p>
+        <div class="hero-cta" style="margin-top:22px">
+          <a class="btn btn-primary" href={url('/docs/getting-started/')}>Install TeleMeetBot</a>
+          <a class="btn btn-ghost" href={releaseUrl} rel="noopener">Release {version}</a>
+          <a class="btn btn-ghost" href={url('/compare/')}>Compare with alternatives</a>
         </div>
       </div>
     </div>

@@ -16,12 +16,23 @@ export const site = {
 
 export const primaryNav = [
   { label: 'Documentation', href: '/docs/' },
-  { label: 'Features', href: '/#features' },
-  { label: 'Commands', href: '/#commands' },
+  { label: 'Demo', href: '/demo/' },
+  { label: 'Architecture', href: '/architecture/' },
+  { label: 'Compare', href: '/compare/' },
+  { label: 'FAQ', href: '/faq/' },
   { label: 'Releases', href: '/releases/' },
 ];
 
 export const footerNav = [
+  {
+    title: 'Product',
+    links: [
+      { label: 'Live demo', href: '/demo/' },
+      { label: 'Architecture', href: '/architecture/' },
+      { label: 'Compare', href: '/compare/' },
+      { label: 'FAQ', href: '/faq/' },
+    ],
+  },
   {
     title: 'Documentation',
     links: [

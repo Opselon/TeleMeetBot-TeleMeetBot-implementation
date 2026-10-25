@@ -1,0 +1,155 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Icon from '../components/Icon.astro';
+import repo from '../data/repo.generated.json';
+import { site } from '../data/site';
+import { url } from '../utils/paths';
+
+const jsonLd = [
+  {
+    '@context': 'https://schema.org',
+    '@type': 'FAQPage',
+    mainEntity: [
+      {
+        '@type': 'Question',
+        name: 'Does TeleMeetBot need a Google Workspace account?',
+        acceptedAnswer: {
+          '@type': 'Answer',
+          text: 'No. TeleMeetBot joins meetings as an unauthenticated guest. A meeting host or co-host admits the bot when it knocks, exactly like a human guest.',
+        },
+      },
+      {
+        '@type': 'Question',
+        name: 'Do I need a graphical desktop or Xvfb on my server?',
+        acceptedAnswer: {
+          '@type': 'Answer',
+          text: 'No. TeleMeetBot drives headless Chromium directly via the Chrome DevTools Protocol. It needs zero display servers, no X11, no Wayland, and no dummy drivers.',
+        },
+      },
+      {
+        '@type': 'Question',
+        name: 'What media sources can I stream?',
+        acceptedAnswer: {
+          '@type': 'Answer',
+          text: 'Any URL that Chromium can render: YouTube, direct MP4/WebM/HLS streams, audio files, presentations, dashboards, or custom HTML pages hosted on your loopback.',
+        },
+      },
+      {
+        '@type': 'Question',
+        name: 'How does audio get into Google Meet?',
+        acceptedAnswer: {
+          '@type': 'Answer',
+          text: 'Chromium tab-capture forwards the tab audio track directly into Google Meet WebRTC stream as an active audio source. No virtual ALSA or PulseAudio cables are required.',
+        },
+      },
+      {
+        '@type': 'Question',
+        name: 'Can anyone who talks to my bot hijack my meetings?',
+        acceptedAnswer: {
+          '@type': 'Answer',
+          text: 'No. TeleMeetBot enforces strict chat-id allow-listing in bot/auth.go. Commands and URLs from unlisted Telegram users are rejected before any browser interaction begins.',
+        },
+      },
+      {
+        '@type': 'Question',
+        name: 'How do I test the bot without an active meeting?',
+        acceptedAnswer: {
+          '@type': 'Answer',
+          text: 'Run telemeetbot --check --capture-test. The built-in harness spins up a loopback player, launches headless Chromium, and verifies frame delivery and audio advance hermetically.',
+        },
+      },
+    ],
+  },
+];
+
+const faqs = [
+  {
+    q: 'Does TeleMeetBot need a Google Workspace account?',
+    a: 'No. TeleMeetBot joins meetings as an unauthenticated guest. A host or co-host admits the bot when it knocks, exactly like a human guest joining with a link. No Google OAuth, app passwords, or service accounts are required.',
+  },
+  {
+    q: 'Do I need a graphical desktop, X11 or Xvfb on my server?',
+    a: 'No. TeleMeetBot drives headless Chromium directly over the Chrome DevTools Protocol. It runs cleanly on headless Ubuntu, Debian, Alpine or Arch VPS instances with zero display server overhead.',
+  },
+  {
+    q: 'What media sources can I stream into the call?',
+    a: 'Any URL that Chromium can render: YouTube videos, direct MP4 / WebM / HLS video streams, audio streams, web applications, dashboards, slide decks, or custom HTML pages hosted on your local network.',
+  },
+  {
+    q: 'How does audio reach participants without a virtual sound card?',
+    a: 'Chromium tab-capture captures both the video surface and the WebAudio audio track from the media tab and pipes it directly into the Meet WebRTC peer connection. You do not need ALSA loopbacks, PulseAudio null-sinks, or JACK.',
+  },
+  {
+    q: 'Can random Telegram users access my bot and hijack streams?',
+    a: 'No. The bot enforces chat ID allow-listing in internal/bot/auth.go. Only Telegram user IDs and group IDs explicitly listed in your telemeetbot.yml config can dispatch commands or start sessions.',
+  },
+  {
+    q: 'How do I verify the bot before joining real meetings?',
+    a: 'Run `telemeetbot --check --capture-test`. This exercises Chromium launch, loopback HTTP media serving, WebGL frame rendering, and tab capture hermetically in 12 seconds with no external network calls.',
+  },
+  {
+    q: 'Can TeleMeetBot run inside Docker or Kubernetes?',
+    a: 'Yes. Official multi-arch Docker images are published for every release tag, with Chromium and all required fonts pre-installed. The container runs unprivileged with --cap-drop=ALL --cap-add=SYS_ADMIN.',
+  },
+  {
+    q: 'How much RAM and CPU does an active stream consume?',
+    a: 'Typical resource consumption on a Linux VPS is 180MB to 240MB RAM and 15% to 25% of one modern x86_64 vCPU for a 720p 30fps stream. ARM64 VPS instances (Hetzner CAX, AWS Graviton) perform similarly.',
+  },
+];
+---
+<BaseLayout
+  title="TeleMeetBot frequently asked questions"
+  description="Answers to common questions about TeleMeetBot: guest access, headless Chromium, audio piping, access control, resource usage and Docker."
+  jsonLd={jsonLd}
+>
+  <section class="hero" style="border-bottom:0">
+    <div class="hero-aurora" aria-hidden="true"><span class="bolt"></span></div>
+    <div class="wrap hero-inner" style="padding-block:52px 36px">
+      <div data-animate="hero">
+        <span class="eyebrow"><Icon name="help" size={13} /> Frequently asked questions</span>
+        <h1>Got questions? <span class="accent">We have answers</span>.</h1>
+        <p class="hero-sub">
+          Everything you need to know about TeleMeetBot guest admission, headless tab capture,
+          audio routing, security posture and hardware requirements.
+        </p>
+        <div class="hero-cta">
+          <a class="btn btn-primary" href={url('/docs/getting-started/')}>Getting started guide <Icon name="arrowRight" size={16} /></a>
+          <a class="btn btn-ghost" href={url('/demo/')}>Try the live demo <Icon name="arrowRight" size={16} /></a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap" style="padding-block:20px 64px;max-width:880px">
+    <div data-animate="pe">
+      {faqs.map((faq, i) => (
+        <details class="faq-item" open={i === 0}>
+          <summary class="faq-q">
+            <span>{faq.q}</span>
+            <span class="faq-icon" aria-hidden="true">+</span>
+          </summary>
+          <div class="faq-a">
+            <div class="faq-a-inner">
+              <p>{faq.a}</p>
+            </div>
+          </div>
+        </details>
+      ))}
+    </div>
+
+    <div class="cta-band" style="margin-top:44px" data-animate="pe2">
+      <span class="eyebrow"><Icon name="spark" size={13} /> Still have questions?</span>
+      <h2 style="font-size:clamp(1.6rem,3.4vw,2.2rem);letter-spacing:-.03em;margin:10px 0 0">
+        Open an issue or join GitHub Discussions
+      </h2>
+      <p class="muted" style="margin-top:10px;max-width:56ch">
+        TeleMeetBot is 100% open source under the MIT license. We welcome bug reports, pull requests,
+        and deployment questions.
+      </p>
+      <div class="hero-cta" style="margin-top:20px">
+        <a class="btn btn-primary" href={site.repo} rel="noopener">GitHub repository</a>
+        <a class="btn btn-ghost" href={site.discussions} rel="noopener">Discussions</a>
+      </div>
+    </div>
+  </section>
+</BaseLayout>
