@@ -1,10 +1,15 @@
 ---
 import Icon from './Icon.astro';
 import { primaryNav, site } from '../data/site';
+import repo from '../data/repo.generated.json';
 import { url } from '../utils/paths';
 
 const path = Astro.url.pathname;
 const isDocs = path.includes('/docs/');
+const latest =
+  repo.github.releases.find((release) => !release.draft && !release.prerelease) ?? repo.github.releases[0];
+const releaseUrl = latest?.url ?? `${repo.repoUrl}/releases`;
+const version = latest?.tag ?? repo.version;
 ---
 <header class="site-header">
   <div class="wrap header-inner">
@@ -36,6 +41,10 @@ const isDocs = path.includes('/docs/');
     </nav>
 
     <div class="header-actions">
+      <a class="version-pill" href={releaseUrl} rel="noopener" title={`Release ${version} on GitHub`}>
+        <span class="status-dot" aria-hidden="true"></span>
+        {version}
+      </a>
       <button class="search-trigger" type="button" data-search-open aria-label="Search documentation">
         <Icon name="search" size={15} />
         <span>Search</span>

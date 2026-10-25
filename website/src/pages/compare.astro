@@ -1,0 +1,94 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Icon from '../components/Icon.astro';
+import repo from '../data/repo.generated.json';
+import { site } from '../data/site';
+import { url } from '../utils/paths';
+
+const jsonLd = [
+  {
+    '@context': 'https://schema.org',
+    '@type': 'TechArticle',
+    headline: 'TeleMeetBot vs other meeting bots',
+    description: 'Feature-by-feature comparison: TeleMeetBot tab capture vs Xvfb virtual screens, browser extensions and proprietary meeting bots.',
+    url: 'https://opselon.github.io/TeleMeetBot-TeleMeetBot-implementation/compare/',
+  },
+];
+
+const rows = [
+  { feat: 'Runtime language', us: '100% Go (single binary)', them1: 'Python / Node.js', them2: 'C++ / OBS plugins' },
+  { feat: 'Display server required', us: 'None (headless native)', them1: 'Xvfb / dummy display', them2: 'Real X11/Wayland display' },
+  { feat: 'Tab capture model', us: 'Native browser tab', them1: 'Screen-record window', them2: 'Virtual webcam loop' },
+  { feat: 'Audio sync mechanism', us: 'Shared audio context', them1: 'ALSA/Pulse loopback', them2: 'Virtual audio cable' },
+  { feat: 'Control interface', us: 'Telegram inline buttons', them1: 'Web panel / CLI', them2: 'Hotkeys / GUI only' },
+  { feat: 'Google account required', us: 'No (joins as guest)', them1: 'Yes (OAuth or session)', them2: 'Yes (signed-in user)' },
+  { feat: 'Diagnostics pipeline', us: 'Probes advance + color', them1: 'Process exit code', them2: 'Visual check only' },
+  { feat: 'Docker image size', us: '~120MB (Chromium included)', them1: '800MB - 1.4GB', them2: '2GB+ with full desktop' },
+  { feat: 'RAM per active stream', us: '180 - 240 MB', them1: '600MB - 1.2 GB', them2: '1.5 GB+' },
+  { feat: 'Binary releases', us: 'Linux x86_64, ARM64, ARMv7', them1: 'Source / container only', them2: 'Platform-specific' },
+  { feat: 'License', us: 'MIT (100% open source)', them1: 'AGPL or proprietary', them2: 'Proprietary' },
+];
+---
+<BaseLayout
+  title="TeleMeetBot vs other meeting bots — feature comparison"
+  description="Compare TeleMeetBot against Xvfb-based screen recorders, browser extension bots and proprietary meeting streaming solutions."
+  jsonLd={jsonLd}
+>
+  <section class="hero" style="border-bottom:0">
+    <div class="hero-aurora" aria-hidden="true"><span class="bolt"></span></div>
+    <div class="wrap hero-inner" style="padding-block:52px 36px">
+      <div data-animate="hero">
+        <span class="eyebrow"><Icon name="cpu" size={13} /> Architecture comparison</span>
+        <h1>Why <span class="accent">headless tab capture</span> wins.</h1>
+        <p class="hero-sub">
+          Virtual displays are fragile, extension bots break on Chrome updates, and heavy containers eat your
+          VPS RAM. Here is how TeleMeetBot compares to common approaches.
+        </p>
+        <div class="hero-cta">
+          <a class="btn btn-primary" href={url('/docs/getting-started/')}>Try TeleMeetBot <Icon name="arrowRight" size={16} /></a>
+          <a class="btn btn-ghost" href={url('/architecture/')}>Read the architecture <Icon name="arrowRight" size={16} /></a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap" style="padding-block:20px 64px">
+    <div class="comparison-wrap" data-animate="pe">
+      <table class="comparison-table">
+        <thead>
+          <tr>
+            <th style="width:28%">Capability</th>
+            <th class="col-highlight" style="width:28%">TeleMeetBot</th>
+            <th style="width:22%">Xvfb recorders</th>
+            <th style="width:22%">Virtual webcam bots</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr>
+              <td><strong>{row.feat}</strong></td>
+              <td class="col-highlight"><span class="check">✓</span> {row.us}</td>
+              <td>{row.them1}</td>
+              <td>{row.them2}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="cta-band" style="margin-top:44px" data-animate="pe2">
+      <span class="eyebrow"><Icon name="spark" size={13} /> Ready to test on your server?</span>
+      <h2 style="font-size:clamp(1.6rem,3.4vw,2.2rem);letter-spacing:-.03em;margin:10px 0 0">
+        Run hermetic probes before joining real calls
+      </h2>
+      <p class="muted" style="margin-top:10px;max-width:56ch">
+        <code class="mono">telemeetbot --check --capture-test</code> validates Chromium, audio devices, and
+        the loopback player on the local machine in 12 seconds with no external network traffic.
+      </p>
+      <div class="hero-cta" style="margin-top:20px">
+        <a class="btn btn-primary" href={url('/docs/diagnostics/')}>Run diagnostics</a>
+        <a class="btn btn-ghost" href={site.repo} rel="noopener">Star on GitHub</a>
+      </div>
+    </div>
+  </section>
+</BaseLayout>

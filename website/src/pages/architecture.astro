@@ -1,0 +1,142 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Icon from '../components/Icon.astro';
+import repo from '../data/repo.generated.json';
+import { site } from '../data/site';
+import { url } from '../utils/paths';
+
+const jsonLd = [
+  {
+    '@context': 'https://schema.org',
+    '@type': 'TechArticle',
+    headline: 'TeleMeetBot architecture — two tabs, one presentation',
+    description: 'How TeleMeetBot runs headless tab capture: the loopback player, title locking, guest admission and WebRTC publication loop.',
+    url: 'https://opselon.github.io/TeleMeetBot-TeleMeetBot-implementation/architecture/',
+    isPartOf: { '@type': 'WebSite', name: 'TeleMeetBot', url: 'https://opselon.github.io/TeleMeetBot-TeleMeetBot-implementation/' },
+  },
+];
+const unitTests = repo.testTotals.unit;
+const integrationTests = repo.testTotals.integration;
+---
+<BaseLayout
+  title="TeleMeetBot architecture — two tabs, one presentation"
+  description="How TeleMeetBot captures and shares without Xvfb: loopback-served media player, title locking, leaf-button Present matching, and WebRTC loopback verification."
+  jsonLd={jsonLd}
+>
+  <section class="hero" style="border-bottom:0">
+    <div class="hero-aurora" aria-hidden="true"><span class="bolt"></span></div>
+    <div class="wrap hero-inner" style="padding-block:52px 36px">
+      <div data-animate="hero">
+        <span class="eyebrow"><Icon name="layers" size={13} /> Architecture &amp; design</span>
+        <h1>Two tabs, <span class="accent">one presentation</span>.</h1>
+        <p class="hero-sub">
+          Meet only shares what a real tab contains, headless Chromium needs specific capture flags,
+          and a bot that cannot explain a failure is useless. This is how the engine fits together.
+        </p>
+        <div class="hero-cta">
+          <a class="btn btn-primary" href={url('/docs/google-meet/')}>Google Meet deep dive <Icon name="arrowRight" size={16} /></a>
+          <a class="btn btn-ghost" href={url('/docs/diagnostics/')}>Diagnostics reference <Icon name="arrowRight" size={16} /></a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap" style="padding-block:20px 64px">
+    <div class="pipeline-viz" data-animate="pe" style="margin-bottom:38px">
+      <svg viewBox="0 0 920 240" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="TeleMeetBot engine pipeline diagram">
+        <rect x="20" y="30" width="160" height="74" rx="10" class="node-box" />
+        <text x="100" y="62" class="node-label">Telegram webhook</text>
+        <text x="100" y="82" class="node-tag">ALLOW-LIST GATED</text>
+
+        <path d="M180 67 H240" class="flow-line" />
+
+        <rect x="240" y="30" width="180" height="74" rx="10" class="node-box" />
+        <text x="330" y="62" class="node-label">Tab 1: TeleMeet Media</text>
+        <text x="330" y="82" class="node-tag">TITLE-LOCKED LOOPBACK</text>
+
+        <path d="M420 67 H480" class="flow-line" />
+
+        <rect x="480" y="30" width="180" height="74" rx="10" class="node-box" />
+        <text x="570" y="62" class="node-label">Tab 2: Google Meet</text>
+        <text x="570" y="82" class="node-tag">GUEST · AUTO-SELECT</text>
+
+        <path d="M660 67 H720" class="flow-line" />
+
+        <rect x="720" y="30" width="180" height="74" rx="10" class="node-box" />
+        <text x="810" y="62" class="node-label">Remote participants</text>
+        <text x="810" y="82" class="node-tag">WEBRTC VP8 STREAM</text>
+
+        <!-- Diagnostics branch below -->
+        <path d="M330 104 V150 H480" class="flow-line" />
+        <rect x="480" y="130" width="180" height="74" rx="10" class="node-box" />
+        <text x="570" y="162" class="node-label">Capture &amp; WebGL probe</text>
+        <text x="570" y="182" class="node-tag">FRAMES ADVANCING &gt; 0</text>
+      </svg>
+    </div>
+
+    <div class="grid-3" data-animate="pe2" style="margin-bottom:34px">
+      <div class="card">
+        <span class="card-icon"><Icon name="monitor" size={19} /></span>
+        <h3>Title-locked media tab</h3>
+        <p>
+          Chromium answers <code class="mono">getDisplayMedia</code> by matching the title flag against
+          the browser-side tab title. Overriding <code class="mono">document.title</code> with a JS getter
+          is not enough: the engine locks the prototype setter so the title is visible to the browser process.
+        </p>
+        <a class="card-link" href={url('/docs/google-meet/#capture-by-tab-title')}>Read the implementation →</a>
+      </div>
+
+      <div class="card">
+        <span class="card-icon"><Icon name="play" size={19} /></span>
+        <h3>Leaf-button Present matching</h3>
+        <p>
+          Meet's bottom bar is one giant <code class="mono">[role=button]</code> container. Substring matchers
+          click the whole toolbar and freeze. TeleMeetBot matches only leaf elements, scoring exact
+          <code class="mono">aria-label</code> and excluding audio/camera controls.
+        </p>
+        <a class="card-link" href={url('/docs/google-meet/#how-presenting-works')}>Read the matcher →</a>
+      </div>
+
+      <div class="card">
+        <span class="card-icon"><Icon name="shield" size={19} /></span>
+        <h3>Real diagnostics, not hope</h3>
+        <p>
+          Playback counts as live only when the position advances and sampled pixels are neither decoder-green
+          nor black. <code class="mono">--media-probe</code> and <code class="mono">--check --capture-test</code>
+          exercise the full pipeline hermetically.
+        </p>
+        <a class="card-link" href={url('/docs/diagnostics/')}>Diagnostics guide →</a>
+      </div>
+    </div>
+
+    <div class="split" data-animate="pe3">
+      <div class="card" style="padding:26px">
+        <span class="eyebrow" style="color:var(--accent-2)">Verified by tests</span>
+        <h3 style="font-size:1.3rem;margin-top:6px">{unitTests} unit tests + {integrationTests} real-Chromium integration</h3>
+        <p>
+          Every critical invariant has a hermetic test: locked tab title visibility, toolbar container exclusion,
+          consent-wall recovery, audio track selection, and the WebRTC publication loopback probe.
+        </p>
+        <ul class="hero-meta" style="margin-top:16px">
+          {repo.testPackages.map((pkg) => (
+            <li><code class="mono">{pkg.name}</code> ({pkg.unitTests})</li>
+          ))}
+        </ul>
+      </div>
+
+      <div class="card" style="padding:26px">
+        <span class="eyebrow" style="color:var(--accent-2)">Release targets</span>
+        <h3 style="font-size:1.3rem;margin-top:6px">{repo.releaseTargets.length} cross-compiled architectures</h3>
+        <p>
+          Every tag is built by Go goreleaser for x86-64, ARM64 and 32-bit ARM with SHA256 checksums, plus a
+          multi-arch Docker container with Chromium pre-baked.
+        </p>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:16px">
+          {repo.releaseTargets.map((target) => (
+            <span class="chip">{target}</span>
+          ))}
+        </div>
+      </div>
+    </div>
+  </section>
+</BaseLayout>

@@ -1,0 +1,124 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Icon from '../components/Icon.astro';
+import repo from '../data/repo.generated.json';
+import { site } from '../data/site';
+import { url } from '../utils/paths';
+
+const jsonLd = [
+  {
+    '@context': 'https://schema.org',
+    '@type': 'SoftwareApplication',
+    name: 'TeleMeetBot',
+    applicationCategory: 'MultimediaApplication',
+    operatingSystem: 'Linux',
+    description: site.description,
+    url: 'https://opselon.github.io/TeleMeetBot-TeleMeetBot-implementation/',
+    codeRepository: repo.repoUrl,
+    license: 'https://opensource.org/licenses/MIT',
+    programmingLanguage: 'Go',
+    softwareVersion: repo.version,
+    offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+  },
+];
+const actions = repo.inlineActions.slice(0, 9);
+---
+<BaseLayout
+  title="TeleMeetBot live demo — drive a meeting from Telegram"
+  description="Interactive TeleMeetBot demo: send a link, watch the bot join, present the tab and steer playback with the inline session card buttons."
+  jsonLd={jsonLd}
+>
+  <section class="hero" style="border-bottom:0">
+    <div class="hero-aurora" aria-hidden="true"><span class="bolt"></span></div>
+    <div class="wrap hero-inner" style="padding-block:52px 40px">
+      <div data-animate="hero">
+        <span class="eyebrow"><Icon name="play" size={13} /> Interactive demo</span>
+        <h1>Drive a meeting<br />without leaving <span class="accent">Telegram</span>.</h1>
+        <p class="hero-sub">
+          This is a simulated session — no meeting is joined and no browser is launched. It shows the exact
+          card, state machine and inline controls the bot renders for a real stream, driven by the same
+          <code class="mono">internal/bot/views.go</code> layout.
+        </p>
+        <div class="hero-cta">
+          <a class="btn btn-primary" href={url('/docs/getting-started/')}>Set up the real bot <Icon name="arrowRight" size={16} /></a>
+          <a class="btn btn-ghost" href={url('/architecture/')}>How it works <Icon name="arrowRight" size={16} /></a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap" style="padding-block:36px 64px">
+    <div class="demo-stage">
+      <div data-animate="pe">
+        <div class="demo-phone-wrap">
+          <div class="demo-phone">
+            <div class="demo-screen" data-demo-screen>
+              <div class="demo-topbar">
+                <span class="demo-avatar" aria-hidden="true"></span>
+                <span class="demo-name">TeleMeetBot</span>
+                <span data-demo-clock>09:41</span>
+              </div>
+              <div class="msg-in">Send a Google Meet link to start.</div>
+              <div class="msg-out">meet.google.com/abc-defg-hij</div>
+              <div class="msg-in">Now send the media link.</div>
+              <div class="msg-out">youtube.com/watch?v=big-buck-bunny</div>
+              <div class="msg-in">Starting session\u2026</div>
+              <div class="demo-card" data-demo-card>
+                <div class="demo-card-head">
+                  <span class="demo-status" data-demo-state>starting</span>
+                  <span data-demo-elapsed>0m</span>
+                </div>
+                <span class="demo-title" data-demo-title>Big Buck Bunny</span>
+                <div class="demo-progress"><div class="demo-progress-bar" data-demo-bar></div></div>
+                <span class="mono" style="font-size:10px;color:var(--faint)" data-demo-time>00:00 / 10:34</span>
+                <div class="demo-btns">
+                  {actions.map((action) => (
+                    <button class="demo-btn" type="button" data-demo-action={action.action}>{action.label}</button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div data-animate="pe2">
+        <div class="demo-meet">
+          <div class="demo-meet-bar">
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+            <span style="margin-left:6px">meet.google.com/abc-defg-hij</span>
+          </div>
+          <div class="demo-meet-stage">
+            <div class="demo-media-frame">
+              <video class="demo-mfp" data-demo-video muted loop playsinline></video>
+            </div>
+            <div class="demo-presenting-badge">PRESENTING · TAB 1</div>
+            <div class="demo-presence">
+              <video data-demo-presence muted loop playsinline></video>
+              <div class="demo-presence-caption">TeleMeetBot · guest</div>
+            </div>
+          </div>
+        </div>
+        <p class="muted" style="font-size:12.5px;margin:12px 0 0">
+          Meet sees exactly what the media tab contains. The presentation is a real tab share, not a virtual
+          display. <a href={url('/docs/google-meet/')}>Read the capture model →</a>
+        </p>
+      </div>
+    </div>
+
+    <div class="cta-band" style="margin-top:44px" data-animate="pe3">
+      <span class="eyebrow"><Icon name="spark" size={13} /> Ready for the real thing?</span>
+      <h2 style="font-size:clamp(1.6rem,3.4vw,2.2rem);letter-spacing:-.03em;margin:10px 0 0">
+        Ten minutes from clone to first stream
+      </h2>
+      <p class="muted" style="margin-top:10px;max-width:56ch">
+        The wizard writes your config, the doctor proves the capture path, and the first session is one
+        Meet link plus one media link away.
+      </p>
+      <div class="hero-cta" style="margin-top:20px">
+        <a class="btn btn-primary" href={url('/docs/getting-started/')}>Install TeleMeetBot</a>
+        <a class="btn btn-ghost" href={site.repo} rel="noopener">Source on GitHub</a>
+      </div>
+    </div>
+  </section>
+</BaseLayout>

@@ -13,6 +13,10 @@ export const GET: APIRoute = async () => {
 
   const routes: { loc: string; priority: string; changefreq: string }[] = [
     { loc: absolute('/'), priority: '1.0', changefreq: 'weekly' },
+    { loc: absolute('/demo/'), priority: '0.9', changefreq: 'weekly' },
+    { loc: absolute('/architecture/'), priority: '0.8', changefreq: 'weekly' },
+    { loc: absolute('/compare/'), priority: '0.8', changefreq: 'weekly' },
+    { loc: absolute('/faq/'), priority: '0.8', changefreq: 'weekly' },
     { loc: absolute('/docs/'), priority: '0.9', changefreq: 'weekly' },
     { loc: absolute('/releases/'), priority: '0.8', changefreq: 'weekly' },
     ...docs.map((doc) => ({ loc: absolute(docPath(doc)), priority: '0.8', changefreq: 'monthly' })),

@@ -322,10 +322,131 @@ function setupScrollSpy() {
 function init() {
   enhanceCodeBlocks();
   setupScrollSpy();
+  setupReadingProgress();
+  setupFlagInspector();
+  setupInteractiveDemo();
 }
 
 if (doc.readyState === 'loading') {
   doc.addEventListener('DOMContentLoaded', init);
 } else {
   init();
+}
+
+
+/* ---------------------------------------------------- reading progress */
+function setupReadingProgress() {
+  const bar = doc.querySelector('[data-reading-progress]');
+  if (!bar) return;
+  const update = () => {
+    const total = doc.documentElement.scrollHeight - window.innerHeight;
+    const progress = total > 0 ? Math.min(100, Math.max(0, (window.scrollY / total) * 100)) : 0;
+    bar.style.width = `${progress}%`;
+  };
+  window.addEventListener('scroll', update, { passive: true });
+  update();
+}
+
+/* ------------------------------------------------- CLI flags inspector */
+function setupFlagInspector() {
+  const buttons = [...doc.querySelectorAll('[data-flag-btn]')];
+  const detail = doc.querySelector('[data-flag-detail]');
+  if (!buttons.length || !detail) return;
+
+  const renderFlag = (btn) => {
+    for (const b of buttons) {
+      b.setAttribute('aria-pressed', b === btn ? 'true' : 'false');
+    }
+    const name = btn.dataset.flagName || '';
+    const type = btn.dataset.flagType || 'string';
+    const desc = btn.dataset.flagDesc || '';
+    const def = btn.dataset.flagDefault || '(none)';
+    const env = btn.dataset.flagEnv || '';
+
+    detail.innerHTML = `
+      <span class="flag-name">${escapeHtml(name)}</span>
+      <span class="flag-type">${escapeHtml(type)}</span>
+      <p class="flag-desc">${escapeHtml(desc)}</p>
+      <div class="flag-meta">
+        <span>DEFAULT: <code>${escapeHtml(def)}</code></span>
+        <span>ENV: <code>${escapeHtml(env)}</code></span>
+      </div>
+    `;
+  };
+
+  for (const btn of buttons) {
+    btn.addEventListener('click', () => renderFlag(btn));
+  }
+}
+
+/* ------------------------------------------- interactive demo simulator */
+function setupInteractiveDemo() {
+  const stage = doc.querySelector('[data-demo-screen]');
+  if (!stage) return;
+
+  let playing = true;
+  let muted = false;
+  let seconds = 252; // 04:12
+  const total = 634; // 10:34
+  let interval = null;
+
+  const bar = doc.querySelector('[data-demo-bar]');
+  const time = doc.querySelector('[data-demo-time]');
+  const state = doc.querySelector('[data-demo-state]');
+  const elapsed = doc.querySelector('[data-demo-elapsed]');
+  const clock = doc.querySelector('[data-demo-clock]');
+
+  const fmt = (s) => {
+    const m = Math.floor(s / 60);
+    const rem = s % 60;
+    return `${String(m).padStart(2, '0')}:${String(rem).padStart(2, '0')}`;
+  };
+
+  const render = () => {
+    if (bar) bar.style.width = `${(seconds / total) * 100}%`;
+    if (time) time.textContent = `${fmt(seconds)} / ${fmt(total)}`;
+    if (state) state.textContent = playing ? 'streaming' : 'paused';
+    if (elapsed) elapsed.textContent = `${Math.floor(seconds / 60)}m`;
+  };
+
+  // tick every second if playing
+  interval = setInterval(() => {
+    if (playing) {
+      seconds = (seconds + 1) % total;
+      render();
+    }
+  }, 1000);
+
+  // handle action button clicks
+  for (const btn of doc.querySelectorAll('[data-demo-action]')) {
+    btn.addEventListener('click', () => {
+      const act = btn.dataset.demoAction;
+      if (act === 'stream:pause' || act === 'stream:resume') {
+        playing = !playing;
+        btn.textContent = playing ? '⏸ Pause' : '▶️ Resume';
+        btn.dataset.demoAction = playing ? 'stream:pause' : 'stream:resume';
+      } else if (act === 'audio:mute' || act === 'audio:unmute') {
+        muted = !muted;
+        btn.textContent = muted ? '🔊 Unmute' : '🔇 Mute';
+        btn.dataset.demoAction = muted ? 'audio:unmute' : 'audio:mute';
+      } else if (act === 'stream:seek_back') {
+        seconds = Math.max(0, seconds - 10);
+      } else if (act === 'stream:seek_forward') {
+        seconds = Math.min(total, seconds + 10);
+      } else if (act === 'stream:restart') {
+        seconds = 0;
+        playing = true;
+      }
+      render();
+    });
+  }
+
+  // update topbar clock
+  const updateClock = () => {
+    const now = new Date();
+    if (clock) clock.textContent = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  };
+  updateClock();
+  setInterval(updateClock, 30000);
+  render();
 }
