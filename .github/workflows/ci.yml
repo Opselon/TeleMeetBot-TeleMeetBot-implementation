@@ -122,6 +122,11 @@ jobs:
           trap 'kill $server 2>/dev/null || true' EXIT
           sleep 1
 
+          # The tamper check overwrites the mirror's SHA256SUMS; keep a copy
+          # so the later install steps find a valid manifest again.
+          TMP_SUMS_BACKUP="$(mktemp)"
+          cp /tmp/rel/SHA256SUMS "$TMP_SUMS_BACKUP"
+
           export BASE_URL="http://127.0.0.1:18099"
           prefix="$(mktemp -d)"
 
@@ -139,6 +144,9 @@ jobs:
           "$prefix/bin/telemeetbot" --version
 
           echo "--- 3: a tampered checksum must abort the install ---"
+          # Restore the real manifest afterwards: the later steps install
+          # from this mirror again and must find a valid checksum file.
+          cp /tmp/rel/SHA256SUMS "$TMP_SUMS_BACKUP"
           echo "0000000000000000000000000000000000000000000000000000000000000000  telemeetbot-linux-amd64.tar.gz" > /tmp/rel/SHA256SUMS
           if bash scripts/install.sh --version v0.0.0-ci --prefix "$prefix" \
             --config-dir "$prefix/etc/telemeetbot" --no-wizard --no-service </dev/null; then
@@ -146,6 +154,7 @@ jobs:
           else
             echo "OK: installer aborted on checksum mismatch"
           fi
+          cp "$TMP_SUMS_BACKUP" /tmp/rel/SHA256SUMS
 
           echo "--- 4: reject a version that is not a tag ---"
           if bash scripts/install.sh --version head --prefix "$prefix" \
@@ -156,9 +165,16 @@ jobs:
           fi
 
           echo "--- 5: the install root is a real install, not only a download ---"
-          test -x "$prefix/bin/telemeetbot" || { echo "FAIL: no binary in $prefix/bin"; exit 1; }
-          test -f "$prefix/etc/telemeetbot/config.yml" || { echo "FAIL: no staged config"; exit 1; }
-          echo "OK: binary + staged config present after three installs"
+          # A fresh prefix (the tamper check left the earlier config in place
+          # on this prefix, so stage a clean one) must end up with the binary
+          # and a fail-closed template config.
+          prefix2="$(mktemp -d)"
+          bash scripts/install.sh --version v0.0.0-ci --prefix "$prefix2" \
+            --config-dir "$prefix2/etc/telemeetbot" --no-wizard --no-service </dev/null
+          test -x "$prefix2/bin/telemeetbot" || { echo "FAIL: no binary in $prefix2/bin"; exit 1; }
+          test -f "$prefix2/etc/telemeetbot/config.yml" || { echo "FAIL: no staged config"; exit 1; }
+          "$prefix2/bin/telemeetbot" --version
+          echo "OK: binary + staged config present on a fresh prefix"
 
       - name: lifecycle — backup, restore, uninstall
         run: |
