@@ -1,0 +1,276 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version tag (vX.Y.Z)"
+        required: true
+        type: string
+
+permissions:
+  contents: write   # needed by gh release create / softprops/action-gh-release
+  packages: write   # docker push to ghcr.io
+
+env:
+  GO_VERSION: "1.26"
+
+jobs:
+  # ---- build the native binaries for every supported OS/arch ---------------
+  build:
+    name: build (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: linux
+            goarch: arm
+            goarm: "6"
+          - goos: linux
+            goarch: arm
+            goarm: "7"
+          - goos: linux
+            goarch: "386"
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          version="${{ github.ref_name }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+          fi
+          [ -n "$version" ] || version="dev"
+          ext=""
+          [ "$GOOS" = "windows" ] && ext=".exe"
+          mkdir -p stage
+          go build -trimpath \
+            -ldflags "-s -w -X github.com/Opselon/TeleMeetBot/internal/config.Version=${version}" \
+            -o "stage/telemeetbot${ext}" ./cmd/telemeetbot
+
+          cp README.md README.fa.md LICENSE stage/ 2>/dev/null || true
+          cp -r deploy stage/
+          cp scripts/install.sh stage/
+          [ "$GOOS" = "windows" ] && cp scripts/install.ps1 stage/ || true
+
+          # Archive name matches what install.sh/install.ps1 download.
+          arch="$GOARCH"
+          [ -n "$GOARM" ] && arch="arm${GOARM}"
+          out="telemeetbot-${GOOS}-${arch}"
+          if [ "$GOOS" = "windows" ]; then
+            ( cd stage && zip -qr -X "../${out}.zip" . )
+          else
+            tar -C stage -czf "${out}.tar.gz" .
+          fi
+
+      - name: Upload the archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.goarm && format('-{0}', matrix.goarm) || '' }}
+          path: |
+            telemeetbot-*.tar.gz
+            telemeetbot-*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---- verify every binary actually runs on its target platform ------------
+  smoke-binaries:
+    name: smoke (${{ matrix.goos }}/${{ matrix.goarch }})
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Run the binary on a real OS runner and assert --version works.
+          # Windows/macOS runners are x86_64 or arm64 native — no emulation.
+          - goos: linux
+            goarch: amd64
+            runner: ubuntu-latest
+            archive: telemeetbot-linux-amd64.tar.gz
+          - goos: darwin
+            goarch: arm64
+            runner: macos-14
+            archive: telemeetbot-darwin-arm64.tar.gz
+          - goos: darwin
+            goarch: amd64
+            runner: macos-13
+            archive: telemeetbot-darwin-amd64.tar.gz
+          - goos: windows
+            goarch: amd64
+            runner: windows-latest
+            archive: telemeetbot-windows-amd64.zip
+    steps:
+      - name: Download the built archive
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.goos }}-${{ matrix.goarch }}
+          path: smoke
+
+      - name: Verify the binary runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The artifact name is <goos>-<goarch>[-<goarm>], matching the
+          # upload step in the build job.
+          artifact="${{ matrix.goos }}-${{ matrix.goarch }}"
+          archive="$(find . -name '${{ matrix.archive }}' | head -n1)"
+          if [ -z "$archive" ]; then
+            echo "archive ${{ matrix.archive }} not found among:"
+            find . -type f | head -40
+            exit 1
+          fi
+          echo "smoke-testing $archive"
+          mkdir -p /tmp/smoke && cd /tmp/smoke
+          case "$archive" in
+            *.zip) unzip -o -q "$OLDPWD/$archive" ;;
+            *) tar -xzf "$OLDPWD/$archive" ;;
+          esac
+          bin="./telemeetbot"
+          case "${{ matrix.goos }}" in
+            windows) bin="./telemeetbot.exe" ;;
+          esac
+          # A version print proves the whole binary linked and launched on
+          # the target platform, not just that it was compiled.
+          "$bin" --version
+
+  # ---- build and push the multi-arch Docker image --------------------------
+  docker:
+    name: docker (multi-arch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve version
+        id: ver
+        run: |
+          version="${{ github.ref_name }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: VERSION=${{ steps.ver.outputs.version }}
+          tags: |
+            ghcr.io/${{ github.repository }}:${{ steps.ver.outputs.version }}
+            ghcr.io/${{ github.repository }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---- publish the release with checksums ----------------------------------
+  publish:
+    name: publish release
+    needs: [build, smoke-binaries, docker]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download every artifact
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Assemble the release directory
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find dist -type f \( -name 'telemeetbot-*.tar.gz' -o -name 'telemeetbot-*.zip' \) \
+            -exec mv {} release/ \;
+          # One manifest covering every archive in the release.
+          ( cd release && sha256sum telemeetbot-* | sort -k2 > SHA256SUMS )
+          cp scripts/install.sh scripts/install.ps1 release/ 2>/dev/null || true
+          ls -lh release
+
+      - name: Resolve version
+        id: ver
+        run: |
+          version="${{ github.ref_name }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.ver.outputs.version }}"
+          if gh release view "$version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $version already exists; uploading missing assets"
+            gh release upload "$version" --repo "$GITHUB_REPOSITORY" release/* --clobber
+          else
+            notes_args=()
+            if [ -f "docs/release-notes-${version}.md" ]; then
+              notes_args=(--notes-file "docs/release-notes-${version}.md")
+            else
+              notes_args=(--notes "TeleMeetBot ${version}. See the release notes in docs/ and the installation guide in the README.")
+            fi
+            gh release create "$version" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "TeleMeetBot ${version}" \
+              "${notes_args[@]}" \
+              release/*.tar.gz release/*.zip release/SHA256SUMS release/install.sh release/install.ps1
+          fi
+
+      - name: Verify the published assets are downloadable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ steps.ver.outputs.version }}"
+          # Anonymous HEAD probes: a private repo would 404 here even though
+          # the authenticated gh CLI sees the asset. This repo is public, and
+          # this check keeps it honest.
+          for f in SHA256SUMS telemeetbot-linux-amd64.tar.gz telemeetbot-darwin-arm64.tar.gz telemeetbot-windows-amd64.zip; do
+            url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${version}/${f}"
+            code=$(curl -fsSL -o /dev/null -w '%{http_code}' --head "$url" || true)
+            echo "$f -> HTTP $code"
+            [ "$code" = "200" ] || { echo "asset $f is not downloadable"; exit 1; }
+          done

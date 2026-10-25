@@ -8,12 +8,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/Opselon/TeleMeetBot/internal/bot"
@@ -27,12 +25,25 @@ import (
 
 func main() {
 	var (
-		cfgFlag     = flag.String("config", "", "path to telemeetbot.yml (default: ./telemeetbot.yml or /etc/telemeetbot/config.yml)")
+		// serviceMode runs the process under the Windows Service Control
+		// Manager. It is auto-detected (no console, SCM parent) and can also
+		// be forced with --service for a manual sc.exe registration.
+		serviceMode = flag.Bool("service", false, "run as a managed OS service (Windows SCM; auto-detected)")
+
+		cfgFlag     = flag.String("config", "", "path to telemeetbot.yml (default: ./telemeetbot.yml or the platform's system config)")
 		wizardFlag  = flag.Bool("wizard", false, "run the interactive setup wizard")
 		runAfter    = flag.Bool("run", false, "with --wizard: start the bot after a successful setup")
 		checkFlag   = flag.Bool("check", false, "run doctor diagnostics and exit")
 		captureFlag = flag.Bool("capture-test", false, "with --check: run a real tab-capture probe (starts Chromium)")
 		versionFlag = flag.Bool("version", false, "print version and exit")
+
+		// Lifecycle: --uninstall removes the OS service registration and the
+		// installed binary; --restore-backup rolls the config back to the .bak
+		// the wizard took before overwriting it. Both are safe to run twice.
+		uninstallFlag     = flag.Bool("uninstall", false, "stop and remove the OS service, then delete the binary")
+		uninstallKeepBin  = flag.Bool("keep-binary", false, "with --uninstall: remove only the service, keep the binary")
+		uninstallYes      = flag.Bool("yes", false, "with --uninstall: confirm stopping a running service without a prompt")
+		restoreBackupFlag = flag.Bool("restore-backup", false, "restore the config from the .bak the wizard saved")
 
 		// Live diagnosis: join-and-report against a real meeting link using
 		// the engine the bot itself uses. Does not enter the dashboard.
@@ -47,6 +58,41 @@ func main() {
 
 	if *versionFlag {
 		fmt.Printf("telemeetbot %s (%s %s/%s)\n", config.Version, runtime.Version(), runtime.GOOS, runtime.GOARCH)
+		return
+	}
+
+	// Rollback: restore the config the wizard backed up before overwriting.
+	// Runs before every other mode so it works on a broken install too.
+	if *restoreBackupFlag {
+		cfgPath := config.ResolvePath(*cfgFlag)
+		if err := config.RestoreBackup(cfgPath); err != nil {
+			fmt.Fprintf(os.Stderr, "restore backup: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("✅ config restored from %s.bak\n", cfgPath)
+		return
+	}
+
+	// Uninstall: stop + remove the OS service, then optionally remove the
+	// binary itself. Config and data stay untouched — an uninstall must never
+	// destroy the operator's token or session history.
+	if *uninstallFlag {
+		if err := runUninstall(*cfgFlag, !*uninstallKeepBin, *uninstallYes, os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintf(os.Stderr, "uninstall: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// Windows service mode: the SCM starts the process with no console, so
+	// every diagnostic branch below is skipped and the bot runs under the
+	// service loop instead. On non-Windows builds_svcMode() is always false
+	// and the flag is a no-op.
+	if *serviceMode || shouldAutoEnterServiceMode() {
+		if err := runAsService(); err != nil {
+			fmt.Fprintf(os.Stderr, "service: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
 
@@ -165,7 +211,10 @@ func main() {
 func run(cfg *config.Config, cfgPath string, log *slogLogger) error {
 	log.Infof("TeleMeetBot %s starting (config %s)", config.Version, cfgPath)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	// Termination signals: SIGINT/SIGTERM on Unix; on Windows SIGTERM cannot
+	// be caught, so the context listens for os.Interrupt (Ctrl+C / Ctrl+Break)
+	// and the service stop event instead.
+	ctx, stop := termSignalContext(context.Background())
 	defer stop()
 
 	// Persisted history: warn about sessions killed with the previous process.

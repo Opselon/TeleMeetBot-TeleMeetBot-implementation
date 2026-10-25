@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"runtime"
-	"syscall"
 	"time"
 )
 
@@ -26,13 +25,16 @@ type Snapshot struct {
 }
 
 // DiskUsage reports free/total space on the config data filesystem.
+//
+// On Unix it is a statfs(2) lookup; on Windows the same information comes
+// from GetDiskFreeSpaceEx through the standard library. Either way a failure
+// is reported as zeros instead of aborting the health surface.
 func DiskUsage(path string) (freeGB, totalGB float64) {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(path, &st); err != nil {
+	free, total, ok := diskUsage(path)
+	if !ok {
 		return 0, 0
 	}
-	bs := float64(st.Bsize)
-	return float64(st.Bavail) * bs / (1 << 30), float64(st.Blocks) * bs / (1 << 30)
+	return float64(free) / (1 << 30), float64(total) / (1 << 30)
 }
 
 // FormatUptime renders a human duration, e.g. "3h 12m".

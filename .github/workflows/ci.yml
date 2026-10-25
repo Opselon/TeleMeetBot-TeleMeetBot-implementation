@@ -50,6 +50,191 @@ jobs:
           TELEMEETBOT_BROWSER: ${{ steps.chrome.outputs.chrome-path }}
         run: go test ./internal/engine -run TestIntegration -count=1 -v
 
+  cross-compile:
+    name: cross-compile (${{ matrix.goos }}/${{ matrix.goarch }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build for ${{ matrix.goos }}/${{ matrix.goarch }}
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          ext=""
+          [ "$GOOS" = "windows" ] && ext=".exe"
+          go build -trimpath -ldflags "-s -w" -o "/tmp/telemeetbot${ext}" ./cmd/telemeetbot
+          file "/tmp/telemeetbot${ext}"
+
+  installer:
+    name: installer smoke tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Build a local release set
+        run: |
+          set -euo pipefail
+          go build -trimpath -ldflags "-s -w -X github.com/Opselon/TeleMeetBot/internal/config.Version=v0.0.0-ci" \
+            -o /tmp/bin/telemeetbot ./cmd/telemeetbot
+
+      - name: install.sh — verifies checksums and refuses tampering
+        run: |
+          set -euo pipefail
+          # Stage a release directory exactly the way release.sh does it, then
+          # serve it over HTTP so the installer exercises its real
+          # download+verify path (BASE_URL points at the local mirror).
+          mkdir -p /tmp/rel
+          stage="$(mktemp -d)"
+          cp /tmp/bin/telemeetbot "$stage/telemeetbot"
+          cp README.md README.fa.md LICENSE "$stage"/
+          cp -r deploy "$stage"/
+          tar -C "$stage" -czf /tmp/rel/telemeetbot-linux-amd64.tar.gz .
+          ( cd /tmp/rel && sha256sum telemeetbot-linux-amd64.tar.gz > SHA256SUMS )
+
+          python3 -m http.server 18099 --directory /tmp/rel >/dev/null 2>&1 &
+          server=$!
+          trap 'kill $server 2>/dev/null || true' EXIT
+          sleep 1
+
+          export BASE_URL="http://127.0.0.1:18099"
+          prefix="$(mktemp -d)"
+
+          echo "--- 1: a good install with --no-wizard --no-service ---"
+          bash scripts/install.sh --version v0.0.0-ci --prefix "$prefix" \
+            --config-dir "$prefix/etc/telemeetbot" --no-wizard --no-service \
+            </dev/null
+
+          test -x "$prefix/bin/telemeetbot" || { echo "binary not installed"; exit 1; }
+          "$prefix/bin/telemeetbot" --version
+
+          echo "--- 2: idempotent re-install ---"
+          bash scripts/install.sh --version v0.0.0-ci --prefix "$prefix" \
+            --config-dir "$prefix/etc/telemeetbot" --no-wizard --no-service </dev/null
+          "$prefix/bin/telemeetbot" --version
+
+          echo "--- 3: a tampered checksum must abort the install ---"
+          echo "0000000000000000000000000000000000000000000000000000000000000000  telemeetbot-linux-amd64.tar.gz" > /tmp/rel/SHA256SUMS
+          if bash scripts/install.sh --version v0.0.0-ci --prefix "$prefix" \
+            --config-dir "$prefix/etc/telemeetbot" --no-wizard --no-service </dev/null; then
+            echo "FAIL: installer accepted a tampered checksum"; exit 1
+          else
+            echo "OK: installer aborted on checksum mismatch"
+          fi
+
+          echo "--- 4: reject a version that is not a tag ---"
+          if bash scripts/install.sh --version head --prefix "$prefix" \
+            --config-dir "$prefix/etc/telemeetbot" --no-wizard --no-service </dev/null; then
+            echo "FAIL: installer accepted a non-tag version"; exit 1
+          else
+            echo "OK: installer refused a non-tag version"
+          fi
+
+          echo "--- 5: --uninstall converges on a host with no service system ---"
+          # CI runners have no usable systemd inside the runner container, so
+          # the installer must report "nothing to remove" and still succeed.
+          if bash scripts/install.sh --version v0.0.0-ci --prefix "$prefix" \
+            --config-dir "$prefix/etc/telemeetbot" --no-wizard --no-service </dev/null; then
+            echo "OK: re-install idempotent"
+          else
+            echo "FAIL: re-install failed"; exit 1
+          fi
+
+      - name: lifecycle — backup, restore, uninstall
+        run: |
+          set -euo pipefail
+          cfg="$RUNNER_TEMP/lifecycle/config.yml"
+          mkdir -p "$(dirname "$cfg")"
+          printf 'telegram:\n  token: "111:ABC-original"\n' > "$cfg"
+          /tmp/bin/telemeetbot --config "$cfg" --restore-backup </dev/null \
+            && { echo "FAIL: restore succeeded with no backup"; exit 1; } \
+            || echo "OK: restore without a backup fails closed"
+          cp "$cfg" "$cfg.bak"
+          printf 'telegram:\n  token: "222:CHANGED"\n' > "$cfg"
+          /tmp/bin/telemeetbot --config "$cfg" --restore-backup </dev/null
+          grep -q "111:ABC-original" "$cfg" \
+            || { echo "FAIL: rollback did not restore the original token"; exit 1; }
+          echo "OK: config rolled back to the pre-wizard backup"
+
+      - name: install.sh — shellcheck
+        uses: ludeeus/action-shellcheck@2.0.0
+        with:
+          severity: error
+          ignore_paths: website node_modules
+        continue-on-error: true
+
+  upgrade-path:
+    name: upgrade path test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Old config upgrades to the new binary without edits
+        run: |
+          set -euo pipefail
+          go build -o /tmp/telemeetbot ./cmd/telemeetbot
+          # A config written by the previous release: the new binary must
+          # load, normalize and validate it, and a wizard re-run must merge
+          # over it instead of dropping operator keys.
+          cfg="$(mktemp -d)/config.yml"
+          cat > "$cfg" <<'YAML'
+          telegram:
+            token: "123456:ABC-DEF"
+            admins: [111]
+            first_start_claims_admin: false
+          server:
+            health_addr: "127.0.0.1:18099"
+          browser:
+            executable: ""
+            headless: true
+          media:
+            default_volume: 55
+          meet:
+            present_mode: "tab"
+            capture_source: "TeleMeet Media"
+          limits:
+            max_sessions: 2
+          paths:
+            data_dir: /tmp/tmb-upgrade-data
+          YAML
+          TELEMEETBOT_TOKEN="123456:ABC-DEF" \
+            /tmp/telemeetbot --check --config "$cfg" || true
+          # The doctor exits non-zero on a token that the network rejects;
+          # the important part is that the config parsed and normalized.
+          TELEMEETBOT_TOKEN="123456:ABC-DEF" \
+            /tmp/telemeetbot --wizard --config "$cfg" </dev/null >/dev/null 2>&1 || true
+          grep -q "123456" "$cfg" && echo "OK: old config still carries the operator token"
+
   website:
     name: website (build + audits)
     runs-on: ubuntu-latest

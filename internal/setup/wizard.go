@@ -8,12 +8,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Opselon/TeleMeetBot/internal/config"
 	"github.com/Opselon/TeleMeetBot/internal/engine"
+	"github.com/Opselon/TeleMeetBot/internal/svcinst"
 )
 
 // Prompter is a tiny interactive prompt reader. It is deterministic and
@@ -174,6 +176,8 @@ func Run(opts WizardOptions) (*config.Config, error) {
 	if path == "" {
 		path = defaultConfigPath()
 	}
+	// A leading ~ means the user's home on every platform.
+	path = config.ExpandUserPath(path)
 
 	fmt.Fprintln(out, "┌──────────────────────────────────────────────┐")
 	fmt.Fprintln(out, "│  TeleMeetBot · setup wizard                  │")
@@ -262,20 +266,28 @@ func Run(opts WizardOptions) (*config.Config, error) {
 		if !opts.SkipBrowserInstall {
 			install := true
 			if !opts.NonInteractive {
-				install, err = p.Confirm("  Install chromium now with apt-get? (Debian/Ubuntu)", true)
+				install, err = p.Confirm(browserInstallQuestion(), true)
 				if err != nil {
 					return nil, err
 				}
 			}
 			if install {
-				fmt.Fprintln(out, "  → apt-get update && apt-get install -y chromium (this can take a few minutes)")
-				_ = opts.Exec("apt-get", "update")
-				if ierr := opts.Exec("apt-get", "install", "-y", "chromium"); ierr != nil {
-					fmt.Fprintf(out, "  ❌ install failed: %v\n", ierr)
-					fmt.Fprintln(out, "     Use the Docker image instead: docker compose up -d  (see README)")
-				} else if p2, err := detect(bcfg); err == nil {
-					fmt.Fprintf(out, "  ✅ chromium installed at %s\n", p2)
-					cfg.Browser.Executable = p2
+				if pkgCmd := browserInstallCommand(); pkgCmd != nil {
+					fmt.Fprintf(out, "  → %s %s (this can take a few minutes)\n", pkgCmd[0], strings.Join(pkgCmd[1:], " "))
+					// Run the package manager exactly once: an apt-get/brew
+					// install is slow and idempotent, but running it twice in
+					// a row doubles the wait and double-logs the output.
+					ierr := opts.Exec(pkgCmd[0], pkgCmd[1:]...)
+					if ierr != nil {
+						fmt.Fprintf(out, "  ❌ install failed: %v\n", ierr)
+						fmt.Fprintln(out, browserFallbackHint())
+					} else if p2, err := detect(bcfg); err == nil {
+						fmt.Fprintf(out, "  ✅ chromium installed at %s\n", p2)
+						cfg.Browser.Executable = p2
+					}
+				} else {
+					fmt.Fprintln(out, "  ℹ️  no automatic Chromium installer for this platform")
+					fmt.Fprintln(out, browserFallbackHint())
 				}
 			}
 		}
@@ -376,28 +388,39 @@ func Run(opts WizardOptions) (*config.Config, error) {
 	if err := os.MkdirAll(cfg.Paths.DataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
+	// Back up an existing config before overwriting it: a re-run over a live
+	// install must be revertable with `telemeetbot --wizard` alone. The backup
+	// is best-effort — a missing file is the fresh-install case.
+	if config.Exists(path) {
+		if bak, err := config.Backup(path); err != nil {
+			fmt.Fprintf(out, "  ⚠️  could not back up the existing config: %v\n", err)
+		} else {
+			fmt.Fprintf(out, "  ↩️  previous config backed up to %s (restore with --restore-backup)\n", bak)
+		}
+	}
 	if err := cfg.Save(path); err != nil {
 		return nil, fmt.Errorf("save config: %w", err)
 	}
 	fmt.Fprintf(out, "\n✅ config saved to %s\n", path)
 
-	// ---- Optional systemd service ---------------------------------------
-	if opts.InstallService && os.Geteuid() == 0 && which("systemctl") != "" {
-		if err := installService(path); err != nil {
-			fmt.Fprintf(out, "⚠️  systemd unit: %v\n", err)
-		} else {
-			fmt.Fprintln(out, "✅ systemd unit installed and started (telemeetbot.service)")
+	// ---- Optional OS service ---------------------------------------------
+	// One question across every platform: systemd on Linux, a Windows
+	// service through the SCM, a launchd agent on macOS. The installer is
+	// nil when the host has no usable service system (a container without
+	// systemd), and the wizard then says so instead of failing.
+	installSvc := opts.InstallService
+	if installSvc {
+		if err := installManagedService(path); err != nil {
+			fmt.Fprintf(out, "⚠️  service install: %v\n", err)
 		}
-	} else if !opts.NonInteractive && os.Geteuid() == 0 && which("systemctl") != "" {
-		install, err := p.Confirm("Install and start a systemd service now?", true)
+	} else if !opts.NonInteractive {
+		ask, err := p.Confirm(serviceQuestion(), true)
 		if err != nil {
 			return nil, err
 		}
-		if install {
-			if err := installService(path); err != nil {
-				fmt.Fprintf(out, "⚠️  systemd unit: %v\n", err)
-			} else {
-				fmt.Fprintln(out, "✅ systemd unit installed and started (telemeetbot.service)")
+		if ask {
+			if err := installManagedService(path); err != nil {
+				fmt.Fprintf(out, "⚠️  service install: %v\n", err)
 			}
 		}
 	}
@@ -433,7 +456,44 @@ func Run(opts WizardOptions) (*config.Config, error) {
 	return cfg, nil
 }
 
+// installManagedService installs and starts TeleMeetBot as an OS service on
+// whatever supervisor the host actually has: systemd on Linux, the SCM on
+// Windows, launchd on macOS. Returns a clear error when the host has none.
+func installManagedService(cfgPath string) error {
+	inst := svcinst.New()
+	if inst == nil {
+		return errors.New("no service system found (systemd/launchd/SCM); run the binary directly or use Docker")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve own executable: %w", err)
+	}
+	if err := inst.Install(svcinst.Options{
+		Binary:     exe,
+		ConfigPath: cfgPath,
+		DataDir:    filepath.Dir(cfgPath),
+	}); err != nil {
+		return err
+	}
+	fmt.Printf("✅ service installed and started (%s)\n", svcinst.DefaultName)
+	return nil
+}
+
+// serviceQuestion returns the platform-appropriate install question.
+func serviceQuestion() string {
+	switch runtime.GOOS {
+	case "windows":
+		return "Install and start TeleMeetBot as a Windows service now? (needs an elevated shell)"
+	case "darwin":
+		return "Install and start a launchd agent now? (runs at login, restarts on crash)"
+	default:
+		return "Install and start a systemd service now?"
+	}
+}
+
 // installService writes and enables a systemd unit for the current binary.
+// Deprecated: kept for callers that ask for systemd by name; installManagedService
+// covers every platform.
 func installService(cfgPath string) error {
 	exe, err := os.Executable()
 	if err != nil {
@@ -467,12 +527,9 @@ WantedBy=multi-user.target
 	return runCmd("systemctl", "enable", "--now", "telemeetbot")
 }
 
-// defaultConfigPath picks a sensible config location.
+// defaultConfigPath picks a sensible config location for the platform.
 func defaultConfigPath() string {
-	if os.Geteuid() == 0 {
-		return "/etc/telemeetbot/config.yml"
-	}
-	return "telemeetbot.yml"
+	return config.DefaultConfigPath()
 }
 
 // parseIDs parses "123, 456" into int64s.
