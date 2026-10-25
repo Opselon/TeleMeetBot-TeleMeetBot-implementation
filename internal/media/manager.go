@@ -93,8 +93,12 @@ type Manager struct {
 	// retryDelay overrides the sleep between yt-dlp attempts (tests).
 	retryDelay func(attempt int) time.Duration
 
-	// janitorOnce guards janitor startup; stopJanitor ends the loop.
+	// janitorOnce guards janitor startup; stopMu guards the stop channel
+	// itself: Start's goroutine reads stopJanitor while Stop closes it, and
+	// those two must not race (the -race detector caught them sharing the
+	// field without synchronization).
 	janitorOnce sync.Once
+	stopMu      sync.Mutex
 	stopJanitor chan struct{}
 
 	// diskFree returns the bytes free on the download filesystem. Overridable
@@ -233,6 +237,8 @@ func (m *Manager) Start(ctx context.Context) {
 // Stop ends the janitor. Downloads in flight are cancelled by their own ctx.
 func (m *Manager) Stop() {
 	m.janitorOnce.Do(func() {}) // never start after a stop
+	m.stopMu.Lock()
+	defer m.stopMu.Unlock()
 	if m.stopJanitor != nil {
 		close(m.stopJanitor)
 		m.stopJanitor = nil
@@ -262,13 +268,19 @@ func janitorInterval(ttl time.Duration) time.Duration {
 
 // janitorLoop removes expired files on a ticker until Stop or ctx cancel.
 func (m *Manager) janitorLoop(ctx context.Context) {
+	m.stopMu.Lock()
+	stop := m.stopJanitor
+	m.stopMu.Unlock()
+	if stop == nil { // Stop already ran
+		return
+	}
 	t := time.NewTicker(janitorInterval(m.opts.TTL))
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-m.stopJanitor:
+		case <-stop:
 			return
 		case <-t.C:
 			if n := m.Sweep(ctx); n > 0 {

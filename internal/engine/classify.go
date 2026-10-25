@@ -1,11 +1,15 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/Opselon/TeleMeetBot/internal/media"
 )
 
 // Classification of a media source, decided from evidence gathered in this
@@ -138,7 +142,12 @@ func probeGet(res *sniffResult, rawURL string, client *http.Client) bool {
 // defaultProbeClient builds the redirect-bounded, timeout-bounded client used
 // when the caller does not supply one. The probe never downloads a body, so
 // redirect following is cheap; the chain is capped anyway.
+//
+// The transport's dialer enforces the same private-range SSRF block as the
+// download path, so the probe can never be used to reach a loopback or
+// link-local address the downloader itself would refuse.
 func defaultProbeClient() *http.Client {
+	dialer := &net.Dialer{Timeout: probeTimeout}
 	return &http.Client{
 		Timeout: probeTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -146,6 +155,18 @@ func defaultProbeClient() *http.Client {
 				return fmt.Errorf("too many redirects")
 			}
 			return nil
+		},
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				host, port, err := net.SplitHostPort(addr)
+				if err != nil {
+					return nil, err
+				}
+				if ip := net.ParseIP(host); ip != nil && media.IsBlockedIP(ip) {
+					return nil, fmt.Errorf("probe refused: %s is a private address", net.JoinHostPort(host, port))
+				}
+				return dialer.DialContext(ctx, network, addr)
+			},
 		},
 	}
 }
@@ -159,9 +180,16 @@ func defaultProbeClient() *http.Client {
 // same as before.
 //
 // client may be nil (a bounded default is built); tests pass a stub.
+//
+// The SSRF gate runs before any request is issued: classification must not be
+// a way to reach private ranges the downloader itself would refuse, and a URL
+// that cannot pass the gate can never be played anyway.
 func ClassifyMediaWithProbe(rawURL string, client *http.Client) (MediaTarget, error) {
 	target, err := ClassifyMedia(rawURL)
 	if err != nil {
+		return MediaTarget{}, err
+	}
+	if _, err := media.ValidateURL(target.URL); err != nil {
 		return MediaTarget{}, err
 	}
 	// YouTube classification is host-shape based and is never overridden by

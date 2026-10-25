@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"github.com/Opselon/TeleMeetBot/internal/media"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,6 +13,8 @@ import (
 // offline heuristics.
 
 func TestClassifyWithProbeAudioMIMEWins(t *testing.T) {
+	media.SetAllowLoopbackForTest(true)
+	defer media.SetAllowLoopbackForTest(false)
 	// A bare URL with no extension that serves audio/mpeg is direct media.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "audio/mpeg")
@@ -30,6 +33,8 @@ func TestClassifyWithProbeAudioMIMEWins(t *testing.T) {
 }
 
 func TestClassifyWithProbeHTMLOnMediaExtIsPage(t *testing.T) {
+	media.SetAllowLoopbackForTest(true)
+	defer media.SetAllowLoopbackForTest(false)
 	// An .mp3 URL that actually serves HTML is a page, not direct media.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -48,6 +53,8 @@ func TestClassifyWithProbeHTMLOnMediaExtIsPage(t *testing.T) {
 }
 
 func TestClassifyWithProbeVideoMP4NoExt(t *testing.T) {
+	media.SetAllowLoopbackForTest(true)
+	defer media.SetAllowLoopbackForTest(false)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "video/mp4")
 		w.WriteHeader(http.StatusOK)
@@ -64,6 +71,8 @@ func TestClassifyWithProbeVideoMP4NoExt(t *testing.T) {
 }
 
 func TestClassifyWithProbeHTTPErrorFallsBack(t *testing.T) {
+	media.SetAllowLoopbackForTest(true)
+	defer media.SetAllowLoopbackForTest(false)
 	// A 404 must not overturn a media extension: signed URLs and HEAD-averse
 	// CDNs answer GET fine but may 404 on a HEAD probe.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -81,6 +90,8 @@ func TestClassifyWithProbeHTTPErrorFallsBack(t *testing.T) {
 }
 
 func TestClassifyWithProbeRedirectToMedia(t *testing.T) {
+	media.SetAllowLoopbackForTest(true)
+	defer media.SetAllowLoopbackForTest(false)
 	// A shortener that redirects to a media-serving path resolves to direct
 	// media: redirects are followed by the probe client.
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -105,7 +116,9 @@ func TestClassifyWithProbeRedirectToMedia(t *testing.T) {
 
 func TestClassifyWithProbeUnreachableFallsBack(t *testing.T) {
 	// A dead host must not error: the offline heuristics decide.
-	got, err := ClassifyMediaWithProbe("http://127.0.0.1:1/movie.mp4", nil)
+	// 240.0.0.1 is reserved (RFC 3330) and unroutable on any real network, so
+	// the probe fails fast without needing the loopback exemption.
+	got, err := ClassifyMediaWithProbe("http://240.0.0.1:1/movie.mp4", nil)
 	if err != nil {
 		t.Fatalf("ClassifyMediaWithProbe: %v", err)
 	}
@@ -115,6 +128,8 @@ func TestClassifyWithProbeUnreachableFallsBack(t *testing.T) {
 }
 
 func TestClassifyWithProbeHEADRejectedFallsBackToGET(t *testing.T) {
+	media.SetAllowLoopbackForTest(true)
+	defer media.SetAllowLoopbackForTest(false)
 	// Servers that refuse HEAD (405) still classify via the bounded GET.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodHead {
@@ -150,7 +165,9 @@ func TestClassifyWithProbeYouTubeNeverOverridden(t *testing.T) {
 	}
 }
 
-func TestClassifyWithProbeLoopbackNeverProbed(t *testing.T) {
+func TestClassifyWithProbeLoopbackClassifiesOffline(t *testing.T) {
+	media.SetAllowLoopbackForTest(true)
+	defer media.SetAllowLoopbackForTest(false)
 	// The local file server's own URLs are direct by construction. A probe
 	// would hit the loopback server (and a token that needs no validation).
 	got, err := ClassifyMediaWithProbe("http://127.0.0.1:8080/d/abcdef", nil)
@@ -179,6 +196,22 @@ func TestMediaMIMEOf(t *testing.T) {
 	for ct, want := range cases {
 		if got := mediaMIMEOf(ct); got != want {
 			t.Errorf("mediaMIMEOf(%q) = %v, want %v", ct, got, want)
+		}
+	}
+}
+
+// TestClassifyRefusesPrivateDestination proves the classification probe can
+// never be used as an SSRF vector: a Telegram-supplied URL pointing at a
+// private/loopback address is refused before any request is issued.
+func TestClassifyRefusesPrivateDestination(t *testing.T) {
+	for _, raw := range []string{
+		"http://127.0.0.1:8080/d/abcdef",
+		"http://10.0.0.5/video.mp4",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://[::1]:8080/audio.mp3",
+	} {
+		if _, err := ClassifyMediaWithProbe(raw, nil); err == nil {
+			t.Fatalf("classification accepted private destination %q", raw)
 		}
 	}
 }
