@@ -117,6 +117,7 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 	}
 
 	if m.IsCommand() {
+		b.log.Infof("[PIPELINE:bot] command /%s received (args=%q) from user=%d chat=%d", m.Command(), m.CommandArguments(), userID, chatID)
 		switch m.Command() {
 		case "start":
 			b.clearFlow(userID)
@@ -434,37 +435,48 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 	chatID := q.Message.Chat.ID
 	msgID := q.Message.MessageID
 	if !b.authorizeUser(userID, chatID) {
+		b.log.Warnf("[PIPELINE:bot] unauthorized callback query from user=%d chat=%d data=%q", userID, chatID, q.Data)
 		return
 	}
 	data := q.Data
+	b.log.Infof("[PIPELINE:bot] callback button press: data=%q user=%d chat=%d msg=%d", data, userID, chatID, msgID)
 	switch {
 	case data == cbHome || data == cbRefresh:
+		b.log.Infof("[PIPELINE:bot] action: home/refresh from user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "dashboard")
 		_ = b.api.Edit(chatID, msgID, b.mainText(), mainMenuKB())
 	case data == cbNew:
+		b.log.Infof("[PIPELINE:bot] action: new stream wizard started by user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "new stream")
 		b.startFlow(chatID, userID, "")
 	case data == cbSessions:
+		b.log.Infof("[PIPELINE:bot] action: view sessions by user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "")
 		_ = b.api.Edit(chatID, msgID, sessionsText(b.statuses()), sessionsKB(b.statuses()))
 	case data == cbHealth:
+		b.log.Infof("[PIPELINE:bot] action: view health by user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "")
 		_ = b.api.Edit(chatID, msgID, b.healthText(), backKB())
 	case data == cbSettings:
+		b.log.Infof("[PIPELINE:bot] action: view settings by user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "")
 		_ = b.api.Edit(chatID, msgID, settingsText(b.cfg), backKB())
 	case data == cbHelp:
+		b.log.Infof("[PIPELINE:bot] action: view help by user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "")
 		_ = b.api.Edit(chatID, msgID, helpText(), backKB())
 	case data == cbAudioLang:
+		b.log.Infof("[PIPELINE:bot] action: audio language menu by user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "")
 		lang := b.st.GetUserAudioLang(userID)
 		_ = b.api.Edit(chatID, msgID, audioLangText(lang), audioLangKB(lang))
 	case data == cbMediaMode:
+		b.log.Infof("[PIPELINE:bot] action: media mode menu by user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "")
 		_ = b.api.Edit(chatID, msgID, mediaModeText(b.st.GetUserMediaMode(userID)), mediaModeKB(b.st.GetUserMediaMode(userID)))
 	case strings.HasPrefix(data, "mode:"):
 		chosen := strings.TrimPrefix(data, "mode:")
+		b.log.Infof("[PIPELINE:bot] action: set media mode %q by user=%d chat=%d", chosen, userID, chatID)
 		if err := b.st.SetUserMediaMode(userID, chosen); err != nil {
 			b.log.Warnf("set media mode %d: %v", userID, err)
 		}
@@ -473,25 +485,31 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 		_ = b.api.Edit(chatID, msgID, mediaModeText(norm), mediaModeKB(norm))
 	case strings.HasPrefix(data, "lang:"):
 		chosen := strings.TrimPrefix(data, "lang:")
+		b.log.Infof("[PIPELINE:bot] action: set audio lang %q by user=%d chat=%d", chosen, userID, chatID)
 		norm := engine.NormalizeAudioLang(chosen)
 		b.st.SetUserAudioLang(userID, norm)
 		_ = b.api.AnswerCallback(q.ID, "Saved: "+engine.AudioLangDisplayName(norm))
 		_ = b.api.Edit(chatID, msgID, audioLangText(norm), audioLangKB(norm))
 	case data == cbLaunch:
+		b.log.Infof("[PIPELINE:bot] action: launch session confirmed by user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "launching…")
 		b.launch(chatID, userID)
 	case data == cbCancel:
+		b.log.Infof("[PIPELINE:bot] action: cancel flow by user=%d chat=%d", userID, chatID)
 		b.clearFlow(userID)
 		_ = b.api.AnswerCallback(q.ID, "cancelled")
 		_ = b.api.Edit(chatID, msgID, "✖️ Cancelled.", mainMenuKB())
 	case data == cbAgain:
+		b.log.Infof("[PIPELINE:bot] action: restart wizard by user=%d chat=%d", userID, chatID)
 		b.setFlow(userID, &flow{step: stepMeet})
 		_ = b.api.AnswerCallback(q.ID, "")
 		_ = b.api.Edit(chatID, msgID, flowText(stepMeet, ""), cancelKB())
 	case strings.HasPrefix(data, "ses:"):
 		id := strings.TrimPrefix(data, "ses:")
+		b.log.Infof("[PIPELINE:bot] action: open session card session=%s by user=%d chat=%d", id, userID, chatID)
 		s := b.eng.Get(engine.SessionID(id))
 		if s == nil {
+			b.log.Warnf("[PIPELINE:bot] open session card: session %s not found", id)
 			_ = b.api.AnswerCallback(q.ID, "session not found")
 			return
 		}
@@ -565,13 +583,16 @@ func (b *Bot) seekAction(s *engine.Session, action string) (error, string) {
 func (b *Bot) handleAction(chatID int64, msgID int, q *tgbotapi.CallbackQuery, data string) {
 	parts := strings.SplitN(strings.TrimPrefix(data, "act:"), ":", 2)
 	if len(parts) != 2 {
+		b.log.Warnf("[PIPELINE:bot] invalid action callback data=%q from user=%d", data, q.From.ID)
 		_ = b.api.AnswerCallback(q.ID, "bad action")
 		return
 	}
 	id := engine.SessionID(parts[0])
 	action := parts[1]
+	b.log.Infof("[PIPELINE:bot] session control button pressed: session=%s action=%q user=%d chat=%d", id, action, q.From.ID, chatID)
 	s := b.eng.Get(id)
 	if s == nil {
+		b.log.Warnf("[PIPELINE:bot] session control: session=%s not found", id)
 		_ = b.api.AnswerCallback(q.ID, "session not found")
 		_ = b.api.Edit(chatID, msgID, "This session is gone.", mainMenuKB())
 		return
@@ -649,8 +670,10 @@ func (b *Bot) handleAction(chatID int64, msgID int, q *tgbotapi.CallbackQuery, d
 		return
 	}
 	if err != nil {
+		b.log.Warnf("[PIPELINE:bot] session control failed: session=%s action=%q user=%d err=%v", id, action, q.From.ID, err)
 		_ = b.api.AnswerCallback(q.ID, "error: "+truncate(err.Error(), 60))
 	} else {
+		b.log.Infof("[PIPELINE:bot] session control succeeded: session=%s action=%q user=%d toast=%q", id, action, q.From.ID, toast)
 		_ = b.api.AnswerCallback(q.ID, toast)
 	}
 	if s == nil {
@@ -784,13 +807,16 @@ func extractURLs(text string) []string {
 func (b *Bot) handleQueueCallback(chatID, userID int64, msgID int, q *tgbotapi.CallbackQuery, data string) {
 	parts := strings.Split(data, ":")
 	if len(parts) < 3 {
+		b.log.Warnf("[PIPELINE:queue] invalid queue callback data=%q from user=%d", data, userID)
 		_ = b.api.AnswerCallback(q.ID, "bad queue action")
 		return
 	}
 	sub := parts[1]
 	sid := parts[2]
+	b.log.Infof("[PIPELINE:queue] queue callback: session=%s sub=%q data=%q user=%d chat=%d", sid, sub, data, userID, chatID)
 	s := b.eng.Get(engine.SessionID(sid))
 	if s == nil {
+		b.log.Warnf("[PIPELINE:queue] queue action on expired/missing session=%s by user=%d", sid, userID)
 		_ = b.api.AnswerCallback(q.ID, "session not found")
 		_ = b.api.Edit(chatID, msgID, "This session has ended.", mainMenuKB())
 		return
@@ -812,7 +838,9 @@ func (b *Bot) handleQueueCallback(chatID, userID int64, msgID int, q *tgbotapi.C
 			}
 		}
 		if idx >= 0 {
+			b.log.Infof("[PIPELINE:queue] jump to item %s (index %d/%d) in session %s by user %d", itemID, idx+1, len(items), sid, userID)
 			if err := s.JumpTo(idx); err != nil {
+				b.log.Warnf("[PIPELINE:queue] jump failed: %v", err)
 				_ = b.api.AnswerCallback(q.ID, "jump failed: "+err.Error())
 			} else {
 				_ = b.api.AnswerCallback(q.ID, fmt.Sprintf("switched to item %d", idx+1))
@@ -822,10 +850,12 @@ func (b *Bot) handleQueueCallback(chatID, userID int64, msgID int, q *tgbotapi.C
 		_ = b.api.Edit(chatID, msgID, sessionCardText(st), sessionCardKB(st))
 
 	case "clear_confirm":
+		b.log.Infof("[PIPELINE:queue] clear_confirm prompted for session %s by user %d", sid, userID)
 		_ = b.api.AnswerCallback(q.ID, "")
 		_ = b.api.Edit(chatID, msgID, fmt.Sprintf("⚠️ <b>Clear Upcoming Queue?</b>\n\nThis will remove all upcoming items after the currently playing item from session <code>%s</code>.", sid), queueClearConfirmKB(sid))
 
 	case "do_clear":
+		b.log.Infof("[PIPELINE:queue] do_clear executed for session %s by user %d", sid, userID)
 		_ = s.ClearUpcoming()
 		_ = b.api.AnswerCallback(q.ID, "upcoming queue cleared")
 		items, curIdx = s.QueueSnapshot()
@@ -837,7 +867,21 @@ func (b *Bot) handleQueueCallback(chatID, userID int64, msgID int, q *tgbotapi.C
 		st = s.Snapshot()
 		_ = b.api.Edit(chatID, msgID, queueViewText(st, items, curIdx), queueViewKB(st, items, curIdx))
 
+	case "do_clear_all":
+		b.log.Infof("[PIPELINE:queue] do_clear_all executed for session %s by user %d", sid, userID)
+		_ = s.ClearAllExceptCurrent()
+		_ = b.api.AnswerCallback(q.ID, "cleared all except current")
+		items, curIdx = s.QueueSnapshot()
+		var qRecs []store.QueueItemRecord
+		for _, it := range items {
+			qRecs = append(qRecs, store.QueueItemRecord{ID: it.ID, URL: it.URL, Title: it.Title})
+		}
+		b.st.UpdateQueue(sid, qRecs, curIdx)
+		st = s.Snapshot()
+		_ = b.api.Edit(chatID, msgID, queueViewText(st, items, curIdx), queueViewKB(st, items, curIdx))
+
 	case "rm_menu":
+		b.log.Infof("[PIPELINE:queue] rm_menu opened for session %s by user %d", sid, userID)
 		_ = b.api.AnswerCallback(q.ID, "")
 		_ = b.api.Edit(chatID, msgID, "❌ <b>Select an upcoming item to remove:</b>", queueRemoveMenuKB(sid, items, curIdx))
 
@@ -846,6 +890,7 @@ func (b *Bot) handleQueueCallback(chatID, userID int64, msgID int, q *tgbotapi.C
 			return
 		}
 		itemID := parts[3]
+		b.log.Infof("[PIPELINE:queue] remove item %s from session %s by user %d", itemID, sid, userID)
 		_ = s.RemoveQueueItem(itemID)
 		_ = b.api.AnswerCallback(q.ID, "item removed")
 		items, curIdx = s.QueueSnapshot()

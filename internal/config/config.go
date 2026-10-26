@@ -76,6 +76,12 @@ type DownloadConfig struct {
 // TelegramConfig holds bot token and access control.
 type TelegramConfig struct {
 	Token string `yaml:"token"`
+	// APIEndpoint allows using a local Telegram Bot API server (e.g. "http://localhost:8081/bot%s/%s")
+	// for handling files up to 2000 MiB. Empty uses the official cloud endpoint.
+	APIEndpoint string `yaml:"api_endpoint"`
+	// MaxFileSizeMB overrides the maximum allowed file size for Telegram attachments (in MiB).
+	// Default is 20 MiB for official cloud Telegram Bot API, up to 2000 MiB for local Bot API servers.
+	MaxFileSizeMB int `yaml:"max_file_size_mb"`
 	// Admins is the allow-list of Telegram user IDs. Access is fail-closed:
 	// an empty list means nobody can control the bot (except when
 	// FirstStartClaimsAdmin is enabled and no admin has claimed the bot yet).

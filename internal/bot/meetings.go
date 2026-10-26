@@ -165,6 +165,7 @@ func hb(err error) string {
 
 // handleMeetCallback routes the saved-meetings callbacks.
 func (b *Bot) handleMeetCallback(chatID, userID int64, msgID int, data string) {
+	b.log.Infof("[PIPELINE:meetings] callback data=%q from user=%d chat=%d msg=%d", data, userID, chatID, msgID)
 	switch {
 	case data == cbMeetNew:
 		_ = b.api.AnswerCallback("", "enter a meet link")

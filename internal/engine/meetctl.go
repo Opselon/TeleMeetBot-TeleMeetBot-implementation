@@ -118,19 +118,22 @@ func (s *Session) meetStage() (string, string) {
 func (s *Session) fillGuestName() bool {
 	meet := s.meetTab()
 	if meet == nil {
+		s.log.Debugf("[PIPELINE:meet] session %s: fillGuestName skipped: meetTab is nil", s.ID)
 		return false
 	}
 	name, _ := json.Marshal(s.mgr.meetCfg.GuestName)
 	js := fmt.Sprintf(`() => {
   const NAME = %s;
-  if (!NAME) return false;
+  if (!NAME) return "no_name";
   const inputs = Array.from(document.querySelectorAll('input'));
+  let matched = 0;
   for (const el of inputs) {
     const r = el.getBoundingClientRect();
     if (r.width < 5 || r.height < 5) continue;
     const ph = ((el.getAttribute('placeholder') || "") + " " + (el.getAttribute('aria-label') || "")).toLowerCase();
     if (!(ph.includes("name") || el.value === "")) continue;
-    if (el.value === NAME) return true;
+    matched++;
+    if (el.value === NAME) return "already_set";
     el.focus();
     const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
     if (setter) {
@@ -141,21 +144,29 @@ func (s *Session) fillGuestName() bool {
     el.dispatchEvent(new Event('input', {bubbles: true}));
     el.dispatchEvent(new Event('change', {bubbles: true}));
     el.blur();
-    return true;
+    return "filled";
   }
-  return false;
+  return "not_found";
 }`, name)
 	res, err := meet.Timeout(4 * time.Second).Eval(js)
 	if err != nil {
+		s.log.Warnf("[PIPELINE:meet] session %s: fillGuestName eval error: %v", s.ID, err)
 		return false
 	}
-	return res.Value.Bool()
+	status := res.Value.Str()
+	if status == "filled" || status == "already_set" {
+		s.log.Infof("[PIPELINE:meet] session %s: fillGuestName status=%s name=%q", s.ID, status, s.mgr.meetCfg.GuestName)
+		return true
+	}
+	s.log.Debugf("[PIPELINE:meet] session %s: fillGuestName status=%s name=%q", s.ID, status, s.mgr.meetCfg.GuestName)
+	return false
 }
 
 // clickJoin clicks "Join now" / "Ask to join" on the prejoin screen.
 func (s *Session) clickJoin() (bool, string) {
 	meet := s.meetTab()
 	if meet == nil {
+		s.log.Debugf("[PIPELINE:meet] session %s: clickJoin skipped: meetTab is nil", s.ID)
 		return false, ""
 	}
 	res, err := meet.Timeout(4 * time.Second).Eval(`() => {
@@ -179,9 +190,15 @@ func (s *Session) clickJoin() (bool, string) {
   return norm((best.innerText || best.textContent || "")).slice(0, 40);
 }`)
 	if err != nil {
+		s.log.Warnf("[PIPELINE:meet] session %s: clickJoin eval error: %v", s.ID, err)
 		return false, ""
 	}
 	label := strings.TrimSpace(res.Value.Str())
+	if label != "" {
+		s.log.Infof("[PIPELINE:meet] session %s: clickJoin clicked %q", s.ID, label)
+	} else {
+		s.log.Debugf("[PIPELINE:meet] session %s: clickJoin found no active join button", s.ID)
+	}
 	return label != "", label
 }
 

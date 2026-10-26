@@ -84,7 +84,7 @@ const COMMAND_DOCS = {
 };
 const flowsGo = read('internal/bot/flows.go');
 const INLINE_ACTIONS = new Set([
-  'pause', 'resume', 'mute', 'unmute', 'voldown', 'volup', 'back10', 'fwd10', 'back30', 'fwd30', 'back60', 'fwd60', 'restart', 'refresh', 'stop', 'next', 'prev', 'queue', 'jump', 'clear_confirm', 'do_clear', 'rm_menu', 'rm',
+  'pause', 'resume', 'mute', 'unmute', 'voldown', 'volup', 'back10', 'fwd10', 'back30', 'fwd30', 'back60', 'fwd60', 'restart', 'refresh', 'stop', 'next', 'prev', 'queue', 'jump', 'clear_confirm', 'do_clear', 'do_clear_all', 'rm_menu', 'rm',
 ]);
 const commands = [];
 for (const m of flowsGo.matchAll(/case\s+"([a-z0-9]+)"(?:,\s*"([a-z0-9]+)")?:/g)) {
@@ -461,7 +461,7 @@ for (const file of noteFiles.sort()) {
     raw
       .split('\n')
       .find((l) => l.trim() && !l.startsWith('#') && !l.startsWith('```')) || '';
-  const summary = summaryLine.replace(/\*\*/g, '').slice(0, 220);
+  const summary = summaryLine.replace(/\*\*/g, '').slice(0, 180);
   releaseNotes.push({ tag, title, publishedAt: meta?.publishedAt || null, url: meta?.url || null });
   const frontmatter = [
     '---',

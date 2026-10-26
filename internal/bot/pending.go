@@ -234,13 +234,16 @@ func (b *Bot) pendingKB(items []*pendingMedia, live []engine.Status) *tgbotapi.I
 // handlePendingCallback dispatches actions from the staged-media card.
 func (b *Bot) handlePendingCallback(chatID, userID int64, msgID int, data string) {
 	items := b.getPending(userID)
+	b.log.Infof("[PIPELINE:pending] staged media callback: data=%q user=%d chat=%d (staged_items=%d)", data, userID, chatID, len(items))
 	if len(items) == 0 {
+		b.log.Infof("[PIPELINE:pending] staged media callback on empty staged list from user=%d", userID)
 		_ = b.api.Edit(chatID, msgID, "⌛️ No files are staged. Forward audio/video again.", mainMenuKB())
 		return
 	}
 
 	switch {
 	case data == cbPendingStart:
+		b.log.Infof("[PIPELINE:pending] starting flow with %d staged item(s) for user=%d", len(items), userID)
 		// Advance to meet link picker with all staged files
 		first := items[0]
 		f := &flow{step: stepMeet, media: first.URL, mediaID: first.EntryID}
@@ -252,8 +255,10 @@ func (b *Bot) handlePendingCallback(chatID, userID int64, msgID int, data string
 
 	case strings.HasPrefix(data, cbPendingEnqueue):
 		sid := strings.TrimPrefix(data, cbPendingEnqueue)
+		b.log.Infof("[PIPELINE:pending] enqueue %d staged item(s) to session %s by user=%d", len(items), sid, userID)
 		s := b.eng.Get(engine.SessionID(sid))
 		if s == nil {
+			b.log.Warnf("[PIPELINE:pending] enqueue staged items: session %s not found", sid)
 			_ = b.api.Edit(chatID, msgID, "This session is gone — cannot enqueue.", mainMenuKB())
 			return
 		}
@@ -263,17 +268,21 @@ func (b *Bot) handlePendingCallback(chatID, userID int64, msgID int, data string
 		}
 		added, err := s.Enqueue(urls...)
 		if err != nil {
+			b.log.Warnf("[PIPELINE:pending] enqueue staged items to %s failed: %v", sid, err)
 			_ = b.api.Edit(chatID, msgID, "🔴 <b>Enqueue failed</b>\n\n"+esc(truncate(err.Error(), 300)), b.pendingKB(items, b.statuses()))
 			return
 		}
+		b.log.Infof("[PIPELINE:pending] successfully enqueued %d item(s) to session %s", len(added), sid)
 		b.handoffAllPending(userID)
 		st := s.Snapshot()
 		_ = b.api.Edit(chatID, msgID, fmt.Sprintf("✅ Added %d item(s) to queue of session <code>%s</code> (Total: %d)", len(added), sid, st.QueueLength), sessionCardKB(st))
 
 	case strings.HasPrefix(data, cbPendingSwitch):
 		sid := strings.TrimPrefix(data, cbPendingSwitch)
+		b.log.Infof("[PIPELINE:pending] switch session %s to %d staged item(s) by user=%d", sid, len(items), userID)
 		s := b.eng.Get(engine.SessionID(sid))
 		if s == nil {
+			b.log.Warnf("[PIPELINE:pending] switch session to staged items: session %s not found", sid)
 			_ = b.api.Edit(chatID, msgID, "This session is gone — nothing to switch.", mainMenuKB())
 			return
 		}
@@ -295,6 +304,7 @@ func (b *Bot) handlePendingCallback(chatID, userID int64, msgID int, data string
 		_ = b.api.Edit(chatID, msgID, sessionCardText(st), sessionCardKB(st))
 
 	case data == cbPendingDrop:
+		b.log.Infof("[PIPELINE:pending] user=%d requested drop of staged files", userID)
 		n := b.dropPending(userID, "user discarded staged queue")
 		_ = b.api.Edit(chatID, msgID, fmt.Sprintf("🗑 Discarded %d staged file(s).", n), mainMenuKB())
 

@@ -26,15 +26,27 @@ type API interface {
 type tgAPI struct {
 	api      *tgbotapi.BotAPI
 	username string
+	endpoint string
 }
 
 // NewTelegramAPI validates the token and returns a long-polling API client.
 func NewTelegramAPI(token string) (API, error) {
-	api, err := tgbotapi.NewBotAPI(token)
+	return NewTelegramAPIWithEndpoint(token, "")
+}
+
+// NewTelegramAPIWithEndpoint supports standard cloud or custom local Bot API endpoints.
+func NewTelegramAPIWithEndpoint(token, endpoint string) (API, error) {
+	var api *tgbotapi.BotAPI
+	var err error
+	if endpoint != "" {
+		api, err = tgbotapi.NewBotAPIWithAPIEndpoint(token, endpoint)
+	} else {
+		api, err = tgbotapi.NewBotAPI(token)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("telegram auth failed: %w", err)
 	}
-	return &tgAPI{api: api, username: api.Self.UserName}, nil
+	return &tgAPI{api: api, username: api.Self.UserName, endpoint: endpoint}, nil
 }
 
 // Send posts an HTML message and returns its message id.
@@ -86,6 +98,11 @@ func (t *tgAPI) File(fileID string) (*tgbotapi.File, error) {
 // FileDirectURL builds the download URL for a FilePath. The link is signed
 // and short-lived; callers must use it immediately and never log it.
 func (t *tgAPI) FileDirectURL(filePath string) string {
+	if t.endpoint != "" {
+		base := strings.Replace(t.endpoint, "/bot%s/%s", "", 1)
+		base = strings.TrimSuffix(base, "/")
+		return fmt.Sprintf("%s/file/bot%s/%s", base, t.api.Token, filePath)
+	}
 	return fmt.Sprintf("https://api.telegram.org/file/bot%s/%s", t.api.Token, filePath)
 }
 

@@ -338,13 +338,21 @@ func (s *Session) RemoveQueueItem(id string) error {
 // ClearUpcoming removes all items after the currently playing item from the queue.
 func (s *Session) ClearUpcoming() error {
 	s.queueMu.Lock()
-	if s.queueIdx < 0 || s.queueIdx+1 >= len(s.queue) {
+	if len(s.queue) == 0 {
 		s.queueMu.Unlock()
 		return nil
 	}
 
-	upcoming := s.queue[s.queueIdx+1:]
-	s.queue = s.queue[:s.queueIdx+1]
+	var upcoming []QueueItem
+	if s.queueIdx < 0 {
+		if len(s.queue) > 1 {
+			upcoming = s.queue[1:]
+			s.queue = s.queue[:1]
+		}
+	} else if s.queueIdx+1 < len(s.queue) {
+		upcoming = s.queue[s.queueIdx+1:]
+		s.queue = s.queue[:s.queueIdx+1]
+	}
 	s.queueMu.Unlock()
 
 	for _, it := range upcoming {
@@ -353,6 +361,58 @@ func (s *Session) ClearUpcoming() error {
 
 	s.logger().Infof("[PIPELINE:queue] session %s: cleared %d upcoming queue items", s.ID, len(upcoming))
 	s.emit(EventState, "upcoming queue cleared")
+	return nil
+}
+
+// ClearAllExceptCurrent keeps only the currently playing item and discards all others.
+func (s *Session) ClearAllExceptCurrent() error {
+	s.queueMu.Lock()
+	if len(s.queue) <= 1 {
+		s.queueMu.Unlock()
+		return nil
+	}
+
+	var removed []QueueItem
+	curIdx := s.queueIdx
+	if curIdx >= 0 && curIdx < len(s.queue) {
+		current := s.queue[curIdx]
+		for i, it := range s.queue {
+			if i != curIdx {
+				removed = append(removed, it)
+			}
+		}
+		s.queue = []QueueItem{current}
+		s.queueIdx = 0
+	} else {
+		removed = s.queue[1:]
+		s.queue = s.queue[:1]
+		s.queueIdx = 0
+	}
+	s.queueMu.Unlock()
+
+	for _, it := range removed {
+		s.releaseQueueLocal(it.URL)
+	}
+
+	s.logger().Infof("[PIPELINE:queue] session %s: cleared %d items (kept active track)", s.ID, len(removed))
+	s.emit(EventState, "playlist cleared (kept active track)")
+	return nil
+}
+
+// ClearEverything completely clears the playlist queue and releases all leases.
+func (s *Session) ClearEverything() error {
+	s.queueMu.Lock()
+	items := s.queue
+	s.queue = nil
+	s.queueIdx = -1
+	s.queueMu.Unlock()
+
+	for _, it := range items {
+		s.releaseQueueLocal(it.URL)
+	}
+
+	s.logger().Infof("[PIPELINE:queue] session %s: completely cleared %d queue items", s.ID, len(items))
+	s.emit(EventState, "playlist completely cleared")
 	return nil
 }
 
