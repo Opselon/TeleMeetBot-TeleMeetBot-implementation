@@ -270,8 +270,8 @@ jobs:
           }
           check linux-amd64  telemeetbot-linux-amd64.tar.gz
           check linux-arm64  telemeetbot-linux-arm64.tar.gz
-          check linux-arm-6  telemeetbot-linux-armv6.tar.gz
-          check linux-arm-7  telemeetbot-linux-armv7.tar.gz
+          check linux-arm-6  telemeetbot-linux-arm6.tar.gz
+          check linux-arm-7  telemeetbot-linux-arm7.tar.gz
           check linux-386    telemeetbot-linux-386.tar.gz
           check darwin-amd64 telemeetbot-darwin-amd64.tar.gz
           check darwin-arm64 telemeetbot-darwin-arm64.tar.gz

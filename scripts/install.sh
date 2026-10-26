@@ -63,8 +63,10 @@ esac
 case "$(uname -m)" in
   x86_64|amd64)  ARCH=amd64 ;;
   aarch64|arm64) ARCH=arm64 ;;
-  armv7l)        ARCH=armv7 ;;
-  armv6l)        ARCH=armv6 ;;
+  # Release archives are named arm6/arm7 (they carry GOARM verbatim, not the
+  # uname -m spelling), so map the kernel name onto the archive name.
+  armv7l)        ARCH=arm7 ;;
+  armv6l)        ARCH=arm6 ;;
   i386|i686)     ARCH=386 ;;
   *) die "unsupported architecture: $(uname -m)" ;;
 esac
