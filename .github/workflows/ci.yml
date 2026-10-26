@@ -117,6 +117,9 @@ jobs:
           cp scripts/install.sh "$stage"/
           tar -C "$stage" -czf /tmp/rel/telemeetbot-linux-amd64.tar.gz .
           ( cd /tmp/rel && sha256sum telemeetbot-linux-amd64.tar.gz > SHA256SUMS )
+          # The piped one-liner below fetches install.sh over HTTP like a user
+          # would, so the served directory needs the installer itself too.
+          cp scripts/install.sh /tmp/rel/install.sh
 
           python3 -m http.server 18099 --directory /tmp/rel >/dev/null 2>&1 &
           server=$!
@@ -203,6 +206,8 @@ jobs:
           mkdir -p /tmp/rel-mismatch
           tar -C "$stage2" -czf /tmp/rel-mismatch/telemeetbot-linux-amd64.tar.gz .
           ( cd /tmp/rel-mismatch && sha256sum telemeetbot-linux-amd64.tar.gz > SHA256SUMS )
+          # The piped one-liner fetches install.sh from this mirror too.
+          cp scripts/install.sh /tmp/rel-mismatch/install.sh
           python3 -m http.server 18098 --directory /tmp/rel-mismatch >/dev/null 2>&1 &
           server2=$!
           trap 'kill $server 2>/dev/null || true; kill $server2 2>/dev/null || true' EXIT
