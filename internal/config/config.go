@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 )
@@ -30,6 +31,9 @@ type Config struct {
 
 	// path is where the config was loaded from / should be saved to.
 	path string
+	// mu guards the few fields the running bot mutates (the admin
+	// allow-list). It is unexported and therefore invisible to YAML.
+	mu sync.RWMutex
 }
 
 // DownloadConfig controls the Download & Stream feature: fetching media to
@@ -375,6 +379,13 @@ func (c *Config) normalize() {
 
 // Save writes the config back to disk (0600, atomic replace).
 func (c *Config) Save(path string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.saveLocked(path)
+}
+
+// saveLocked is Save without the mutex.
+func (c *Config) saveLocked(path string) error {
 	if path == "" {
 		path = c.path
 	}
@@ -484,6 +495,8 @@ func (c *Config) Validate() error {
 
 // IsAdmin reports whether a Telegram user may control the bot.
 func (c *Config) IsAdmin(userID int64) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 	for _, id := range c.Telegram.Admins {
 		if id == userID {
 			return true
@@ -492,9 +505,20 @@ func (c *Config) IsAdmin(userID int64) bool {
 	return false
 }
 
+// AdminIDs returns a copy of the configured admin allow-list.
+func (c *Config) AdminIDs() []int64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make([]int64, len(c.Telegram.Admins))
+	copy(out, c.Telegram.Admins)
+	return out
+}
+
 // ClaimAdmin records userID as the only admin (first /start flow).
 // It returns true when the claim happened.
 func (c *Config) ClaimAdmin(userID int64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if len(c.Telegram.Admins) > 0 || !c.Telegram.FirstStartClaimsAdmin || userID <= 0 {
 		return false
 	}
@@ -510,6 +534,48 @@ func (c *Config) StateFile() string {
 // MeetingsFile returns the SQLite database path for saved meetings.
 func (c *Config) MeetingsFile() string {
 	return filepath.Join(c.Paths.DataDir, "meetings.db")
+}
+
+// PlaylistsFile returns the SQLite database path for user playlists. It is a
+// separate database from meetings.db on purpose: a damaged playlist library
+// can be reset without touching saved meeting links.
+func (c *Config) PlaylistsFile() string {
+	return filepath.Join(c.Paths.DataDir, "playlists.db")
+}
+
+// AddAdmin appends a Telegram user id to the admin allow-list. It returns
+// false when the id is invalid or already present.
+func (c *Config) AddAdmin(userID int64) bool {
+	if userID <= 0 {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, id := range c.Telegram.Admins {
+		if id == userID {
+			return false
+		}
+	}
+	c.Telegram.Admins = append(c.Telegram.Admins, userID)
+	return true
+}
+
+// RemoveAdmin drops a Telegram user id from the allow-list. The last admin
+// cannot be removed: that would lock every operator out of the bot.
+func (c *Config) RemoveAdmin(userID int64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.Telegram.Admins) <= 1 {
+		return false
+	}
+	for i, id := range c.Telegram.Admins {
+		if id != userID {
+			continue
+		}
+		c.Telegram.Admins = append(c.Telegram.Admins[:i], c.Telegram.Admins[i+1:]...)
+		return true
+	}
+	return false
 }
 
 // TokenPreview redacts the bot token for logs and UI.

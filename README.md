@@ -195,6 +195,9 @@ and keeps it live.
 | `/cancel` | abort an open wizard |
 | `/id` | show your Telegram user id |
 | `/ping` | liveness probe |
+| `/playlists` | open your persistent playlist library |
+| `/queue [id]` | open the queue of a session |
+| `/manage` | open the management console (aliases: `/admin`, `/dashboard`) |
 
 Per-session **inline card** (`act:<id>:…`):
 
@@ -208,6 +211,24 @@ Per-session **inline card** (`act:<id>:…`):
 
 The card header includes state emoji: 🟦 Guest · 🟪 Harness · 🟫 Streaming · 🟨 Paused ·
 🟩 Onboard · ⚪️ Ended · 🔴 Error (see `internal/bot/views.go` for exact scheme).
+
+### Playlists and the management console
+
+The dashboard also has two larger surfaces:
+
+- **📚 Playlists** — a persistent per-user library of media links. Playlists can
+  be renamed, reordered, duplicated, exported, imported, launched as a new
+  session, or appended to a live session queue. They live in their own
+  `playlists.db` and survive restarts.
+- **🎛 Manage** — one console for users, admins, storage, maintenance,
+  backups and broadcast. Admins can be added or removed at runtime; backups are
+  consistent SQLite snapshots written with `VACUUM INTO`.
+
+Every session card gained **🎛 Tools** (shuffle/sort/reorder upcoming items,
+clear options) and **💾 Save queue** (copy the live queue into a playlist).
+
+See [docs/management.md](docs/management.md) for screens, limits, import
+format, backup layout and recovery notes.
 
 ---
 

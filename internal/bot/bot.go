@@ -96,14 +96,26 @@ type Bot struct {
 	// before a wizard was open). Staged files are leased so the janitor
 	// cannot reclaim them while the user decides what to do with them.
 	pending map[int64][]*pendingMedia
+	// pl is the persistent playlist library. Nil means the feature is
+	// unavailable (an old data directory or a store that failed to open);
+	// the dashboard then hides the playlist entry point.
+	pl Playlists
+}
+
+// Option customizes a Bot after the required dependencies are wired.
+type Option func(*Bot)
+
+// WithPlaylists attaches the persistent playlist library.
+func WithPlaylists(pl Playlists) Option {
+	return func(b *Bot) { b.pl = pl }
 }
 
 // New wires a Telegram bot. (api can be a fake in tests.)
-func New(api API, cfg *config.Config, eng Engine, st *store.Store, ms Meetings, log Logger, cfgPath, browserPath, browserErr string) *Bot {
+func New(api API, cfg *config.Config, eng Engine, st *store.Store, ms Meetings, log Logger, cfgPath, browserPath, browserErr string, opts ...Option) *Bot {
 	if log == nil {
 		log = noopLogger{}
 	}
-	return &Bot{
+	b := &Bot{
 		api:          api,
 		cfg:          cfg,
 		eng:          eng,
@@ -120,6 +132,12 @@ func New(api API, cfg *config.Config, eng Engine, st *store.Store, ms Meetings, 
 		menus:        map[int64]int{},
 		pending:      map[int64][]*pendingMedia{},
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(b)
+		}
+	}
+	return b
 }
 
 // Run consumes Telegram updates until the context is cancelled.
@@ -312,7 +330,7 @@ func (b *Bot) RefreshLoop(ctx context.Context) { b.refreshLoop(ctx, 3*time.Secon
 
 // Broadcast sends a message to every admin chat (private chats share the user id).
 func (b *Bot) Broadcast(text string) {
-	for _, id := range b.cfg.Telegram.Admins {
+	for _, id := range b.cfg.AdminIDs() {
 		if _, err := b.api.Send(id, text, nil); err != nil {
 			b.log.Warnf("broadcast to %d: %v", id, err)
 		}

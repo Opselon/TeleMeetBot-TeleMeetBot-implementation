@@ -26,6 +26,19 @@ const (
 	stepMeetPick
 	// stepMeetRename waits for the text message that renames a saved meeting.
 	stepMeetRename
+	// Playlist wizard steps: naming a new playlist, renaming/describing an
+	// existing one, appending links and importing a bulk list.
+	stepPlaylistName
+	stepPlaylistRename
+	stepPlaylistDesc
+	stepPlaylistAdd
+	stepPlaylistImport
+	// stepPlaylistPlayMeet waits for the Meet link that will receive a whole
+	// playlist as its initial queue.
+	stepPlaylistPlayMeet
+	// Admin-console text steps: adding an admin id and composing a broadcast.
+	stepAdminAdd
+	stepAdminBroadcast
 )
 
 // flowTimeout drops half-finished wizards after inactivity.
@@ -50,6 +63,16 @@ type flow struct {
 	// queue holds any additional media URLs to populate the playlist.
 	queue   []string
 	updated time.Time
+	// playlistID scopes a playlist wizard step to one library entry.
+	playlistID int64
+	// adminID scopes an admin-console text step (remove/select).
+	adminID int64
+	// parent remembers which screen a text step should return to
+	// ("playlist" or "manage") so cancel goes back where the user was.
+	parent string
+	// payload is the composed text of a management broadcast. It is kept in
+	// the flow between the preview and the send confirmation.
+	payload string
 }
 
 // getFlow returns the user's pending wizard.
@@ -126,6 +149,12 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 			b.startFlow(chatID, userID, m.CommandArguments())
 		case "sessions":
 			b.sendSessions(chatID)
+		case "playlists", "playlist", "library", "pl":
+			b.sendPlaylists(chatID, userID)
+		case "manage", "admin", "dashboard":
+			b.sendManageHome(chatID, userID)
+		case "queue":
+			b.queueCommand(chatID, m.CommandArguments())
 		case "audiotrack", "audiolang", "lang", "language":
 			lang := b.st.GetUserAudioLang(userID)
 			b.sendText(chatID, audioLangText(lang), audioLangKB(lang))
@@ -199,6 +228,13 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 	}
 	// The saved-meeting rename step consumes the next text message.
 	if b.tryMeetingsInput(chatID, userID, f, text) {
+		return
+	}
+	// Playlist and admin-console text steps consume their own messages.
+	if b.tryPlaylistInput(chatID, userID, f, text) {
+		return
+	}
+	if b.tryManageInput(chatID, userID, f, text) {
 		return
 	}
 	b.stepInput(chatID, userID, f, text)
@@ -453,6 +489,13 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 		b.log.Infof("[PIPELINE:bot] action: view sessions by user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "")
 		_ = b.api.Edit(chatID, msgID, sessionsText(b.statuses()), sessionsKB(b.statuses()))
+	case data == cbPlaylists:
+		b.log.Infof("[PIPELINE:bot] action: open playlists by user=%d chat=%d", userID, chatID)
+		_ = b.api.AnswerCallback(q.ID, "")
+		b.showPlaylistList(chatID, userID, msgID, 0)
+	case data == cbManage:
+		b.log.Infof("[PIPELINE:bot] action: open management console by user=%d chat=%d", userID, chatID)
+		b.handleManageCallback(chatID, userID, msgID, q, data)
 	case data == cbHealth:
 		b.log.Infof("[PIPELINE:bot] action: view health by user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "")
@@ -526,6 +569,12 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 	case strings.HasPrefix(data, cbMeetPick) || strings.HasPrefix(data, cbMeetDelete) ||
 		strings.HasPrefix(data, cbMeetRename) || data == cbMeetNew || data == cbMeetList || data == cbMeetDone:
 		b.handleMeetCallback(chatID, userID, msgID, data)
+	case strings.HasPrefix(data, cbPlaylistMeet):
+		b.handlePlaylistMeetCallback(chatID, userID, msgID, q, data)
+	case strings.HasPrefix(data, cbPlaylist):
+		b.handlePlaylistCallback(chatID, userID, msgID, q, data)
+	case strings.HasPrefix(data, cbManage):
+		b.handleManageCallback(chatID, userID, msgID, q, data)
 	default:
 		_ = b.api.AnswerCallback(q.ID, "unknown action")
 	}
@@ -606,6 +655,12 @@ func (b *Bot) handleAction(chatID int64, msgID int, q *tgbotapi.CallbackQuery, d
 		b.setFlow(userID, &flow{step: stepSwitchMedia, sessionID: string(id), meet: st.MeetURL, media: st.MediaURL})
 		_ = b.api.AnswerCallback(q.ID, "send the new media link")
 		_ = b.api.Edit(chatID, msgID, switchMediaText(st), cancelKB())
+		return
+	}
+	if action == "tools" {
+		items, curIdx := s.QueueSnapshot()
+		_ = b.api.AnswerCallback(q.ID, "")
+		_ = b.api.Edit(chatID, msgID, playlistQueueToolsText(st, items, curIdx), playlistQueueToolsKB(st))
 		return
 	}
 	var err error
@@ -823,6 +878,12 @@ func (b *Bot) handleQueueCallback(chatID, userID int64, msgID int, q *tgbotapi.C
 	}
 	st := s.Snapshot()
 	items, curIdx := s.QueueSnapshot()
+
+	// Advanced queue tools (shuffle/sort/reorder/save) live in their own
+	// handler so the basic view stays readable.
+	if b.handleQueueToolsCallback(chatID, userID, msgID, q, sub, sid, parts) {
+		return
+	}
 
 	switch sub {
 	case "jump":
