@@ -25,10 +25,18 @@ import (
 // registered with the loopback file server so the media tab can play it from
 // an http(s) origin — exactly like a downloaded file.
 
-// tgMaxBytes is the Bot API ceiling for getFile+download: Telegram only serves
-// a file through the API when it is smaller than this. Bigger files must be
-// refused before any byte is moved rather than failing mid-download.
-const tgMaxBytes = 20 * 1024 * 1024 // 20 MB
+// tgDefaultCloudMaxBytes is the Bot API ceiling for getFile+download: Telegram only serves
+// a file through the cloud API when it is smaller than this. Bigger files must be
+// refused before any byte is moved rather than failing mid-download. When a local Bot API
+// server is configured, this can be extended up to 2000 MiB (2 GiB).
+const tgDefaultCloudMaxBytes = 20 * 1024 * 1024 // 20 MB
+
+func (b *Bot) tgMaxBytes() int64 {
+	if b.cfg != nil && b.cfg.Telegram.MaxFileSizeMB > 0 {
+		return int64(b.cfg.Telegram.MaxFileSizeMB) * 1024 * 1024
+	}
+	return tgDefaultCloudMaxBytes
+}
 
 // telegramKind decides whether a Telegram attachment is presentable media and
 // picks its media kind. MIME is authoritative when Telegram sends one; the
@@ -75,9 +83,10 @@ func (b *Bot) ingestTelegramFile(ctx context.Context, userID int64, m *tgbotapi.
 		return "", "", fmt.Errorf("unsupported file type %q (%s): only audio and video can be presented", fileName, mime)
 	}
 
-	if size > tgMaxBytes {
-		return "", "", fmt.Errorf("file is %s; Telegram only serves files under %s through the Bot API",
-			humanBytesLocal(size), humanBytesLocal(tgMaxBytes))
+	limit := b.tgMaxBytes()
+	if size > limit {
+		return "", "", fmt.Errorf("file is %s; Telegram only serves files under %s to bots. (Note: media must be retrieved from Telegram so Chromium can stream it in the meeting; no upload occurs). Tip: Send a direct video/web link instead, or configure a local Bot API server",
+			humanBytesLocal(size), humanBytesLocal(limit))
 	}
 	if max := b.maxDownloadBytes(); max > 0 && size > 0 && size > max {
 		return "", "", fmt.Errorf("file is %s; the configured download limit is %s", humanBytesLocal(size), humanBytesLocal(max))
@@ -250,8 +259,8 @@ func copyTgFile(ctx context.Context, api API, fileID, dest string, size int64) e
 	// ceiling, so a server that lies about Content-Length cannot fill the
 	// disk: the limit is enforced byte-by-byte, not trusted.
 	limit := size
-	if limit <= 0 || limit > tgMaxBytes {
-		limit = tgMaxBytes
+	if limit <= 0 {
+		limit = tgDefaultCloudMaxBytes
 	}
 	n, err := io.Copy(f, io.LimitReader(resp.Body, limit))
 	if err != nil {

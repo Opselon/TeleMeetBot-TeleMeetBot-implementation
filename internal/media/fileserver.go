@@ -65,6 +65,13 @@ func (f *fileServer) base() (string, error) {
 // serveFile streams one managed file. Content-Type comes from the manifest
 // (sniffed at fetch time); the response is not cacheable.
 func (f *fileServer) serveFile(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
 	token := strings.TrimPrefix(r.URL.Path, "/d/")
 	f.mu.RLock()
 	path, ok := f.tokens[token]

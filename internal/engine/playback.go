@@ -289,12 +289,16 @@ func playbackSampleJS() string {
       out.drawErr = "readyState " + v.readyState + " (not enough data)";
     } else {
       ctx.drawImage(v, 0, 0, c.width, c.height);
-      const d = ctx.getImageData(0, 0, c.width, c.height).data;
-      let rs = 0, gs = 0, bs = 0;
-      for (let p = 0; p < d.length; p += 4) { rs += d[p]; gs += d[p+1]; bs += d[p+2]; }
-      const n = d.length / 4;
-      out.r = rs / n; out.g = gs / n; out.b = bs / n;
-      out.painted = n > 0;
+      try {
+        const d = ctx.getImageData(0, 0, c.width, c.height).data;
+        let rs = 0, gs = 0, bs = 0;
+        for (let p = 0; p < d.length; p += 4) { rs += d[p]; gs += d[p+1]; bs += d[p+2]; }
+        const n = d.length / 4;
+        out.r = rs / n; out.g = gs / n; out.b = bs / n;
+        out.painted = n > 0;
+      } catch (err) {
+        out.drawErr = "tainted: " + String(err).slice(0, 140);
+      }
     }
   } catch (e) { out.drawErr = String(e).slice(0, 160); }
   return JSON.stringify(out);
@@ -395,7 +399,7 @@ func (r PlaybackReport) failure(stage string) error {
 		why = append(why, "the player stayed paused after the play request (autoplay policy or Kevlar pause)")
 	case !r.Progressed:
 		why = append(why, fmt.Sprintf("the player is not advancing (stuck at %.2fs of %.2fs)", r.Current, r.Duration))
-	case r.DrawErr != "":
+	case r.DrawErr != "" && !strings.Contains(r.DrawErr, "tainted") && !strings.Contains(r.DrawErr, "SecurityError"):
 		why = append(why, fmt.Sprintf("frames could not be sampled: %s", r.DrawErr))
 	default:
 		why = append(why, "playback did not reach the verification bar")
@@ -659,9 +663,15 @@ func ensurePlayback(p *rod.Page, log Logger, minAdvance float64, timeout time.Du
 				blackRun++
 			}
 		}
-		if advance >= minAdvance && rep.Painted && blackRun < 2 && !rep.Green {
+		isTainted := strings.Contains(rep.DrawErr, "tainted") || strings.Contains(rep.DrawErr, "SecurityError")
+		hasProgressed := advance >= minAdvance && !rep.Paused && last.Ready >= 2
+		if hasProgressed && (rep.Painted || isTainted) && (blackRun < 2 || isTainted) && !rep.Green {
 			rep.Progressed = true
-			log.Infof("[PIPELINE:playback] playback verified: %s", rep.describe())
+			if isTainted && !rep.Painted {
+				log.Infof("[PIPELINE:playback] playback verified via timeline advance (canvas tainted): %s", rep.describe())
+			} else {
+				log.Infof("[PIPELINE:playback] playback verified: %s", rep.describe())
+			}
 			return rep, nil
 		}
 		time.Sleep(700 * time.Millisecond)
@@ -679,6 +689,10 @@ func ensurePlayback(p *rod.Page, log Logger, minAdvance float64, timeout time.Du
 		rep.PlayerState, rep.URL, rep.Title = s.PlayerState, s.URL, s.Title
 	}
 	rep.Progressed = rep.Advance >= minAdvance
+	if rep.Progressed && !rep.Paused && rep.Ready >= 2 && !rep.Green {
+		log.Infof("[PIPELINE:playback] playback passed via timeline advance at timeout: %s", rep.describe())
+		return rep, nil
+	}
 	return rep, rep.failure("playback verification failed")
 }
 

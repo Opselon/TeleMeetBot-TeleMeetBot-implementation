@@ -267,7 +267,7 @@ func run(cfg *config.Config, cfgPath string, log *slogLogger) error {
 		debug.SetMemoryLimit(256 << 20)
 	}
 
-	api, err := bot.NewTelegramAPI(cfg.Telegram.Token)
+	api, err := bot.NewTelegramAPIWithEndpoint(cfg.Telegram.Token, cfg.Telegram.APIEndpoint)
 	if err != nil {
 		return err
 	}

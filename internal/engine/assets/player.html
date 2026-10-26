@@ -41,6 +41,7 @@
   el.volume = Math.min(1, Math.max(0, cfg.volume / 100));
   el.playbackRate = Math.min(4, Math.max(0.25, cfg.speed || 1));
   el.playsInline = true;
+  el.crossOrigin = 'anonymous';
   el.setAttribute('controls', '');
   wrap.appendChild(el);
 

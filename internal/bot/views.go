@@ -612,10 +612,8 @@ func queueViewKB(st engine.Status, items []engine.QueueItem, curIdx int) *tgbota
 	})
 
 	var mgmtRow []tgbotapi.InlineKeyboardButton
-	if curIdx+1 < len(items) {
-		mgmtRow = append(mgmtRow, tgbotapi.NewInlineKeyboardButtonData("🗑 Clear Upcoming", "q:clear_confirm:"+id))
-	}
 	if len(items) > 1 {
+		mgmtRow = append(mgmtRow, tgbotapi.NewInlineKeyboardButtonData("🗑 Clear Options", "q:clear_confirm:"+id))
 		mgmtRow = append(mgmtRow, tgbotapi.NewInlineKeyboardButtonData("❌ Remove Item...", "q:rm_menu:"+id))
 	}
 	if len(mgmtRow) > 0 {
@@ -660,12 +658,17 @@ func queueRemoveMenuKB(id string, items []engine.QueueItem, curIdx int) *tgbotap
 	return &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
-// queueClearConfirmKB confirms clearing upcoming items.
+// queueClearConfirmKB confirms clearing upcoming items or all other items.
 func queueClearConfirmKB(id string) *tgbotapi.InlineKeyboardMarkup {
 	return &tgbotapi.InlineKeyboardMarkup{
 		InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{
 			{
-				tgbotapi.NewInlineKeyboardButtonData("⚠️ Yes, clear upcoming", "q:do_clear:"+id),
+				tgbotapi.NewInlineKeyboardButtonData("🗑 Clear Upcoming Only", "q:do_clear:"+id),
+			},
+			{
+				tgbotapi.NewInlineKeyboardButtonData("🧹 Clear All Except Current", "q:do_clear_all:"+id),
+			},
+			{
 				tgbotapi.NewInlineKeyboardButtonData("❌ Cancel", "act:"+id+":queue"),
 			},
 		},

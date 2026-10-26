@@ -221,6 +221,24 @@ func TestSessionQueueMediaLeases(t *testing.T) {
 		t.Fatalf("t3 owners after removal = %v, want empty", owners3)
 	}
 
+	// Re-enqueue e3 and test ClearAllExceptCurrent
+	_, err = s.Enqueue(e3)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	items, _ = s.QueueSnapshot()
+	if len(items) != 3 {
+		t.Fatalf("queue len = %d, want 3", len(items))
+	}
+	// ClearAllExceptCurrent should keep only e2 (the active one)
+	if err := s.ClearAllExceptCurrent(); err != nil {
+		t.Fatalf("ClearAllExceptCurrent: %v", err)
+	}
+	items, curIdx := s.QueueSnapshot()
+	if len(items) != 1 || curIdx != 0 || items[0].URL != e2 {
+		t.Fatalf("after ClearAllExceptCurrent: len=%d curIdx=%d items=%v", len(items), curIdx, items)
+	}
+
 	// Cleanup session: all remaining queue leases released
 	s.cleanupQueue()
 	owners2 = mgr.LeaseOwners("t2")
