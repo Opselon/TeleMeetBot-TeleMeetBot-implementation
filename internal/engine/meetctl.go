@@ -264,6 +264,25 @@ func (s *Session) clickPresentButton() (bool, string) {
 	}
 	res, err := meet.Timeout(4 * time.Second).Eval(`() => {
   const norm = x => (x || "").replace(/\s+/g, " ").trim().toLowerCase();
+
+  // Dismiss any modal dialog or popup that may be blocking the toolbar
+  try {
+    const dialogClose = document.querySelector('[role="dialog"] button[aria-label*="close" i], [role="dialog"] button[aria-label*="cancel" i], div[aria-modal="true"] button[aria-label*="close" i]');
+    if (dialogClose) dialogClose.click();
+  } catch (e) {}
+
+  // Wake up auto-hiding toolbar by moving pointer to the bottom toolbar area
+  try {
+    const evt = new MouseEvent('mousemove', {
+      view: window,
+      bubbles: true,
+      cancelable: true,
+      clientX: window.innerWidth / 2,
+      clientY: window.innerHeight - 30
+    });
+    document.dispatchEvent(evt);
+  } catch (e) {}
+
   // Target leaf button elements only; never match large toolbar containers.
   const els = Array.from(document.querySelectorAll('button, [role=button]'));
   let best = null;
@@ -275,10 +294,14 @@ func (s *Session) clickPresentButton() (bool, string) {
     const tooltip = norm(el.getAttribute('data-tooltip') || "");
     const text = norm(el.innerText || el.textContent || "");
 
-    // Exclude unrelated controls (audio settings arrow, mic, camera, leave call)
-    if (aria.includes("audio") || aria.includes("microphone") || aria.includes("video") ||
-        aria.includes("camera") || aria.includes("leave") || aria.includes("settings") ||
-        tooltip.includes("audio") || tooltip.includes("microphone") || tooltip.includes("camera")) {
+    // Exclude unrelated controls explicitly
+    const isCamera = aria.includes("camera") || tooltip.includes("camera") ||
+                     aria.includes("turn off video") || aria.includes("turn on video");
+    const isMic = aria.includes("microphone") || aria.includes("audio settings") ||
+                  tooltip.includes("microphone");
+    const isLeave = aria.includes("leave call") || aria.includes("leave meeting") ||
+                    tooltip.includes("leave");
+    if (isCamera || isMic || isLeave) {
       continue;
     }
     if (aria.includes("stop presenting") || aria.includes("stop sharing") || tooltip.includes("stop") ||
@@ -288,17 +311,20 @@ func (s *Session) clickPresentButton() (bool, string) {
 
     let score = 0;
     if (aria.includes("present now") || tooltip.includes("present now")) score = 100;
-    else if (aria.includes("share screen") || tooltip.includes("share screen")) score = 90;
-    else if (aria.includes("share your screen") || tooltip.includes("share your screen")) score = 90;
+    else if (aria.includes("share screen") || tooltip.includes("share screen")) score = 95;
+    else if (aria.includes("share your screen") || tooltip.includes("share your screen")) score = 95;
+    else if (aria.includes("share content") || tooltip.includes("share content")) score = 90;
     else if (aria.includes("present") || tooltip.includes("present")) score = 80;
-    else if (text === "present now" || text === "share screen") score = 75;
+    else if (text === "present now" || text === "share screen" || text === "present") score = 75;
     else if (text.includes("present now") || text.includes("share screen")) score = 70;
     else if (text.includes("present") && text.length < 30) score = 60;
+    else if (el.querySelector('i, span')?.textContent?.includes("present_to_all") ||
+             el.querySelector('i, span')?.textContent?.includes("screen_share")) score = 85;
 
     if (score <= 0) continue;
 
     const r = el.getBoundingClientRect();
-    if (r.width < 2 || r.height < 2) continue;
+    if (r.width < 1 || r.height < 1) continue;
 
     if (score > bestScore) {
       bestScore = score;
@@ -316,6 +342,33 @@ func (s *Session) clickPresentButton() (bool, string) {
 	}
 	label := strings.TrimSpace(res.Value.Str())
 	return label != "", label
+}
+
+// dumpToolbarButtons returns a compact summary of buttons currently in the DOM.
+func (s *Session) dumpToolbarButtons() string {
+	meet := s.meetTab()
+	if meet == nil {
+		return "no meet tab"
+	}
+	res, err := meet.Timeout(3 * time.Second).Eval(`() => {
+  const norm = x => (x || "").replace(/\s+/g, " ").trim();
+  const els = Array.from(document.querySelectorAll('button, [role=button]'));
+  const out = [];
+  for (const el of els) {
+    const aria = norm(el.getAttribute('aria-label') || "");
+    const tooltip = norm(el.getAttribute('data-tooltip') || "");
+    const txt = norm(el.innerText || "");
+    const r = el.getBoundingClientRect();
+    if (aria || tooltip || txt) {
+      out.push(el.tagName + "[" + (el.getAttribute('role') || "") + "]: aria=" + JSON.stringify(aria) + " tip=" + JSON.stringify(tooltip) + " txt=" + JSON.stringify(txt.slice(0, 30)) + " vis=" + (r.width > 0 && r.height > 0));
+    }
+  }
+  return out.slice(0, 25).join("; ");
+}`)
+	if err != nil {
+		return err.Error()
+	}
+	return res.Value.Str()
 }
 
 // clickPresentSource picks "A tab" (default) or "Entire screen" in the menu.

@@ -831,14 +831,20 @@ func (s *Session) joinMeeting() error {
 	joinClickedAt := time.Time{}
 
 	computeReloadInterval := func(attempts int) time.Duration {
-		base := 20 * time.Second
-		if attempts >= 2 {
-			base = 25 * time.Second
+		var base time.Duration
+		switch {
+		case attempts == 0:
+			base = 2500 * time.Millisecond
+		case attempts == 1:
+			base = 4000 * time.Millisecond
+		case attempts == 2:
+			base = 6000 * time.Millisecond
+		case attempts < 5:
+			base = 10 * time.Second
+		default:
+			base = 15 * time.Second
 		}
-		if attempts >= 5 {
-			base = 30 * time.Second
-		}
-		jitter := time.Duration(rand.Intn(4000)) * time.Millisecond
+		jitter := time.Duration(rand.Intn(1000)) * time.Millisecond
 		return base + jitter
 	}
 	currentReloadWait := computeReloadInterval(0)
@@ -1004,6 +1010,7 @@ func (s *Session) startPresenting() error {
 	startingSince := time.Time{}
 	lastState := ""
 	lastNote := time.Time{}
+	lastWarn := time.Time{}
 	for time.Now().Before(deadline) {
 		if s.ctx.Err() != nil {
 			return s.ctx.Err()
@@ -1067,6 +1074,11 @@ func (s *Session) startPresenting() error {
 						s.log.Infof("[PIPELINE:present] session %s: presenting confirmed active", s.ID)
 						return nil
 					}
+				}
+			} else {
+				if time.Since(lastWarn) >= 10*time.Second {
+					lastWarn = time.Now()
+					s.log.Warnf("[PIPELINE:present] session %s: clickPresentButton found no button; visible buttons: %s", s.ID, s.dumpToolbarButtons())
 				}
 			}
 		}
