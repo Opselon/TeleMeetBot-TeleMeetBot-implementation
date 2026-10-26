@@ -159,7 +159,7 @@ func mediaModeText(currentMode string) string {
 	sb.WriteString(fmt.Sprintf("Current mode: <b>%s</b>\n\n", esc(engine.PlaybackModeDisplay(mode))))
 	sb.WriteString("Choose how media reaches the share:\n\n")
 	sb.WriteString("• <b>🌐 Browser</b>\nPlays the link directly in the media tab, exactly as before.\n\n")
-	sb.WriteString("• <b>⬇️ Download &amp; Stream</b>\nDownloads supported media (YouTube via yt-dlp, direct mp4/webm/mkv/mov/mp3/m4a…) to the server first, then plays the local file. Downloaded files are freed automatically when the session ends or switches (1-hour safety cap).\n\n")
+	sb.WriteString("• <b>⬇️ Download &amp; Stream</b>\nDownloads supported media (YouTube via yt-dlp, direct mp4/webm/mkv/mov/mp3/m4a…) to the server first, then plays the local file. Downloaded files are held for the lifetime of the owning session and freed automatically when it ends or switches media (a TTL also reclaims unused files).\n\n")
 	sb.WriteString("• <b>🤖 Auto</b>\nPrefers browser playback; when the browser cannot play the link, it falls back to downloading once.\n\n")
 	sb.WriteString("<i>Your choice is saved across bot restarts and applies to every new stream. It does not change running sessions.</i>")
 	return sb.String()

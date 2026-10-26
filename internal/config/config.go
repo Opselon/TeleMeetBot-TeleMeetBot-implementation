@@ -41,9 +41,12 @@ type DownloadConfig struct {
 	// Dir is the managed download directory. Only files inside it are ever
 	// created or deleted. Empty defaults to <data_dir>/downloads.
 	Dir string `yaml:"dir"`
-	// TTLMinutes is the expiry lifetime of every downloaded file, counted
-	// from the moment the download completes. Default 60 (one hour), which
-	// is the production policy; a file can never outlive it.
+	// TTLMinutes is the orphan-cleanup lifetime of a downloaded file,
+	// counted from the moment the download completes. Default 60 (one
+	// hour). It does not cap playback: a file an active session is
+	// streaming is held for the lifetime of that session (any duration,
+	// any pause) and is only freed when the session stops, switches media
+	// or fails. The TTL reclaims files whose owning session is gone.
 	TTLMinutes int `yaml:"ttl_minutes"`
 	// MaxSizeMB is the per-file ceiling. Default 2048 (2 GiB).
 	MaxSizeMB int `yaml:"max_size_mb"`

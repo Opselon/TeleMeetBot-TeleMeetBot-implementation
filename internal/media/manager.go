@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -24,7 +25,10 @@ type Result struct {
 	ContentType string
 	// Bytes on disk.
 	Bytes int64
-	// ExpiresAt is the absolute deadline after which the file MUST be gone.
+	// ExpiresAt is the absolute deadline after which the file MUST be gone
+	// unless an active session still holds a lease on it. The TTL is an
+	// orphan-reclamation policy, not a hard cut-off for playback: a session
+	// that is still streaming keeps its file alive for as long as it owns it.
 	ExpiresAt time.Time
 	// ID of the entry (also the file stem).
 	ID string
@@ -107,6 +111,14 @@ type Manager struct {
 
 	mu       sync.Mutex
 	inflight map[string]struct{}
+
+	// leases pins downloaded files to the sessions still using them. The
+	// TTL stays an orphan-reclamation policy: an entry whose deadline has
+	// passed is only deleted when no lease holds it, so a long video (or a
+	// paused stream) survives its own one-hour cap while the owning session
+	// is alive. Leases are in-memory only, so a restart never inherits a
+	// pin and the startup sweep still reclaims stale files.
+	leases map[string]map[string]time.Time // entryID -> {ownerID: acquiredAt}
 }
 
 // NewManager builds a download manager. opts must be resolved and validated
@@ -128,6 +140,7 @@ func NewManager(opts Options, log Logger) (*Manager, error) {
 		entries:  newEntryStore(opts.Dir),
 		client:   clientWithDialer(opts.HTTPTimeout, nil),
 		inflight: map[string]struct{}{},
+		leases:   map[string]map[string]time.Time{},
 	}
 	// Load the manifest eagerly: a restart must know what it manages (and
 	// quarantine a corrupt file) before the first download or sweep runs.
@@ -149,6 +162,193 @@ func (m *Manager) Opts() Options { return m.opts }
 // SetTTL overrides the expiry lifetime. Test seam: production reads the TTL
 // from the config (default one hour) and never changes it at runtime.
 func (m *Manager) SetTTL(d time.Duration) { m.opts.TTL = d }
+
+// ---- active-media leases ---------------------------------------------------
+
+// Lease pins a downloaded file to one owner (a session id) so the TTL cannot
+// delete it while that owner is still streaming it. Leases are advisory pins,
+// not hard ownership: Remove(entryID) still deletes immediately, and a lease
+// never resurrects a file that was already deleted.
+//
+// The TTL stays an orphan-cleanup policy: a file whose deadline passed is only
+// reclaimed when no lease holds it, so a long video (or a paused stream) stays
+// playable for the whole owning session regardless of duration or elapsed
+// time. Acquiring a lease on an unknown or already-expired-and-deleted entry
+// is a no-op that returns false, so callers never need to special-case a race
+// between the janitor and the adoption path.
+//
+// Leases live in memory only. A process restart drops every pin, which is what
+// keeps crash recovery honest: stale leases must not protect orphaned files.
+func (m *Manager) Lease(entryID, owner string) bool {
+	if m == nil || !m.opts.Enabled {
+		return false
+	}
+	entryID = strings.TrimSpace(entryID)
+	owner = strings.TrimSpace(owner)
+	if entryID == "" || owner == "" {
+		return false
+	}
+	if _, ok := m.entries.Get(entryID); !ok {
+		return false // nothing to pin (already reaped or never tracked)
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.leases == nil {
+		m.leases = map[string]map[string]time.Time{}
+	}
+	owners, ok := m.leases[entryID]
+	if !ok {
+		owners = map[string]time.Time{}
+		m.leases[entryID] = owners
+	}
+	if _, exists := owners[owner]; exists {
+		return true // idempotent renewal
+	}
+	owners[owner] = time.Now()
+	m.log.Infof("[PIPELINE:download] %s: leased to %s (TTL-deferred while in use)", entryID, owner)
+	return true
+}
+
+// Release drops one owner's lease and, when the entry's deadline has already
+// passed and no lease holds it, deletes the file at once: a media switch is
+// a prompt cleanup, not a deferred one. A file that is still fresh is left to
+// the janitor, which reclaims it at the deadline. Returns true when the file
+// was actually removed from disk.
+func (m *Manager) Release(entryID, owner string) bool {
+	if m == nil || !m.opts.Enabled {
+		return false
+	}
+	entryID = strings.TrimSpace(entryID)
+	owner = strings.TrimSpace(owner)
+	if entryID == "" || owner == "" {
+		return false
+	}
+	m.mu.Lock()
+	if owners, ok := m.leases[entryID]; ok {
+		delete(owners, owner)
+		if len(owners) == 0 {
+			delete(m.leases, entryID)
+		}
+	}
+	m.mu.Unlock()
+	return m.releaseExpiredUnleased(entryID, "lease released")
+}
+
+// ReleaseAndDelete drops one owner's lease and deletes the file immediately
+// unless another owner still holds it. This is the session-lifecycle path
+// (stop, close, switch media): the file must not survive an explicit teardown,
+// but it must not vanish under a second session that shares the entry either.
+// Returns true when the file was actually removed from disk.
+func (m *Manager) ReleaseAndDelete(entryID, owner string) bool {
+	if m == nil || !m.opts.Enabled {
+		return false
+	}
+	entryID = strings.TrimSpace(entryID)
+	owner = strings.TrimSpace(owner)
+	if entryID == "" || owner == "" {
+		return false
+	}
+	if _, ok := m.entries.Get(entryID); !ok {
+		// Nothing tracked: nothing to release, and nothing to delete. Report
+		// no-removal so the caller's "freed" log line is honest.
+		return false
+	}
+	m.mu.Lock()
+	if owners, ok := m.leases[entryID]; ok {
+		delete(owners, owner)
+		if len(owners) == 0 {
+			delete(m.leases, entryID)
+		}
+	}
+	remaining := 0
+	if owners, ok := m.leases[entryID]; ok {
+		remaining = len(owners)
+	}
+	m.mu.Unlock()
+	if remaining > 0 {
+		m.log.Infof("[PIPELINE:download] %s: retained, %d other lease(s) still active", entryID, remaining)
+		return false
+	}
+	return m.deleteEntryNow(entryID, "session stop or close") == nil
+}
+
+// LeaseOwners returns the owners currently holding a lease on entryID. It is
+// diagnostics surface for the dashboard and tests; an empty slice means the
+// entry is unpinned (or unknown).
+func (m *Manager) LeaseOwners(entryID string) []string {
+	if m == nil || !m.opts.Enabled {
+		return nil
+	}
+	entryID = strings.TrimSpace(entryID)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	owners, ok := m.leases[entryID]
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(owners))
+	for owner := range owners {
+		out = append(out, owner)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// leased reports whether any session still pins entryID. Caller must be
+// prepared for the answer to change immediately after the call: the check is
+// only a decision input, never a guarantee about a subsequent operation.
+func (m *Manager) leased(entryID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	owners, ok := m.leases[entryID]
+	return ok && len(owners) > 0
+}
+
+// releaseExpiredUnleased deletes one entry when its deadline has passed and
+// no lease holds it. Returns true when a file was removed.
+func (m *Manager) releaseExpiredUnleased(entryID, why string) bool {
+	if m.leased(entryID) {
+		return false
+	}
+	entry, ok := m.entries.Get(entryID)
+	if !ok {
+		return false
+	}
+	if !entry.Expired(time.Now()) {
+		return false // fresh: the janitor handles it at the deadline
+	}
+	if m.deleteEntryNow(entryID, why) == nil {
+		return true
+	}
+	return false
+}
+
+// deleteEntryNow removes the manifest entry and its file unconditionally. It
+// is the shared "explicit cleanup" path behind Remove, ReleaseAndDelete and
+// the janitor.
+func (m *Manager) deleteEntryNow(entryID, why string) error {
+	if _, ok := m.entries.Get(entryID); !ok {
+		// Not tracked: still sweep per-id residue so a crashed adoption cannot
+		// leave the file behind with a dangling lease.
+		m.sweepIDFiles(entryID)
+		m.mu.Lock()
+		delete(m.leases, entryID)
+		m.mu.Unlock()
+		return nil
+	}
+	removed, err := m.entries.RemoveIf(func(e Entry) bool { return e.ID == entryID })
+	if err != nil {
+		m.log.Warnf("[PIPELINE:download] release %s: cannot persist manifest: %v", entryID, err)
+	}
+	for _, e := range removed {
+		m.deleteManaged(e.Path, why)
+	}
+	m.sweepIDFiles(entryID)
+	m.mu.Lock()
+	delete(m.leases, entryID)
+	m.mu.Unlock()
+	return nil
+}
 
 // Enabled reports whether downloads are on.
 func (m *Manager) Enabled() bool { return m.opts.Enabled }
@@ -306,6 +506,10 @@ func (m *Manager) clearInflight(id string) {
 // unregisters it from the loopback file server, and drops it from the manifest.
 // Also sweeps any residual temporary or transcoded files for that id or matching
 // generation prefix (e.g. id-g1, id-x).
+//
+// A session teardown that must not destroy a file another session still owns
+// goes through ReleaseAndDelete instead; Remove is the unconditional admin
+// path and always wins over a lease.
 func (m *Manager) Remove(id string) error {
 	if m == nil || !m.opts.Enabled {
 		return nil
@@ -327,6 +531,13 @@ func (m *Manager) Remove(id string) error {
 		m.deleteManaged(entry.Path, "session stop or close")
 	}
 	m.sweepIDFiles(id)
+	m.mu.Lock()
+	for eid := range m.leases {
+		if eid == id || strings.HasPrefix(eid, id+"-") || strings.HasPrefix(eid, id+".") || (len(id) > 4 && strings.Contains(eid, id)) {
+			delete(m.leases, eid)
+		}
+	}
+	m.mu.Unlock()
 	return nil
 }
 
@@ -409,6 +620,12 @@ func (m *Manager) FindByURL(url string) (Entry, bool) {
 // Sweep deletes every expired entry and its file. It runs on the janitor
 // ticker, on startup and on demand; it is also the crash-recovery path. It
 // never deletes a file outside the managed directory and never throws.
+//
+// An entry whose deadline passed is skipped while at least one lease holds
+// it: the TTL is an orphan-cleanup policy, not a hard deadline that destroys
+// media an active session is still playing. Leases are in-memory only, so a
+// restart never inherits a pin and the startup sweep still reclaims stale
+// files.
 func (m *Manager) Sweep(ctx context.Context) int {
 	if m == nil || !m.opts.Enabled {
 		return 0
@@ -418,9 +635,22 @@ func (m *Manager) Sweep(ctx context.Context) int {
 		return 0
 	}
 	now := time.Now()
-	removed, err := m.entries.RemoveIf(func(e Entry) bool { return e.Expired(now) })
+	pinned := 0
+	removed, err := m.entries.RemoveIf(func(e Entry) bool {
+		if !e.Expired(now) {
+			return false
+		}
+		if m.leased(e.ID) {
+			pinned++
+			return false
+		}
+		return true
+	})
 	if err != nil {
 		m.log.Warnf("[PIPELINE:download] sweep: cannot persist manifest: %v", err)
+	}
+	if pinned > 0 {
+		m.log.Infof("[PIPELINE:download] janitor retained %d expired file(s) held by an active lease", pinned)
 	}
 	n := 0
 	for _, e := range removed {
@@ -590,6 +820,7 @@ type Status struct {
 	MaxConcurrent   int       `json:"max_concurrent"`
 	ManagedFiles    int       `json:"managed_files"`
 	ManagedBytes    int64     `json:"managed_bytes"`
+	LeasedFiles     int       `json:"leased_files"`
 	YTDLPAvailable  bool      `json:"ytdlp_available"`
 	FFmpegAvailable bool      `json:"ffmpeg_available"`
 	NextExpiry      time.Time `json:"next_expiry,omitempty"`
@@ -609,10 +840,25 @@ func (m *Manager) Snapshot() Status {
 	}
 	_, st.YTDLPAvailable = m.YTDLP()
 	_, st.FFmpegAvailable = m.FFmpeg()
+	// Leased entries are excluded from the expiry-queue bookkeeping: their
+	// deadline no longer predicts removal, and reporting them as merely
+	// "managed" would hide the fact that a session is keeping them alive.
+	m.mu.Lock()
+	leased := make(map[string]struct{}, len(m.leases))
+	for id, owners := range m.leases {
+		if len(owners) > 0 {
+			leased[id] = struct{}{}
+		}
+	}
+	m.mu.Unlock()
+	st.LeasedFiles = len(leased)
 	var next time.Time
 	for _, e := range m.entries.All() {
 		st.ManagedFiles++
 		st.ManagedBytes += e.Bytes
+		if _, ok := leased[e.ID]; ok {
+			continue // held by an active session; no expiry until released
+		}
 		if next.IsZero() || e.ExpiresAt.Before(next) {
 			next = e.ExpiresAt
 		}

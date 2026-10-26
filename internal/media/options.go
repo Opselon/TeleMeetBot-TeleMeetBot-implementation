@@ -18,9 +18,12 @@ type Options struct {
 	// Dir is the managed download directory. Only files inside it (after
 	// symlink resolution) are ever created or deleted.
 	Dir string
-	// TTL is the mandatory expiry lifetime of every downloaded file,
-	// counted from the moment the download completes. One hour in
-	// production; configurable for operations only.
+	// TTL is the expiry lifetime of every downloaded file, counted from
+	// the moment the download completes. One hour in production. The
+	// deadline only governs orphan reclamation: a file an active session
+	// has leased survives past it until that session stops, switches
+	// media or fails — so a long video never loses its media mid-play,
+	// and an unused file never lingers either.
 	TTL time.Duration
 	// MaxBytes is the per-file size ceiling. Zero disables the limit
 	// (not recommended).

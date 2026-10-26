@@ -31,7 +31,10 @@ type Entry struct {
 	// FetchedAt is when the download completed; expiry counts from here.
 	FetchedAt time.Time `json:"fetched_at"`
 	// ExpiresAt is FetchedAt + TTL, materialised so the janitor and the
-	// restart path agree even if the policy changed meanwhile.
+	// restart path agree even if the policy changed meanwhile. The deadline
+	// governs orphan reclamation, not playback: while at least one lease
+	// holds the entry, the janitor defers removal until every owning
+	// session has released it (switch, stop or close).
 	ExpiresAt time.Time `json:"expires_at"`
 	// Transcoded records whether ffmpeg produced the final file.
 	Transcoded bool `json:"transcoded,omitempty"`
