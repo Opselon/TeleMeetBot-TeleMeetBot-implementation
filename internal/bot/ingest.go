@@ -14,6 +14,7 @@ import (
 
 	"github.com/Opselon/TeleMeetBot/internal/engine"
 	"github.com/Opselon/TeleMeetBot/internal/media"
+	"github.com/Opselon/TeleMeetBot/internal/store"
 )
 
 // Telegram file ingestion. A forwarded audio/video/document never arrives as
@@ -94,6 +95,9 @@ func (b *Bot) ingestTelegramFile(ctx context.Context, userID int64, m *tgbotapi.
 	}
 
 	dest := filepath.Join(dir, sanitizeTgName(id, fileName, mime))
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return "", "", fmt.Errorf("create download dir: %w", err)
+	}
 	if err := copyTgFile(ctx, b.api, fileID, dest, size); err != nil {
 		_ = os.Remove(dest)
 		return "", "", err
@@ -113,6 +117,10 @@ func (b *Bot) ingestTelegramFile(ctx context.Context, userID int64, m *tgbotapi.
 		_ = os.Remove(dest)
 		return "", "", err
 	}
+	// Lease the freshly registered file to the user's flow: an ingested file
+	// is useless if the janitor reaps it before the user picks a session. The
+	// pin moves to the session at adoption, and is dropped on discard.
+	mgr.Lease(id, pendingOwner(userID))
 	b.log.Infof("[PIPELINE:ingest] user %d: registered telegram file %q (%s, %s) as local media",
 		userID, truncate(filepath.Base(dest), 60), mime, humanBytesLocal(bytes))
 	return url, kind, nil
@@ -122,6 +130,9 @@ func (b *Bot) ingestTelegramFile(ctx context.Context, userID int64, m *tgbotapi.
 // feature is off). Telegram ingestion reuses it so one directory, one janitor
 // and one TTL policy cover both sources.
 func (b *Bot) mediaMgr() *media.Manager {
+	if b.mgr != nil {
+		return b.mgr
+	}
 	if b.eng == nil {
 		return nil
 	}
@@ -285,26 +296,77 @@ func (b *Bot) handleTelegramMedia(chatID, userID int64, m *tgbotapi.Message) {
 		b.sendText(chatID, "❌ "+esc(err.Error()), cancelKB())
 		return
 	}
-	// Keep the wizard's next step consistent: the file plays as direct media
-	// from the loopback origin, never through the YouTube player logic.
-	target := engine.MediaTarget{URL: url, Kind: kind}
-	if f == nil || f.step == stepNone {
-		// No open wizard: tell the user the file is staged and how to play it.
-		b.sendText(chatID, fmt.Sprintf(
-			"📥 <b>File ready</b>\n\n<code>%s</code> (%s)\n\nUse /new, then send this link or press the button below.",
-			esc(truncate(filepath.Base(url), 60)), esc(string(kind))), nil)
+	// A forwarded file is a real asset: it is already inside the managed
+	// media directory. Stage it for the user instead of demanding a link
+	// they cannot open — the card offers "start a new stream" and, when a
+	// session is live, "switch" directly.
+	entryID := id
+	if e, ok := b.mediaMgr().FindByURL(url); ok {
+		entryID = e.ID
+	}
+	if f != nil && (f.step == stepMedia || f.step == stepSwitchMedia) {
+		target := engine.MediaTarget{URL: url, Kind: kind}
+		switch f.step {
+		case stepMedia:
+			b.applyWizardMedia(chatID, userID, f, target)
+		case stepSwitchMedia:
+			b.applyMediaSwitchTarget(chatID, userID, f, target)
+		}
 		return
 	}
-	switch f.step {
-	case stepMedia:
-		b.applyWizardMedia(chatID, userID, f, target)
-	case stepSwitchMedia:
-		b.applyMediaSwitchTarget(chatID, userID, f, target)
-	default:
-		b.sendText(chatID, "📥 <b>File ready</b>\n\n<code>"+esc(truncate(url, 120))+
-			"</code>\n\nFinish the current step, then /new to present it.", cancelKB())
+	if f != nil && f.step == stepMeet && strings.TrimSpace(f.media) != "" {
+		// A pending file already backs this wizard: append this additional file to the playlist!
+		b.addPending(&pendingMedia{
+			UserID: userID, EntryID: entryID, URL: url, Kind: kind,
+			Name: nameOf(m), MIME: mimeOf(m), Bytes: sizeOf(m), Created: time.Now(),
+		})
+		f.queue = append(f.queue, url)
+		b.sendText(chatID, fmt.Sprintf("📥 <b>Added to pending playlist (#%d):</b> <code>%s</code>\nSend the Google Meet link to launch.", len(f.queue)+1, esc(nameOf(m))), cancelKB())
+		return
 	}
+
+	live := b.statuses()
+	if len(live) == 1 && (f == nil || f.step == stepNone) {
+		s := b.eng.Get(live[0].ID)
+		if s != nil {
+			added, err := s.Enqueue(url)
+			if err == nil && len(added) > 0 {
+				b.handoffPending(userID, entryID)
+				items, curIdx := s.QueueSnapshot()
+				var qRecs []store.QueueItemRecord
+				for _, it := range items {
+					qRecs = append(qRecs, store.QueueItemRecord{ID: it.ID, URL: it.URL, Title: it.Title})
+				}
+				b.st.UpdateQueue(string(s.ID), qRecs, curIdx)
+				b.sendText(chatID, fmt.Sprintf("➕ Enqueued <code>%s</code>\nPosition: <b>%d / %d</b>",
+					esc(nameOf(m)), curIdx+len(added), len(items)),
+					enqueuedKB(string(s.ID), added[0].ID))
+				return
+			}
+		}
+	}
+
+	b.addPending(&pendingMedia{
+		UserID: userID, EntryID: entryID, URL: url, Kind: kind,
+		Name: nameOf(m), MIME: mimeOf(m), Bytes: sizeOf(m), Created: time.Now(),
+	})
+	items := b.getPending(userID)
+	b.sendText(chatID, pendingText(items, live), b.pendingKB(items, live))
 }
+
+// nameOf/mimeOf/sizeOf extract display metadata from the attachment the user
+// forwarded, for the staged-file card.
+func nameOf(m *tgbotapi.Message) string {
+	_, fileName, _, _ := tgAttachment(m)
+	if fileName == "" {
+		return "telegram file"
+	}
+	return fileName
+}
+
+func mimeOf(m *tgbotapi.Message) string { _, _, mime, _ := tgAttachment(m); return mime }
+
+func sizeOf(m *tgbotapi.Message) int64 { _, _, _, size := tgAttachment(m); return size }
 
 // tgAttachment extracts the file handle, name, MIME type and size from any
 // media-bearing Telegram message. Only one attachment is used: a multi-file

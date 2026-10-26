@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -42,6 +44,7 @@ type fakeAPI struct {
 	// filePath is the FilePath getFile returns for any file_id (empty = the
 	// file is too big for the Bot API to serve).
 	filePath string
+	srvURL   string
 }
 
 func (f *fakeAPI) Send(chatID int64, text string, kb *tgbotapi.InlineKeyboardMarkup) (int, error) {
@@ -81,10 +84,19 @@ func (f *fakeAPI) Updates(int) tgbotapi.UpdatesChannel { return make(tgbotapi.Up
 func (f *fakeAPI) File(fileID string) (*tgbotapi.File, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return &tgbotapi.File{FileID: fileID, FilePath: f.filePath}, nil
+	fp := f.filePath
+	if fp == "" && f.srvURL != "" {
+		fp = "music/" + fileID + ".mp3"
+	}
+	return &tgbotapi.File{FileID: fileID, FilePath: fp}, nil
 }
 
 func (f *fakeAPI) FileDirectURL(filePath string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.srvURL != "" {
+		return f.srvURL + "/" + filePath
+	}
 	return "https://api.telegram.org/file/botTEST/" + filePath
 }
 
@@ -121,6 +133,24 @@ type fakeEngine struct {
 	mu       sync.Mutex
 	sessions []*engine.Session
 	requests []engine.StartRequest
+	// failSwitch makes the next SwitchMedia on the given session fail, so a
+	// test can exercise the error path of a media switch.
+	failSwitch map[string]bool
+}
+
+func (f *fakeEngine) addSession(s *engine.Session) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sessions = append(f.sessions, s)
+}
+
+func (f *fakeEngine) failSwitchFor(id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failSwitch == nil {
+		f.failSwitch = map[string]bool{}
+	}
+	f.failSwitch[id] = true
 }
 
 func (f *fakeEngine) Start(ctx context.Context, req engine.StartRequest) (*engine.Session, error) {
@@ -134,6 +164,7 @@ func (f *fakeEngine) Start(ctx context.Context, req engine.StartRequest) (*engin
 		TabTitle:  "TeleMeet Media",
 		MediaKind: engine.MediaYouTube,
 	}
+	s.InitQueue(req.MediaLink, req.Queue)
 	f.sessions = append(f.sessions, s)
 	return s, nil
 }
@@ -189,7 +220,12 @@ func newHarness(t *testing.T, admins []int64, maxSessions int) *harness {
 	}
 	path := filepath.Join(dir, "telemeetbot.yml")
 	st := store.Load(filepath.Join(cfg.Paths.DataDir, "state.json"))
-	api := &fakeAPI{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/mpeg")
+		w.Write(append([]byte{0x49, 0x44, 0x33, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}, make([]byte, 1024)...))
+	}))
+	t.Cleanup(srv.Close)
+	api := &fakeAPI{srvURL: srv.URL}
 	eng := &fakeEngine{}
 	b := New(api, cfg, eng, st, nil, nil, path, "/usr/bin/chromium", "")
 	return &harness{bot: b, api: api, eng: eng, cfg: cfg, st: st, path: path}

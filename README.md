@@ -57,6 +57,8 @@ For a **screen** (Xvfb) mode instead of headless, set `present_mode: "screen"`, 
 * **Smart source detection** — a live HTTP probe (Content-Type, redirects, HEAD→GET fallback) classifies links by what the server actually serves, not by extension: an `.mp3` URL serving HTML is a page; a bare CDN link serving `video/mp4` is direct media
 * **Telegram media** — forward an audio/video/document to the bot: it is downloaded through the Bot API, content-sniffed, and played as direct media (never routed through YouTube logic)
 * **Saved meetings** — `/new` offers your saved Meet links first (`meetings.db`, SQLite in the data dir); pick one to jump straight to media selection, or start a fresh meeting. Save/list/rename/delete from the same screen
+* **Persistent Playlist Queue** — forward multiple audio/video files or paste batches of up to 50 URLs in one go. Control playlist playback with ⏮ Previous / ⏭ Next, jump directly to any queued track, view progress (e.g. `3/50`), and manage upcoming tracks.
+* **Resilient Google Meet Admission** — explicit, observable state machine (`QUEUED` → `STARTING` → `JOINING` → `WAITING_FOR_ADMISSION` → `ADMITTED` → `ACTIVE` → `LEAVING` → `COMPLETED` / `TIMED_OUT` / `CANCELLED`). Single-flight meeting room deduplication, debounced join clicks, native input synchronization, and jittered bounded backoff for host-restricted meetings.
 * **Session store** — `state.json` history (max 50 records), survives restarts (corrupt file → kept aside as `*.corrupt-*`, fresh store)
 * **Health surface** — `/healthz` (JSON with sessions/uptime/browser/disk/config) + `/livez`; **no** remote control endpoints
 * **Diagnostics** — `--check` (doctor) and `--check --capture-test` verifies real `getDisplayMedia` capture: frame changes + audio track

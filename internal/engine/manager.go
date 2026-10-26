@@ -106,15 +106,34 @@ type SessionID string
 
 // State values shown by the dashboard.
 const (
-	StateStarting  = "starting"
-	StateJoining   = "joining"
-	StateAdmitting = "admitting"
-	StateSharing   = "sharing"
-	StateStreaming = "streaming"
-	StatePaused    = "paused"
-	StateEnded     = "ended"
-	StateError     = "error"
+	StateQueued              = "queued"
+	StateStarting            = "starting"
+	StateJoining             = "joining"
+	StateWaitingForAdmission = "waiting_for_admission"
+	StateAdmitting           = "admitting" // alias for StateWaitingForAdmission
+	StateAdmitted            = "admitted"
+	StateSharing             = "sharing"
+	StateActive              = "active" // alias for StateStreaming
+	StateStreaming           = "streaming"
+	StatePaused              = "paused"
+	StateLeaving             = "leaving"
+	StateCompleted           = "completed" // alias for StateEnded
+	StateEnded               = "ended"
+	StateError               = "error"
+	StateFailed              = "failed" // alias for StateError
+	StateCancelled           = "cancelled"
+	StateTimedOut            = "timed_out"
 )
+
+// IsTerminalState returns true if st is a terminal/finished session state.
+func IsTerminalState(st string) bool {
+	switch st {
+	case StateEnded, StateCompleted, StateError, StateFailed, StateCancelled, StateTimedOut:
+		return true
+	default:
+		return false
+	}
+}
 
 // EventKind classifies lifecycle events pushed to the bot.
 type EventKind string
@@ -155,6 +174,8 @@ type StartRequest struct {
 	// PlayMode selects how the media reaches the share: browser playback,
 	// download-first, or auto (browser with a download fallback).
 	PlayMode string
+	// Queue holds additional media links to populate the playlist in submission order.
+	Queue []string
 }
 
 // Manager owns browsers and sessions.
@@ -323,7 +344,7 @@ func (m *Manager) List() []*Session {
 func (m *Manager) Active() []*Session {
 	var out []*Session
 	for _, s := range m.List() {
-		if s.snapshotState() != StateEnded && s.snapshotState() != StateError {
+		if !IsTerminalState(s.snapshotState()) {
 			out = append(out, s)
 		}
 	}
@@ -414,12 +435,13 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (*Session, error)
 			TabTitle: tabTitle,
 			Autoplay: false, // starts after sharing is confirmed
 			Mute:     m.mediaCfg.MuteUntilConnected,
-			Loop:     true,
+			Loop:     len(req.Queue) == 0, // loop only single-item standalone streams, not playlists
 			Volume:   m.mediaCfg.DefaultVolume,
 			Speed:    m.mediaCfg.DefaultSpeed,
 		},
 		adSkipEnabled: m.mediaCfg.SkipYouTubeAds,
 	}
+	s.InitQueue(media.URL, req.Queue)
 
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	s.done = make(chan struct{})
@@ -429,8 +451,13 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (*Session, error)
 	// bounded, atomically with the insert: two simultaneous Start calls must
 	// not both pass a "check then insert" fence.
 	active := 0
+	meetCode := Shortcode(meetURL)
 	for _, other := range m.sessions {
-		if st := other.snapshotState(); st != StateEnded && st != StateError {
+		if st := other.snapshotState(); !IsTerminalState(st) {
+			if (meetCode != "" && Shortcode(other.MeetURL) == meetCode) || other.MeetURL == meetURL {
+				m.mu.Unlock()
+				return nil, fmt.Errorf("a session (%s) is already running or joining meeting %s", other.ID, meetURL)
+			}
 			active++
 		}
 	}
@@ -459,7 +486,7 @@ func (m *Manager) pruneFinishedLocked() {
 	var done []finished
 	for id, s := range m.sessions {
 		st := s.snapshotState()
-		if st == StateEnded || st == StateError {
+		if IsTerminalState(st) {
 			done = append(done, finished{id: id, created: s.created})
 		}
 	}

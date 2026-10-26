@@ -39,19 +39,14 @@ func (s *Session) SwitchMedia(newURL string) error {
 	// makes rapid consecutive switches safe: a switch already driving the tab
 	// sees the newer generation at its next checkpoint, stops early, and lets
 	// this call own the outcome instead of finishing a stale navigation.
-	s.mu.Lock()
-	s.switchGen++
-	gen := s.switchGen
-	s.mu.Unlock()
+	gen := s.switchGen.Add(1)
 
 	// Only one navigate → prepare → play cycle may drive the tab at a time.
 	s.switchMu.Lock()
 	defer s.switchMu.Unlock()
 
 	stale := func() bool {
-		s.mu.RLock()
-		defer s.mu.RUnlock()
-		return s.switchGen != gen
+		return s.switchGen.Load() != gen
 	}
 	if stale() {
 		// Another switch was requested while this one waited for the lock; the
@@ -146,9 +141,7 @@ func (s *Session) applySwitch(target MediaTarget, stale func() bool) error {
 
 	var newLocal *localMedia
 	if s.playMode == mediateam.ModeDownload && mediateam.IsDownloadable(string(target.Kind)) {
-		s.mu.RLock()
-		gen := s.switchGen
-		s.mu.RUnlock()
+		gen := s.switchGen.Load()
 		dlID := fmt.Sprintf("ses-%s-g%d", s.ID, gen)
 		mgr := s.mediaManager()
 		if mgr != nil && mgr.Enabled() {

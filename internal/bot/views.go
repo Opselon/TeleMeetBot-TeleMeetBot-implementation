@@ -36,21 +36,31 @@ const (
 // stateEmoji maps engine states to dashboard emoji.
 func stateEmoji(state string) string {
 	switch state {
+	case engine.StateQueued:
+		return "⏳"
 	case engine.StateStarting:
 		return "🟡"
 	case engine.StateJoining:
-		return "🟡"
-	case engine.StateAdmitting:
-		return "🕓"
+		return "🚪"
+	case engine.StateWaitingForAdmission, engine.StateAdmitting:
+		return "✋"
+	case engine.StateAdmitted:
+		return "✅"
 	case engine.StateSharing:
-		return "🟠"
-	case engine.StateStreaming:
+		return "🖥️"
+	case engine.StateStreaming, engine.StateActive:
 		return "🟢"
 	case engine.StatePaused:
 		return "⏸"
-	case engine.StateEnded:
+	case engine.StateLeaving:
+		return "🏃"
+	case engine.StateEnded, engine.StateCompleted:
 		return "⚪️"
-	case engine.StateError:
+	case engine.StateCancelled:
+		return "🚫"
+	case engine.StateTimedOut:
+		return "⏱️"
+	case engine.StateError, engine.StateFailed:
 		return "🔴"
 	default:
 		return "⚪️"
@@ -231,6 +241,13 @@ func sessionCardText(st engine.Status) string {
 	if st.FallbackReason != "" {
 		sb.WriteString(fmt.Sprintf("ℹ️ <i>%s</i>\n", esc(st.FallbackReason)))
 	}
+	if st.QueueLength > 0 {
+		pos := st.QueueIndex + 1
+		if pos <= 0 {
+			pos = 1
+		}
+		sb.WriteString(fmt.Sprintf("📋 Playlist: <b>%d / %d</b>\n", pos, st.QueueLength))
+	}
 	sb.WriteString(fmt.Sprintf("⏳ Elapsed: %s", health.FormatUptime(st.Elapsed())))
 	if st.Error != "" {
 		sb.WriteString("\n\n🔴 <b>Error:</b> " + esc(truncate(st.Error, 300)))
@@ -249,9 +266,18 @@ func sessionCardKB(st engine.Status) *tgbotapi.InlineKeyboardMarkup {
 	if st.Muted {
 		muteLabel, muteAct = "🔊 Unmute", "unmute"
 	}
+	qLabel := "📋 Queue"
+	if st.QueueLength > 0 {
+		qLabel = fmt.Sprintf("📋 Queue (%d)", st.QueueLength)
+	}
 	rows := [][]tgbotapi.InlineKeyboardButton{
 		{
+			tgbotapi.NewInlineKeyboardButtonData("⏮ Prev", "act:"+id+":prev"),
 			tgbotapi.NewInlineKeyboardButtonData(pauseLabel, "act:"+id+":"+pauseAct),
+			tgbotapi.NewInlineKeyboardButtonData("⏭ Next", "act:"+id+":next"),
+		},
+		{
+			tgbotapi.NewInlineKeyboardButtonData(qLabel, "act:"+id+":queue"),
 			tgbotapi.NewInlineKeyboardButtonData(muteLabel, "act:"+id+":"+muteAct),
 		},
 		{
@@ -282,7 +308,7 @@ func sessionCardKB(st engine.Status) *tgbotapi.InlineKeyboardMarkup {
 			tgbotapi.NewInlineKeyboardButtonData("⬅️ Dashboard", cbHome),
 		},
 	}
-	if st.State == engine.StateEnded || st.State == engine.StateError {
+	if engine.IsTerminalState(st.State) {
 		rows = [][]tgbotapi.InlineKeyboardButton{
 			{tgbotapi.NewInlineKeyboardButtonData("⬅️ Dashboard", cbHome)},
 		}
@@ -511,4 +537,137 @@ func confirmKB(userAudioLang, userMediaMode string) *tgbotapi.InlineKeyboardMark
 			tgbotapi.NewInlineKeyboardButtonData("✖️ Cancel", cbCancel),
 		},
 	}}
+}
+
+// enqueuedKB is shown right after adding items to an active session's queue.
+func enqueuedKB(sessionID, itemID string) *tgbotapi.InlineKeyboardMarkup {
+	return &tgbotapi.InlineKeyboardMarkup{
+		InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{
+			{
+				tgbotapi.NewInlineKeyboardButtonData("🔀 Switch now", "q:jump:"+sessionID+":"+itemID),
+				tgbotapi.NewInlineKeyboardButtonData("📋 View Queue", "act:"+sessionID+":queue"),
+			},
+			{
+				tgbotapi.NewInlineKeyboardButtonData("📱 Session Controls", "ses:"+sessionID),
+			},
+		},
+	}
+}
+
+// queueViewText formats the playlist overview.
+func queueViewText(st engine.Status, items []engine.QueueItem, curIdx int) string {
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("📋 <b>Media Queue</b> (%d item(s))\n\n", len(items)))
+
+	if curIdx >= 0 && curIdx < len(items) {
+		cur := items[curIdx]
+		title := cur.Title
+		if title == "" {
+			title = cur.URL
+		}
+		sb.WriteString(fmt.Sprintf("▶️ <b>Now Playing (%d/%d):</b>\n<code>%s</code>\n", curIdx+1, len(items), esc(truncate(title, 60))))
+		if st.Dur > 0 {
+			sb.WriteString(fmt.Sprintf("⏱ %s / %s\n", fmtClock(st.Cur), fmtClock(st.Dur)))
+		}
+		sb.WriteString("\n")
+	}
+
+	upcoming := 0
+	if curIdx+1 < len(items) {
+		sb.WriteString("⏳ <b>Upcoming:</b>\n")
+		for i := curIdx + 1; i < len(items); i++ {
+			if upcoming >= 10 {
+				sb.WriteString(fmt.Sprintf("<i>... and %d more</i>\n", len(items)-i))
+				break
+			}
+			it := items[i]
+			title := it.Title
+			if title == "" {
+				title = it.URL
+			}
+			sb.WriteString(fmt.Sprintf("%d. <code>%s</code>\n", i+1, esc(truncate(title, 50))))
+			upcoming++
+		}
+		sb.WriteString("\n")
+	} else if len(items) > 0 {
+		sb.WriteString("🏁 <i>At end of playlist</i>\n\n")
+	}
+
+	return sb.String()
+}
+
+// queueViewKB renders the playlist controls.
+func queueViewKB(st engine.Status, items []engine.QueueItem, curIdx int) *tgbotapi.InlineKeyboardMarkup {
+	id := string(st.ID)
+	var rows [][]tgbotapi.InlineKeyboardButton
+
+	pauseLabel, pauseAct := "⏸ Pause", "pause"
+	if st.State == engine.StatePaused || st.Paused {
+		pauseLabel, pauseAct = "▶️ Resume", "resume"
+	}
+	rows = append(rows, []tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardButtonData("⏮ Prev", "act:"+id+":prev"),
+		tgbotapi.NewInlineKeyboardButtonData(pauseLabel, "act:"+id+":"+pauseAct),
+		tgbotapi.NewInlineKeyboardButtonData("⏭ Next", "act:"+id+":next"),
+	})
+
+	var mgmtRow []tgbotapi.InlineKeyboardButton
+	if curIdx+1 < len(items) {
+		mgmtRow = append(mgmtRow, tgbotapi.NewInlineKeyboardButtonData("🗑 Clear Upcoming", "q:clear_confirm:"+id))
+	}
+	if len(items) > 1 {
+		mgmtRow = append(mgmtRow, tgbotapi.NewInlineKeyboardButtonData("❌ Remove Item...", "q:rm_menu:"+id))
+	}
+	if len(mgmtRow) > 0 {
+		rows = append(rows, mgmtRow)
+	}
+
+	rows = append(rows, []tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardButtonData("📱 Session Controls", "ses:"+id),
+		tgbotapi.NewInlineKeyboardButtonData("🔄 Refresh", "act:"+id+":queue"),
+	})
+	rows = append(rows, []tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardButtonData("⬅️ Dashboard", cbHome),
+	})
+
+	return &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// queueRemoveMenuKB displays upcoming items to be removed.
+func queueRemoveMenuKB(id string, items []engine.QueueItem, curIdx int) *tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+	count := 0
+	for i, it := range items {
+		if i == curIdx {
+			continue
+		}
+		if count >= 8 {
+			break
+		}
+		title := it.Title
+		if title == "" {
+			title = it.URL
+		}
+		label := fmt.Sprintf("❌ %d. %s", i+1, truncate(title, 25))
+		rows = append(rows, []tgbotapi.InlineKeyboardButton{
+			tgbotapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("q:rm:%s:%s", id, it.ID)),
+		})
+		count++
+	}
+	rows = append(rows, []tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardButtonData("⬅️ Back to Queue", "act:"+id+":queue"),
+	})
+	return &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// queueClearConfirmKB confirms clearing upcoming items.
+func queueClearConfirmKB(id string) *tgbotapi.InlineKeyboardMarkup {
+	return &tgbotapi.InlineKeyboardMarkup{
+		InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{
+			{
+				tgbotapi.NewInlineKeyboardButtonData("⚠️ Yes, clear upcoming", "q:do_clear:"+id),
+				tgbotapi.NewInlineKeyboardButtonData("❌ Cancel", "act:"+id+":queue"),
+			},
+		},
+	}
 }

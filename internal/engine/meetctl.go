@@ -132,7 +132,12 @@ func (s *Session) fillGuestName() bool {
     if (!(ph.includes("name") || el.value === "")) continue;
     if (el.value === NAME) return true;
     el.focus();
-    el.value = NAME;
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+    if (setter) {
+      setter.call(el, NAME);
+    } else {
+      el.value = NAME;
+    }
     el.dispatchEvent(new Event('input', {bubbles: true}));
     el.dispatchEvent(new Event('change', {bubbles: true}));
     el.blur();
@@ -158,6 +163,7 @@ func (s *Session) clickJoin() (bool, string) {
   const els = Array.from(document.querySelectorAll('button, [role=button], div[role=button]'));
   let best = null, bestScore = 0;
   for (const el of els) {
+    if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
     const t = norm((el.getAttribute('aria-label') || "") + " " + (el.innerText || el.textContent || ""));
     let score = 0;
     if (t === "join now" || t === "ask to join") score = 3;

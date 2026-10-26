@@ -88,6 +88,14 @@ type Bot struct {
 	sessionChats map[string]int64
 	// dashboardMsg per chat: reused for menu edits (home/sessions/...).
 	menus map[int64]int
+	// mgr is a test seam: a real media manager the bot uses instead of the
+	// engine's when set. Production leaves it nil so mediaMgr() resolves
+	// through the engine, keeping one owner for the manager.
+	mgr *media.Manager
+	// pending holds staged Telegram files per user (audio/video forwarded
+	// before a wizard was open). Staged files are leased so the janitor
+	// cannot reclaim them while the user decides what to do with them.
+	pending map[int64][]*pendingMedia
 }
 
 // New wires a Telegram bot. (api can be a fake in tests.)
@@ -110,6 +118,7 @@ func New(api API, cfg *config.Config, eng Engine, st *store.Store, ms Meetings, 
 		cards:        map[string]*cardRef{},
 		sessionChats: map[string]int64{},
 		menus:        map[int64]int{},
+		pending:      map[int64][]*pendingMedia{},
 	}
 }
 
@@ -171,8 +180,7 @@ func (b *Bot) refreshAll() {
 		if ref == nil {
 			continue
 		}
-		switch st.State {
-		case engine.StateEnded, engine.StateError:
+		if engine.IsTerminalState(st.State) {
 			// Final card is already sent by handleEvent; stop touching it.
 			continue
 		}

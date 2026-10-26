@@ -90,17 +90,26 @@ type UserPreference struct {
 	MediaMode string `json:"media_mode,omitempty"`
 }
 
+// QueueItemRecord represents one entry in a session's persisted playlist.
+type QueueItemRecord struct {
+	ID    string `json:"id"`
+	URL   string `json:"url"`
+	Title string `json:"title,omitempty"`
+}
+
 // Record is one streaming session.
 type Record struct {
-	ID        string    `json:"id"`
-	MeetURL   string    `json:"meet_url"`
-	MediaURL  string    `json:"media_url"`
-	Title     string    `json:"title"`
-	State     string    `json:"state"`
-	Error     string    `json:"error,omitempty"`
-	ChatID    int64     `json:"chat_id,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	EndedAt   time.Time `json:"ended_at,omitempty"`
+	ID        string            `json:"id"`
+	MeetURL   string            `json:"meet_url"`
+	MediaURL  string            `json:"media_url"`
+	Title     string            `json:"title"`
+	State     string            `json:"state"`
+	Error     string            `json:"error,omitempty"`
+	ChatID    int64             `json:"chat_id,omitempty"`
+	CreatedAt time.Time         `json:"created_at"`
+	EndedAt   time.Time         `json:"ended_at,omitempty"`
+	Queue     []QueueItemRecord `json:"queue,omitempty"`
+	QueueIdx  int               `json:"queue_idx,omitempty"`
 }
 
 // maxRecords bounds the history file.
@@ -261,6 +270,33 @@ func (s *Store) Update(id, state, errMsg string) {
 		_ = s.saveLocked()
 		return
 	}
+}
+
+// UpdateQueue records playlist changes and playback position for a session.
+func (s *Store) UpdateQueue(id string, queue []QueueItemRecord, idx int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.records {
+		if s.records[i].ID == id {
+			s.records[i].Queue = queue
+			s.records[i].QueueIdx = idx
+			_ = s.saveLocked()
+			return
+		}
+	}
+}
+
+// GetRecord returns a copy of a session record, or nil if not found.
+func (s *Store) GetRecord(id string) *Record {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range s.records {
+		if r.ID == id {
+			cp := r
+			return &cp
+		}
+	}
+	return nil
 }
 
 // Records returns a copy of stored records.
