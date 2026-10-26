@@ -20,6 +20,8 @@ const (
 	cbHelp      = "menu:help"
 	cbSettings  = "menu:settings"
 	cbAudioLang = "menu:audiolang"
+	cbPlaylists = "menu:playlists"
+	cbManage    = "menu:manage"
 	cbLaunch    = "flow:launch"
 	cbCancel    = "flow:cancel"
 	cbAgain     = "flow:again"
@@ -102,17 +104,21 @@ func mainMenuKB() *tgbotapi.InlineKeyboardMarkup {
 	return &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{
 		{
 			tgbotapi.NewInlineKeyboardButtonData("➕ New stream", cbNew),
+			tgbotapi.NewInlineKeyboardButtonData("📚 Playlists", cbPlaylists),
 		},
 		{
-			tgbotapi.NewInlineKeyboardButtonData("🌐 Audio Language", cbAudioLang),
 			tgbotapi.NewInlineKeyboardButtonData("📋 Sessions", cbSessions),
+			tgbotapi.NewInlineKeyboardButtonData("🌐 Audio Language", cbAudioLang),
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData("⬇️ Download & Stream", cbMediaMode),
 			tgbotapi.NewInlineKeyboardButtonData("🩺 Health", cbHealth),
 		},
 		{
+			tgbotapi.NewInlineKeyboardButtonData("🎛 Manage", cbManage),
 			tgbotapi.NewInlineKeyboardButtonData("⚙️ Settings", cbSettings),
+		},
+		{
 			tgbotapi.NewInlineKeyboardButtonData("ℹ️ Help", cbHelp),
 		},
 	}}
@@ -301,6 +307,10 @@ func sessionCardKB(st engine.Status) *tgbotapi.InlineKeyboardMarkup {
 			tgbotapi.NewInlineKeyboardButtonData("🔀 Switch media", "act:"+id+":switchurl"),
 		},
 		{
+			tgbotapi.NewInlineKeyboardButtonData("🎛 Tools", "act:"+id+":tools"),
+			tgbotapi.NewInlineKeyboardButtonData("💾 Save queue", "q:save:"+id),
+		},
+		{
 			tgbotapi.NewInlineKeyboardButtonData("🔄 Refresh", "act:"+id+":refresh"),
 			tgbotapi.NewInlineKeyboardButtonData("⏹ Stop", "act:"+id+":stop"),
 		},
@@ -387,7 +397,7 @@ func settingsText(c *config.Config) string {
 	sb.WriteString("⚙️ <b>Settings</b>\n\n")
 	sb.WriteString(fmt.Sprintf("Token: <code>%s</code>\n", esc(c.TokenPreview())))
 	ids := make([]string, 0, len(c.Telegram.Admins))
-	for _, id := range c.Telegram.Admins {
+	for _, id := range c.AdminIDs() {
 		ids = append(ids, fmt.Sprintf("%d", id))
 	}
 	if len(ids) == 0 {
@@ -618,6 +628,16 @@ func queueViewKB(st engine.Status, items []engine.QueueItem, curIdx int) *tgbota
 	}
 	if len(mgmtRow) > 0 {
 		rows = append(rows, mgmtRow)
+	}
+	if len(items) > 1 {
+		rows = append(rows, []tgbotapi.InlineKeyboardButton{
+			tgbotapi.NewInlineKeyboardButtonData("🔀 Shuffle upcoming", "q:shuffle:"+id),
+			tgbotapi.NewInlineKeyboardButtonData("🔤 Sort upcoming", "q:sort:"+id),
+		})
+		rows = append(rows, []tgbotapi.InlineKeyboardButton{
+			tgbotapi.NewInlineKeyboardButtonData("↕️ Reorder items", "q:move_menu:"+id),
+			tgbotapi.NewInlineKeyboardButtonData("💾 Save as playlist", "q:save:"+id),
+		})
 	}
 
 	rows = append(rows, []tgbotapi.InlineKeyboardButton{

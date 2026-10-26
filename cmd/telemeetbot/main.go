@@ -236,6 +236,24 @@ func run(cfg *config.Config, cfgPath string, log *slogLogger) error {
 	}
 	defer meetings.Close()
 
+	// Playlists live in their own SQLite database. A broken library must not
+	// prevent the bot from starting: sessions and saved meetings still work,
+	// so a failure here is a warning and the dashboard hides the feature.
+	if _, err := store.BackupDB(cfg.PlaylistsFile()); err != nil {
+		log.Warnf("playlist db backup: %v", err)
+	}
+	playlists, err := store.NewPlaylistStore(ctx, cfg.PlaylistsFile())
+	if err != nil {
+		log.Warnf("playlist library unavailable: %v", err)
+		playlists = nil
+	} else {
+		defer playlists.Close()
+	}
+	var botOpts []bot.Option
+	if playlists != nil {
+		botOpts = append(botOpts, bot.WithPlaylists(playlists))
+	}
+
 	bCfg, mCfg, meetCfg := engine.FromConfig(cfg)
 	browserPath, browserErr := engine.ResolveBrowser(bCfg, log)
 	if browserErr != nil {
@@ -271,7 +289,7 @@ func run(cfg *config.Config, cfgPath string, log *slogLogger) error {
 	if err != nil {
 		return err
 	}
-	b := bot.New(api, cfg, eng, st, meetings, log, cfgPath, browserPath, errorText(browserErr))
+	b := bot.New(api, cfg, eng, st, meetings, log, cfgPath, browserPath, errorText(browserErr), botOpts...)
 	if len(interrupted) > 0 {
 		b.Broadcast(fmt.Sprintf("⚠️ <b>Restarted</b>\n\n%d session(s) were interrupted by the previous shutdown and are no longer in their meetings.", len(interrupted)))
 	}
