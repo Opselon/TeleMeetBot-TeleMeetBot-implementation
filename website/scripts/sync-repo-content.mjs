@@ -461,7 +461,7 @@ for (const file of noteFiles.sort()) {
     raw
       .split('\n')
       .find((l) => l.trim() && !l.startsWith('#') && !l.startsWith('```')) || '';
-  const summary = summaryLine.replace(/\*\*/g, '').slice(0, 220);
+  const summary = summaryLine.replace(/\*\*/g, '').slice(0, 180);
   releaseNotes.push({ tag, title, publishedAt: meta?.publishedAt || null, url: meta?.url || null });
   const frontmatter = [
     '---',
