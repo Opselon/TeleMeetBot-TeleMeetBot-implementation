@@ -293,9 +293,7 @@ func TestSwitchMediaGenerationGuardsRollback(t *testing.T) {
 	// The loser must see the winner's generation when it resumes, otherwise it
 	// cannot tell it was superseded: wait for the bump before releasing it.
 	waitFor(t, func() bool {
-		s.mu.RLock()
-		g := s.switchGen
-		s.mu.RUnlock()
+		g := s.switchGen.Load()
 		return g >= 2
 	}, "winner never claimed a generation")
 	rec.release()

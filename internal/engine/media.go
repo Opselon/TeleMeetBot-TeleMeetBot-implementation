@@ -40,6 +40,19 @@ var directExts = map[string]bool{
 	"wav": true, "opus": true, "oga": true, "ogg": true, "avi": true,
 }
 
+// IsLocalMediaURL reports whether a media link is served by the process's own
+// media file server (a downloaded or Telegram-ingested file). Such a URL is a
+// loopback origin, never a remote host, and carries a lease while a session
+// plays it.
+func IsLocalMediaURL(raw string) bool {
+	u, err := url.ParseRequestURI(raw)
+	if err != nil || u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == "127.0.0.1" || host == "localhost" || host == "[::1]"
+}
+
 // ClassifyMedia parses and classifies a user-provided link.
 func ClassifyMedia(raw string) (MediaTarget, error) {
 	s := strings.TrimSpace(raw)

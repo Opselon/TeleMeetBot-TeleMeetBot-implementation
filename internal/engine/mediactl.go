@@ -19,6 +19,7 @@ type mediaStatus struct {
 	Duration     float64 `json:"duration"`
 	Title        string  `json:"title"`
 	Src          string  `json:"src"`
+	Ended        bool    `json:"ended"`
 	// Ready is HTMLMediaElement.readyState (0..4). Seek decisions read it: a
 	// seek below HAVE_METADATA has no timeline to move along.
 	Ready int `json:"readyState,omitempty"`
@@ -148,6 +149,13 @@ func mediaControlJS(action string, arg float64) string {
   out.currentTime = m.currentTime || 0;
   out.duration = isFinite(m.duration) ? m.duration : 0;
   out.readyState = m.readyState || 0;
+  out.ended = !!m.ended;
+  try {
+    const mp = document.querySelector('#movie_player');
+    if (mp && mp.getPlayerState && mp.getPlayerState() === 0) {
+      out.ended = true;
+    }
+  } catch (e) {}
   try { out.seekable = (m.seekable && m.seekable.length) ? m.seekable.length : 0; } catch (e) { out.seekable = 0; }
   out.src = String(m.currentSrc || m.src || "").slice(0, 300);
   let real = "";

@@ -1,18 +1,270 @@
 {
   "live": true,
   "source": "api",
-  "fetchedAt": "2026-10-25T15:59:18.613Z",
+  "fetchedAt": "2026-10-26T18:48:22.406Z",
   "repo": {
     "stars": 0,
     "forks": 1,
     "watchers": 0,
-    "openIssues": 0,
+    "openIssues": 1,
     "language": "Go",
     "license": "MIT",
     "defaultBranch": "main",
-    "pushedAt": "2026-10-25T11:32:09Z"
+    "pushedAt": "2026-10-26T18:42:15Z"
   },
   "releases": [
+    {
+      "tag": "v1.3.1",
+      "name": "TeleMeetBot v1.3.1",
+      "publishedAt": "2026-10-26T15:54:37Z",
+      "createdAt": "2026-10-26T15:43:07Z",
+      "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/tag/v1.3.1",
+      "prerelease": false,
+      "draft": false,
+      "body": "# TeleMeetBot v1.3.1 — long videos no longer die mid-playback\n\n**A patch release with one headline fix: a downloaded file could be deleted\nwhile a session was still streaming it.** Anything longer than the one-hour\ndownload TTL — a long YouTube download, a paused stream, a talk left running —\ndied mid-playback with a playback error and, in download mode, an aborted\nsession.\n\n## The bug\n\nDownloaded media carried a hard one-hour TTL, and that TTL was enforced as a\nplayback deadline rather than as a cleanup policy:\n\n- The media janitor (`Sweep`) deleted **any** expired entry, without checking\n  whether a session was still streaming it. A two-hour video downloaded at\n  noon was unlinked at 13:00, mid-playback.\n- The session watchdog treated the same deadline as a session-level failure:\n  when `ExpiresAt` passed, `watch()` errored the session out instead of\n  letting playback continue.\n- The file server then served a path that no longer existed, so seeks, range\n  requests and resumed playback all failed with a hard error.\n\nThe TTL is the right policy for *cleaning up abandoned files*. It was the wrong\npolicy for *media in use*.\n\n## The fix: active-media leases\n\nDownloaded files are now pinned to the session that owns them for the entire\nlifetime of that session. The TTL is unchanged at one hour, but it is now an\n**orphan-reclamation policy** instead of a hard cut-off:\n\n- `media.Manager` gains a lease API (`Lease`, `Release`,\n  `ReleaseAndDelete`, `LeaseOwners`). A session leases its file the moment it\n  adopts it, before the file is recorded as the session's local media — so\n  there is no window in which the janitor can delete a file the session is\n  about to play.\n- The janitor skips any expired entry that a lease holds, and logs that it\n  retained it. Playback continues for as long as the owning session is alive,\n  regardless of video duration, elapsed time or paused playback.\n- Releasing a lease reclaims the file: `Release` deletes an expired, unowned\n  entry at once, while a file that is still fresh is left for the janitor and\n  its own deadline. `ReleaseAndDelete` is the teardown path (stop, close,\n  cleanup, mode change): it deletes immediately unless another session still\n  holds the same entry — for example two sessions sharing one Telegram file.\n- `Remove()` stays the unconditional admin path and always wins over a lease.\n- Leases are **in-memory only**. A process restart drops every pin, so stale\n  leases can never protect orphaned files: crash recovery and the startup\n  sweep behave exactly as before, and disk protection (download size cap,\n  timeout, concurrency, path validation, SSRF defences, minimum free disk) is\n  untouched.\n\nThe session watchdog no longer fails a session at `ExpiresAt`. It logs once\nthat the file is past its TTL and held by an active lease, and playback\ncontinues.\n\n## Configuration\n\nNo key was added, removed or renamed; every v1.3.0 config loads unchanged.\nThe semantics of one key are clarified in the docs:\n\n```yaml\ndownload:\n  ttl_minutes: 60   # orphan cleanup: reclaims files no session is streaming;\n                    # an active session keeps its file for its whole lifetime\n```\n\n`Status` gains one read-only field, `leased_files`, reporting how many managed\nfiles are currently held by an active session.\n\n## Regression tests\n\nExisting tests that required an active file to expire were rewritten, and new\ndeterministic tests added (short TTLs and an injectable clock — no test waits\nan actual hour). Proven by the suite:\n\n- an active download remains accessible **after** its original one-hour\n  deadline, under repeated janitor sweeps;\n- playback requests, including HTTP range requests, do not fail because the\n  janitor deleted the file;\n- stopping a session or switching media releases the old file promptly, while\n  the new media is leased before it is adopted;\n- inactive expired files are still reclaimed;\n- restart recovery, concurrent cleanup, failed downloads and multi-session\n  ownership remain safe.\n\nFull suite, race detector and `go vet` are green.\n\n## Artifacts\n\nNative binaries for Linux (amd64, arm64, arm v6/v7, 386), macOS (Intel, Apple\nSilicon) and Windows (amd64, arm64), plus `SHA256SUMS` and the installers:\n\n```bash\ncurl -fsSL https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.1/install.sh | sh -s -- --version v1.3.1\n```\n\nDocker image published as\n`ghcr.io/opselon/telemeetbot-telemeetbot-implementation:v1.3.1` (and `:latest`),\nmulti-arch for `linux/amd64` and `linux/arm64`.\n",
+      "assets": [
+        {
+          "name": "install.ps1",
+          "size": 9699,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.1/install.ps1"
+        },
+        {
+          "name": "install.sh",
+          "size": 10852,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.1/install.sh"
+        },
+        {
+          "name": "SHA256SUMS",
+          "size": 869,
+          "downloads": 2,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.1/SHA256SUMS"
+        },
+        {
+          "name": "telemeetbot-darwin-amd64.tar.gz",
+          "size": 8036149,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.1/telemeetbot-darwin-amd64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-darwin-arm64.tar.gz",
+          "size": 7741576,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.1/telemeetbot-darwin-arm64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-386.tar.gz",
+          "size": 7667589,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.1/telemeetbot-linux-386.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-amd64.tar.gz",
+          "size": 7932979,
+          "downloads": 2,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.1/telemeetbot-linux-amd64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm6.tar.gz",
+          "size": 7646319,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.1/telemeetbot-linux-arm6.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm64.tar.gz",
+          "size": 7494288,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.1/telemeetbot-linux-arm64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm7.tar.gz",
+          "size": 7634864,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.1/telemeetbot-linux-arm7.tar.gz"
+        },
+        {
+          "name": "telemeetbot-windows-amd64.zip",
+          "size": 7046577,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.1/telemeetbot-windows-amd64.zip"
+        },
+        {
+          "name": "telemeetbot-windows-arm64.zip",
+          "size": 6542899,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.1/telemeetbot-windows-arm64.zip"
+        }
+      ]
+    },
+    {
+      "tag": "v1.3.0",
+      "name": "TeleMeetBot v1.3.0",
+      "publishedAt": "2026-10-26T09:25:33Z",
+      "createdAt": "2026-10-26T09:14:03Z",
+      "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/tag/v1.3.0",
+      "prerelease": false,
+      "draft": false,
+      "body": "# TeleMeetBot v1.3.0 — the one-command install actually works\n\n**A patch release with one headline fix: the published one-command installer was\nbroken on every Debian, Ubuntu and Alpine host.** Everything else is hardening\nthat makes that class of failure impossible to ship again.\n\n## The bug\n\nThe v1.2.0 install script used bash-only syntax (`[[ ]]`, `${var//x/y}`), but\nthe documented one-command install pipes it straight into `sh`:\n\n```bash\ncurl -fsSL https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/latest/download/install.sh | sh\n```\n\nOn Debian and Ubuntu `/bin/sh` is **dash**; on Alpine it is **busybox**. Neither\nimplements `[[`, so the script died before installing anything:\n\n```\nsh: 36: [[: not found\nsh: 80: [[: not found\nerror: resolved version 'latest' does not look like a tag (vX.Y.Z); refusing to install\n```\n\nThe failure was silent in two ways: the process usually exited 0 (so `curl | sh`\nlooked successful to a caller not watching stderr), and CI never caught it\nbecause every CI step invoked the script with `bash` — a different interpreter\nthan the one the README tells users to use.\n\n## The fix\n\n`scripts/install.sh` is rewritten in POSIX `sh` and carries a `shellcheck -s sh`\ngate. Verified under **dash**, **busybox** and **bash**, and in clean\nminimal-container environments (Debian `bookworm-slim` and Alpine) with no\nbuild toolchain installed.\n\nNothing about the flag surface or the install layout changed:\n\n```bash\ncurl -fsSL https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/latest/download/install.sh | sh\n```\n\n## Hardening in this release\n\n- **Post-install version verification.** The installer now runs the binary it\n  just installed and matches its `--version` against the release tag. A corrupt\n  download, a truncated archive, or a version-stamping mistake in the build\n  aborts the install instead of being reported as success.\n- **CI now tests the published invocation.** The installer smoke job pipes the\n  script through `sh` (with `curl | sh`, exactly as documented) instead of\n  running it under `bash`, and asserts `dash -n` plus `shellcheck -s sh`.\n- **Version-mismatch regression test.** A new CI case serves an archive whose\n  binary reports a different version than the requested tag and requires the\n  installer to refuse it.\n- **Release smokeJobs assert the stamped version.** Every release binary's\n  `--version` must contain the release tag, so the installer's new version gate\n  can never be defeated by broken `ldflags` wiring.\n- **Post-publish install verification.** The release workflow now runs the\n  published installer against the release it just published — downloading the\n  real `install.sh` from the release assets and installing into a sandbox — so\n  a release cannot be announced as working without a user-side install\n  succeeding.\n- **Documentation fixes.** The website install guides pointed at the stale\n  `raw.githubusercontent.com/…/main/scripts/install.sh` bootstrap URL (an\n  unpinned, branch-following URL that bypasses checksum verification); they now\n  use the release asset. The README pin examples were updated from v1.1.0 to\n  v1.2.0.\n\n## Upgrading from v1.2.0\n\n```bash\n# re-run the one-command install against the new release\ncurl -fsSL https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.0/install.sh | sh -s -- --version v1.3.0\n```\n\nOr, if you installed with a custom prefix:\n\n```bash\ncurl -fsSL https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.0/install.sh \\\n  | sh -s -- --version v1.3.0 --prefix /your/prefix --config-dir /your/config\n```\n\nThe install is idempotent: re-running over an existing install replaces the\nbinary and leaves the config, data directory and service registration\nuntouched. No configuration key was removed or renamed; every v1.2.0 config\nloads unchanged.\n\nIf you installed v1.0.0/v1.1.0 with the old `raw.githubusercontent.com`\nbootstrapping URL, switch to the pinned release URL above — the branch URL\nserves whatever is on `main` today and validates nothing.\n\n## Artifacts\n\nNative binaries for Linux (amd64, arm64, arm v6/v7, 386), macOS (Intel, Apple\nSilicon) and Windows (amd64, arm64), plus `SHA256SUMS` and the installers\nthemselves:\n\n```bash\ncurl -fsSLO https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.0/SHA256SUMS\nsha256sum -c SHA256SUMS --ignore-missing\n```\n\nDocker image published as\n`ghcr.io/opselon/telemeetbot-telemeetbot-implementation:v1.3.0` (and `:latest`),\nmulti-arch for `linux/amd64` and `linux/arm64`.\n",
+      "assets": [
+        {
+          "name": "install.ps1",
+          "size": 9699,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.0/install.ps1"
+        },
+        {
+          "name": "install.sh",
+          "size": 10852,
+          "downloads": 5,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.0/install.sh"
+        },
+        {
+          "name": "SHA256SUMS",
+          "size": 869,
+          "downloads": 5,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.0/SHA256SUMS"
+        },
+        {
+          "name": "telemeetbot-darwin-amd64.tar.gz",
+          "size": 8029155,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.0/telemeetbot-darwin-amd64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-darwin-arm64.tar.gz",
+          "size": 7735858,
+          "downloads": 3,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.0/telemeetbot-darwin-arm64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-386.tar.gz",
+          "size": 7661094,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.0/telemeetbot-linux-386.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-amd64.tar.gz",
+          "size": 7926079,
+          "downloads": 5,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.0/telemeetbot-linux-amd64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm6.tar.gz",
+          "size": 7641064,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.0/telemeetbot-linux-arm6.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm64.tar.gz",
+          "size": 7490989,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.0/telemeetbot-linux-arm64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm7.tar.gz",
+          "size": 7629096,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.0/telemeetbot-linux-arm7.tar.gz"
+        },
+        {
+          "name": "telemeetbot-windows-amd64.zip",
+          "size": 7039410,
+          "downloads": 4,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.0/telemeetbot-windows-amd64.zip"
+        },
+        {
+          "name": "telemeetbot-windows-arm64.zip",
+          "size": 6536936,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.0/telemeetbot-windows-arm64.zip"
+        }
+      ]
+    },
+    {
+      "tag": "v1.2.0",
+      "name": "TeleMeetBot v1.2.0",
+      "publishedAt": "2026-10-26T00:24:59Z",
+      "createdAt": "2026-10-26T00:16:10Z",
+      "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/tag/v1.2.0",
+      "prerelease": false,
+      "draft": false,
+      "body": "# TeleMeetBot v1.2.0 — one command, every platform\n\n**The install release: a verified one-command installer for Windows, Linux and macOS, a setup\nwizard that works everywhere, and the safe lifecycle (upgrade, backup, rollback, uninstall)\naround it.**\n\nMinor bump over v1.1.0: no configuration key was removed or renamed, and every existing config\ncontinues to load. The install surface is new; the engine, bot and website are unchanged.\n\n## Install in one command\n\n**Linux / macOS:**\n\n```bash\ncurl -fsSL https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/latest/download/install.sh | sh\n```\n\n**Windows (PowerShell 5.1+):**\n\n```powershell\nirm https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/latest/download/install.ps1 | iex\n```\n\n**Docker:**\n\n```bash\ndocker compose run --rm telemeetbot telemeetbot --wizard --config /data/telemeetbot.yml\ndocker compose up -d\n```\n\nEach installer:\n\n1. detects the OS and CPU architecture (`amd64` / `arm64` / `armv6` / `armv7` / `386`),\n   dependencies, permissions and whether it is running elevated;\n2. resolves the latest **release tag** and refuses anything that does not look like one;\n3. downloads the matching archive and **verifies it against the release's published SHA-256\n   checksums** — a tampered or corrupted archive aborts the install before anything is written;\n4. installs the binary (`/usr/local/bin/telemeetbot`, `$env:ProgramFiles\\TeleMeetBot`, or a\n   per-user fallback when not elevated);\n5. stages a fail-closed template config — an existing config is **never** overwritten;\n6. installs the OS service: systemd unit on Linux, a Windows service through the SCM, a launchd\n   agent on macOS;\n7. runs the interactive setup wizard, then verifies the health endpoint.\n\nPin a specific release for unattended installs:\n\n```bash\ncurl -fsSL https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.2.0/install.sh | sh -s -- --version v1.2.0\n```\n\nVerify an archive yourself before installing:\n\n```bash\ncurl -fsSLO https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.2.0/SHA256SUMS\nsha256sum -c SHA256SUMS --ignore-missing\n```\n\n## Native binaries for every supported platform\n\nBuilt and smoke-tested on real runners, not just cross-compiled:\n\n| Platform | Archive |\n| --- | --- |\n| Linux amd64 / arm64 / armv6 / armv7 / 386 | `telemeetbot-linux-*.tar.gz` |\n| macOS amd64 (Intel) / arm64 (Apple Silicon) | `telemeetbot-darwin-*.tar.gz` |\n| Windows amd64 / arm64 | `telemeetbot-windows-*.zip` |\n\nOne `SHA256SUMS` manifest covers every archive in the release. The multi-arch Docker image is\npublished as `ghcr.io/opselon/telemeetbot-telemeetbot-implementation:v1.2.0` (and `:latest`).\n\n## Setup wizard\n\n- One Chromium question per platform: `apt-get` on Debian/Ubuntu, Homebrew on macOS, `winget` on\n  Windows. Platforms without a supported package manager print a manual hint instead of running a\n  wrong command.\n- One service question per platform through the new `internal/svcinst` package: a hardened\n  systemd unit (`NoNewPrivileges`, `ProtectSystem=full`, `PrivateTmp`), a Windows service with a\n  restart-on-failure policy, a launchd agent with `KeepAlive`.\n- **Re-running the wizard over a live install is safe**: the previous config is backed up to\n  `config.yml.bak` before the new one is written.\n\n## Lifecycle\n\n```bash\ntelemeetbot --wizard                  # re-run setup (backs up the previous config)\ntelemeetbot --restore-backup          # roll the config back to that backup\ntelemeetbot --check                   # doctor: config, browser, permissions, disk, network\ntelemeetbot --uninstall               # stop + remove the service, then the binary\ntelemeetbot --uninstall --keep-binary # remove only the service registration\n```\n\n- **`--uninstall` never deletes the config, the data directory or the session history** — the\n  bot token and saved meetings survive an uninstall so a re-install picks up where you left off.\n- Uninstalling a **running** service requires `--yes` or a typed `yes`; without confirmation it\n  fails closed and leaves the bot alone.\n- The uninstall refuses to delete a binary that sits in a source checkout (a developer build),\n  and converges when run twice.\n\n## Windows service support\n\nThe binary now runs natively under the Windows Service Control Manager: it auto-detects when it\nwas started by the SCM, runs the bot in the service loop, reports state transitions and honours\nthe 30-second Stop window with a clean shutdown. Signal handling was split per platform because\nSIGTERM cannot be caught on Windows. Health, disk-space and media-manager code that used\n`statfs(2)` now goes through a per-platform disk layer, so the whole tree builds and runs on\nWindows and macOS.\n\n## Upgrading from v1.1.0\n\n- Replace the binary; the config format is unchanged. The installer does this without touching\n  an existing config.\n- If you installed v1.0.0/v1.1.0 with the old `raw.githubusercontent.com` bootstrapping URL,\n  switch to the release-pinned command above: it resolves a real tag and verifies checksums.\n- The CI upgrade-path job proves a v1.1.0-era config loads, normalizes and validates under the\n  new binary, and that a wizard re-run merges over it instead of dropping operator keys.\n\n## Checksums\n\nEvery artifact in this release is covered by `SHA256SUMS`. Download it from the release and run\n`sha256sum -c SHA256SUMS --ignore-missing` before installing.\n",
+      "assets": [
+        {
+          "name": "install.ps1",
+          "size": 9699,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.2.0/install.ps1"
+        },
+        {
+          "name": "install.sh",
+          "size": 9370,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.2.0/install.sh"
+        },
+        {
+          "name": "SHA256SUMS",
+          "size": 869,
+          "downloads": 2,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.2.0/SHA256SUMS"
+        },
+        {
+          "name": "telemeetbot-darwin-amd64.tar.gz",
+          "size": 8029033,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.2.0/telemeetbot-darwin-amd64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-darwin-arm64.tar.gz",
+          "size": 7735562,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.2.0/telemeetbot-darwin-arm64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-386.tar.gz",
+          "size": 7663221,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.2.0/telemeetbot-linux-386.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-amd64.tar.gz",
+          "size": 7925753,
+          "downloads": 3,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.2.0/telemeetbot-linux-amd64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm6.tar.gz",
+          "size": 7639345,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.2.0/telemeetbot-linux-arm6.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm64.tar.gz",
+          "size": 7490570,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.2.0/telemeetbot-linux-arm64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm7.tar.gz",
+          "size": 7628455,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.2.0/telemeetbot-linux-arm7.tar.gz"
+        },
+        {
+          "name": "telemeetbot-windows-amd64.zip",
+          "size": 7038680,
+          "downloads": 2,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.2.0/telemeetbot-windows-amd64.zip"
+        },
+        {
+          "name": "telemeetbot-windows-arm64.zip",
+          "size": 6536182,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.2.0/telemeetbot-windows-arm64.zip"
+        }
+      ]
+    },
     {
       "tag": "v1.1.0",
       "name": "TeleMeetBot v1.1.0",
@@ -38,7 +290,7 @@
         {
           "name": "telemeetbot-linux-amd64.tar.gz",
           "size": 5807269,
-          "downloads": 1,
+          "downloads": 2,
           "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.1.0/telemeetbot-linux-amd64.tar.gz"
         },
         {

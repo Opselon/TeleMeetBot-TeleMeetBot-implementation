@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -97,7 +99,7 @@ type Session struct {
 	// play cycle may drive the media tab at a time. switchGen is the generation
 	// counter that lets an in-flight switch notice a newer request and abort.
 	switchMu  sync.Mutex
-	switchGen uint64
+	switchGen atomic.Uint64
 	// switchRun is the browser-facing half of a switch (navigate → prepare →
 	// play). It is nil in production, where the real rod-based implementation
 	// runs; package tests may substitute a fake so the orchestration — the
@@ -111,6 +113,12 @@ type Session struct {
 	// machine — readiness, clamping, verification, rapid presses — can be
 	// exercised without Chromium.
 	mediaRun func(action string, arg float64) (mediaStatus, error)
+
+	// Playlist queue fields
+	queueMu     sync.RWMutex
+	queue       []QueueItem
+	queueIdx    int
+	nextQueueID int
 }
 
 // Status is a dashboard-friendly snapshot.
@@ -138,6 +146,11 @@ type Status struct {
 	PlayMode string
 	// LocalFile reports the downloaded media backing the session, if any.
 	LocalFile localFileStatus
+	// Queue fields
+	QueueLength int
+	QueueIndex  int
+	HasNext     bool
+	HasPrevious bool
 }
 
 // Elapsed is how long the session has been running.
@@ -156,6 +169,12 @@ func (st Status) Elapsed() time.Duration {
 func (s *Session) Snapshot() Status {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	s.queueMu.RLock()
+	qLen := len(s.queue)
+	qIdx := s.queueIdx
+	s.queueMu.RUnlock()
+
 	return Status{
 		ID:             s.ID,
 		State:          s.state,
@@ -178,6 +197,10 @@ func (s *Session) Snapshot() Status {
 		FallbackReason: s.audioRep.FallbackReason,
 		PlayMode:       string(s.playMode),
 		LocalFile:      s.localFileStatus(),
+		QueueLength:    qLen,
+		QueueIndex:     qIdx,
+		HasNext:        qIdx >= 0 && qIdx+1 < qLen,
+		HasPrevious:    qIdx > 0,
 	}
 }
 
@@ -341,15 +364,21 @@ func (s *Session) run() {
 	s.setState(StateJoining, "[4/6] Joining meeting")
 	s.log.Infof("[PIPELINE:session] [STEP 4/6] session %s: handling prejoin and host gate...", s.ID)
 	if err := s.joinMeeting(); err != nil {
-		if s.ctx.Err() == nil {
-			s.setError(err)
+		if s.ctx.Err() != nil {
+			s.setState(StateCancelled, "cancelled")
+			return
 		}
+		if strings.Contains(err.Error(), "timed out") {
+			s.setState(StateTimedOut, err.Error())
+		}
+		s.setError(err)
 		return
 	}
 	s.mu.Lock()
 	s.joined = time.Now()
 	s.mu.Unlock()
-	s.log.Infof("[PIPELINE:session] [STEP 4/6] session %s: joined the meeting after %s", s.ID, s.joined.Sub(s.created).Round(time.Second))
+	s.setState(StateAdmitted, "[4/6] Admitted to meeting")
+	s.log.Infof("[PIPELINE:session] [STEP 4/6] session %s: admitted to meeting after %s", s.ID, s.joined.Sub(s.created).Round(time.Second))
 	s.emit(EventJoined, "joined the meeting")
 
 	s.setState(StateSharing, "[5/6] Starting screen share")
@@ -398,11 +427,17 @@ func (s *Session) cleanup() {
 		_ = meet.Close()
 	}
 	s.releaseLocalMedia("session stop or close")
+	s.cleanupQueue()
 	s.mu.Lock()
-	if s.state != StateError {
-		s.state = StateEnded
-		if s.detail == "" || s.detail == "streaming" {
-			s.detail = "left the meeting"
+	if !IsTerminalState(s.state) {
+		if s.ctx != nil && s.ctx.Err() != nil {
+			s.state = StateCancelled
+			s.detail = "cancelled"
+		} else {
+			s.state = StateCompleted
+			if s.detail == "" || s.detail == "streaming" || s.detail == "[6/6] Streaming live" {
+				s.detail = "left the meeting"
+			}
 		}
 	}
 	if s.ended.IsZero() {
@@ -494,9 +529,23 @@ func (s *Session) watch() {
 			if st.Error != "" {
 				s.setDetail("player error: " + st.Error)
 			}
-			// A frozen position with a "playing" player is a stall (buffering,
-			// a rotated consent wall, a dead decoder) even when paused=false.
-			if st.Count > 0 && !st.Paused {
+			if st.Ended && !st.Paused {
+				if s.snapshotState() == StateStreaming {
+					if s.hasNextInQueue() {
+						s.log.Infof("[PIPELINE:queue] session %s: media playback ended, auto-advancing to next item", s.ID)
+						s.setState(StateJoining, "advancing queue")
+						go func() {
+							if err := s.Next(); err != nil && !errors.Is(err, ErrQueueEnd) {
+								s.log.Errorf("[PIPELINE:queue] session %s: auto-advance failed: %v", s.ID, err)
+							}
+						}()
+					} else {
+						s.setDetail("playback completed (end of queue)")
+					}
+				}
+			} else if st.Count > 0 && !st.Paused {
+				// A frozen position with a "playing" player is a stall (buffering,
+				// a rotated consent wall, a dead decoder) even when paused=false.
 				if lastCur >= 0 && st.CurrentTime-lastCur < 0.05 {
 					stalled++
 				} else {
@@ -778,6 +827,22 @@ func (s *Session) joinMeeting() error {
 	var lastStage string
 	lastWaitNote := time.Time{}
 	reloadCount := 0
+	joinClicked := false
+	joinClickedAt := time.Time{}
+
+	computeReloadInterval := func(attempts int) time.Duration {
+		base := 20 * time.Second
+		if attempts >= 2 {
+			base = 25 * time.Second
+		}
+		if attempts >= 5 {
+			base = 30 * time.Second
+		}
+		jitter := time.Duration(rand.Intn(4000)) * time.Millisecond
+		return base + jitter
+	}
+	currentReloadWait := computeReloadInterval(0)
+
 	for time.Now().Before(deadline) {
 		if s.ctx.Err() != nil {
 			return s.ctx.Err()
@@ -796,11 +861,12 @@ func (s *Session) joinMeeting() error {
 		switch stage {
 		case "meeting":
 			s.log.Infof("[PIPELINE:meet] session %s: joined the meeting (meeting stage detected)", s.ID)
+			s.setState(StateAdmitted, "[4/6] Admitted to meeting")
 			s.turnOffMeetingCamera()
 			return nil
 		case "lobby":
 			extendWaitForHost()
-			s.setState(StateAdmitting, "[4/6] Waiting for host to admit bot")
+			s.setState(StateWaitingForAdmission, "[4/6] Waiting for host to admit bot")
 			pace = lobbyPollInterval
 			s.logHostWait(&lastWaitNote, "lobby", "waiting to be admitted", 0, hostWaitStarted)
 		case "blocked":
@@ -815,9 +881,12 @@ func (s *Session) joinMeeting() error {
 			// not to the dashboard text where every increment forces a message
 			// edit and a state-file rewrite.
 			extendWaitForHost()
-			s.setState(StateAdmitting, "[4/6] Host-restricted meeting: waiting for host")
-			if time.Since(s.lastMeetLoad) >= meetReloadInterval {
+			s.setState(StateWaitingForAdmission, "[4/6] Host-restricted meeting: waiting for host")
+			interval := currentReloadWait
+			if time.Since(s.lastMeetLoad) >= interval {
 				reloadCount++
+				currentReloadWait = computeReloadInterval(reloadCount)
+				joinClicked = false
 				s.log.Infof("[PIPELINE:meet] session %s: host-restricted meeting, re-requesting entry (attempt %d, waited %s)",
 					s.ID, reloadCount, time.Since(hostWaitStarted).Round(time.Second))
 				if err := s.reopenMeet(); err != nil {
@@ -828,7 +897,7 @@ func (s *Session) joinMeeting() error {
 				// Nothing can change until the next re-request: wait it out
 				// (bounded, so admission is still noticed quickly).
 				pace = blockedPollInterval
-				if remaining := meetReloadInterval - time.Since(s.lastMeetLoad); remaining < pace {
+				if remaining := interval - time.Since(s.lastMeetLoad); remaining < pace {
 					// Never trim the wait to nothing: a sub-tick pace would
 					// turn the last moments before a reload into a poll storm.
 					if remaining < 250*time.Millisecond {
@@ -844,9 +913,16 @@ func (s *Session) joinMeeting() error {
 			s.setState(StateJoining, "[4/6] Prejoin screen: muting camera/mic & entering")
 			s.fillGuestName()
 			s.mutePrejoinDevices()
-			if clicked, label := s.clickJoin(); clicked {
-				s.log.Infof("[PIPELINE:meet] session %s: clicked %q", s.ID, label)
-				pace = 1500 * time.Millisecond
+			if !joinClicked || time.Since(joinClickedAt) > 12*time.Second {
+				if clicked, label := s.clickJoin(); clicked {
+					joinClicked = true
+					joinClickedAt = time.Now()
+					s.log.Infof("[PIPELINE:meet] session %s: clicked %q", s.ID, label)
+					s.setState(StateWaitingForAdmission, "[4/6] Waiting for host to admit bot")
+					pace = 1500 * time.Millisecond
+				}
+			} else {
+				pace = 1000 * time.Millisecond
 			}
 		default:
 			// Unknown/loading: a little patience.
@@ -1335,4 +1411,18 @@ func (s *Session) MediaExpiresAt() time.Time {
 		return time.Time{}
 	}
 	return s.localFile.expiresAt
+}
+
+// SetSwitchRunForTesting overrides the switch runner for deterministic tests.
+func (s *Session) SetSwitchRunForTesting(fn func(target MediaTarget, stale func() bool) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.switchRun = fn
+}
+
+// SetMediaPageForTesting overrides the media page for deterministic tests.
+func (s *Session) SetMediaPageForTesting(p *rod.Page) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mediaPage = p
 }

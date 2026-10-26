@@ -43,7 +43,13 @@ type flow struct {
 	// sessionID is set only by stepSwitchMedia: the live session whose media
 	// tab will be pointed at the new link.
 	sessionID string
-	updated   time.Time
+	// mediaID is the media-manager entry backing a staged Telegram file
+	// (f.media holds its loopback URL). It is empty for typed links: only an
+	// ingested file carries a lease that must be handed to the session.
+	mediaID string
+	// queue holds any additional media URLs to populate the playlist.
+	queue   []string
+	updated time.Time
 }
 
 // getFlow returns the user's pending wizard.
@@ -143,23 +149,49 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 		return
 	}
 
-	// A message with no usable text is not necessarily empty: forwarded media
-	// (audio/video/document/voice) arrives with an empty caption. Ingest it
-	// instead of dropping it, so a user can forward a file to present it.
-	if text == "" && tgHasMedia(m) {
+	// Forwarded media (audio/video/document/voice) arrives through the ingestion path.
+	if tgHasMedia(m) {
 		b.handleTelegramMedia(chatID, userID, m)
 		return
 	}
 
+	urls := extractURLs(text)
 	// Free text belongs to the wizard when one is open.
 	f := b.getFlow(userID)
 	if f == nil || f.step == stepNone {
-		// A bare media link while a session is live is most likely an attempt
-		// to change what is on screen: point at the switch flow instead of
-		// pretending the message was meaningless.
-		if target, err := b.classify(text); err == nil && len(b.eng.Active()) > 0 {
-			b.sendText(chatID, fmt.Sprintf("🔀 Got <code>%s</code>.\n\nOpen the session card and press <b>Switch media</b> to put it on the share — the meeting and the share stay up.", esc(truncate(target.URL, 120))), sessionsKB(b.statuses()))
-			return
+		if len(urls) > 0 {
+			if len(b.eng.Active()) > 0 {
+				// Live session active! Enqueue valid URLs directly in submission order
+				s := b.eng.Active()[0]
+				added, err := s.Enqueue(urls...)
+				if err != nil {
+					b.sendText(chatID, "❌ "+esc(err.Error()), mainMenuKB())
+					return
+				}
+				items, curIdx := s.QueueSnapshot()
+				var qRecs []store.QueueItemRecord
+				for _, it := range items {
+					qRecs = append(qRecs, store.QueueItemRecord{ID: it.ID, URL: it.URL, Title: it.Title})
+				}
+				b.st.UpdateQueue(string(s.ID), qRecs, curIdx)
+				b.sendText(chatID, fmt.Sprintf("➕ Enqueued %d item(s) to session <code>%s</code> (Total in queue: %d)",
+					len(added), s.ID, len(items)), enqueuedKB(string(s.ID), added[0].ID))
+				return
+			}
+			if len(urls) > 1 {
+				// Batch URLs when no session is live: stage them and prompt for Meet link
+				f := &flow{step: stepMeet, media: urls[0], queue: urls[1:]}
+				b.setFlow(userID, f)
+				b.sendText(chatID, fmt.Sprintf("▶️ <b>New stream (%d items queued)</b>\n\nSend a Google Meet link to launch playback.", len(urls)), cancelKB())
+				return
+			}
+			target, err := b.classify(urls[0])
+			if err == nil {
+				f := &flow{step: stepMeet, media: target.URL}
+				b.setFlow(userID, f)
+				b.sendText(chatID, fmt.Sprintf("▶️ <b>New stream</b>\n\n🎞 <code>%s</code>\n\nSend a Google Meet link to launch.", esc(truncate(target.URL, 70))), cancelKB())
+				return
+			}
 		}
 		b.sendText(chatID, "Use /new (or ➕ New stream) to start a session.", mainMenuKB())
 		return
@@ -193,6 +225,25 @@ func (b *Bot) stepInput(chatID, userID int64, f *flow, text string) {
 			return
 		}
 		f.meet = normalized
+		// A staged Telegram file already supplies the media: the wizard is
+		// done as soon as the Meet link is known, so the user is never asked
+		// to re-send a link they cannot reach.
+		if strings.TrimSpace(f.media) != "" {
+			f.step = stepNone
+			b.setFlow(userID, f)
+			userLang := b.st.GetUserAudioLang(userID)
+			kind := engine.MediaDirect
+			if items := b.getPending(userID); len(items) > 0 {
+				for _, it := range items {
+					if it.URL == f.media {
+						kind = it.Kind
+						break
+					}
+				}
+			}
+			b.sendText(chatID, confirmText(f.meet, f.media, kind, userLang, b.st.GetUserMediaMode(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID)))
+			return
+		}
 		f.step = stepMedia
 		b.setFlow(userID, f)
 		b.sendText(chatID, flowText(stepMedia, f.meet), cancelKB())
@@ -225,6 +276,11 @@ func (b *Bot) classify(raw string) (engine.MediaTarget, error) {
 // Telegram-ingestion path (a downloaded local file) so both end in the same
 // confirmation card.
 func (b *Bot) applyWizardMedia(chatID, userID int64, f *flow, target engine.MediaTarget) {
+	// A staged Telegram file keeps its own lease until the session that will
+	// play it has leased it too; only then may the flow's pin be dropped.
+	if engine.IsLocalMediaURL(target.URL) {
+		b.handoffPending(userID, f.mediaID)
+	}
 	f.media = target.URL
 	f.step = stepNone
 	b.setFlow(userID, f)
@@ -255,8 +311,7 @@ func (b *Bot) applyMediaSwitchTarget(chatID, userID int64, f *flow, target engin
 		b.sendText(chatID, "This session is gone — nothing to switch.", mainMenuKB())
 		return
 	}
-	switch s.Snapshot().State {
-	case engine.StateEnded, engine.StateError:
+	if engine.IsTerminalState(s.Snapshot().State) {
 		b.clearFlow(userID)
 		b.sendText(chatID, "This session has ended — nothing to switch.", mainMenuKB())
 		return
@@ -328,17 +383,26 @@ func (b *Bot) launch(chatID, userID int64) {
 		return
 	}
 	userLang := b.st.GetUserAudioLang(userID)
-	sess, err := b.eng.Start(context.Background(), engine.StartRequest{
+	req := engine.StartRequest{
 		MeetLink:  f.meet,
 		MediaLink: f.media,
 		AudioLang: userLang,
 		PlayMode:  b.st.GetUserMediaMode(userID),
-	})
+	}
+	if len(f.queue) > 0 {
+		req.Queue = f.queue
+	}
+	sess, err := b.eng.Start(context.Background(), req)
 	if err != nil {
 		b.sendText(chatID, "❌ "+esc(err.Error()), mainMenuKB())
 		return
 	}
 	b.clearFlow(userID)
+	var qItemRecs []store.QueueItemRecord
+	items, curIdx := sess.QueueSnapshot()
+	for _, it := range items {
+		qItemRecs = append(qItemRecs, store.QueueItemRecord{ID: it.ID, URL: it.URL, Title: it.Title})
+	}
 	b.st.Add(store.Record{
 		ID:        string(sess.ID),
 		MeetURL:   sess.MeetURL,
@@ -347,6 +411,8 @@ func (b *Bot) launch(chatID, userID int64) {
 		State:     engine.StateStarting,
 		ChatID:    chatID,
 		CreatedAt: time.Now(),
+		Queue:     qItemRecs,
+		QueueIdx:  curIdx,
 	})
 	b.mu.Lock()
 	b.sessionChats[string(sess.ID)] = chatID
@@ -433,6 +499,10 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 		st := s.Snapshot()
 		_ = b.api.Edit(chatID, msgID, sessionCardText(st), sessionCardKB(st))
 		b.bindCard(chatID, msgID, s, st)
+	case strings.HasPrefix(data, "pm:"):
+		b.handlePendingCallback(chatID, userID, msgID, data)
+	case strings.HasPrefix(data, "q:"):
+		b.handleQueueCallback(chatID, userID, msgID, q, data)
 	case strings.HasPrefix(data, "act:"):
 		b.handleAction(chatID, msgID, q, data)
 	case strings.HasPrefix(data, cbMeetPick) || strings.HasPrefix(data, cbMeetDelete) ||
@@ -520,6 +590,37 @@ func (b *Bot) handleAction(chatID int64, msgID int, q *tgbotapi.CallbackQuery, d
 	var err error
 	toast := ""
 	switch action {
+	case "next":
+		err = s.Next()
+		if err != nil {
+			toast = err.Error()
+		} else {
+			toast = "⏭ Next track"
+		}
+		items, curIdx := s.QueueSnapshot()
+		var qRecs []store.QueueItemRecord
+		for _, it := range items {
+			qRecs = append(qRecs, store.QueueItemRecord{ID: it.ID, URL: it.URL, Title: it.Title})
+		}
+		b.st.UpdateQueue(string(s.ID), qRecs, curIdx)
+	case "prev":
+		err = s.Previous()
+		if err != nil {
+			toast = err.Error()
+		} else {
+			toast = "⏮ Previous track"
+		}
+		items, curIdx := s.QueueSnapshot()
+		var qRecs []store.QueueItemRecord
+		for _, it := range items {
+			qRecs = append(qRecs, store.QueueItemRecord{ID: it.ID, URL: it.URL, Title: it.Title})
+		}
+		b.st.UpdateQueue(string(s.ID), qRecs, curIdx)
+	case "queue":
+		items, curIdx := s.QueueSnapshot()
+		_ = b.api.AnswerCallback(q.ID, "")
+		_ = b.api.Edit(chatID, msgID, queueViewText(st, items, curIdx), queueViewKB(st, items, curIdx))
+		return
 	case "pause":
 		err, toast = s.Pause(), "paused"
 	case "resume":
@@ -664,4 +765,96 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// extractURLs finds all http(s) URLs in a text message, preserving submission order.
+func extractURLs(text string) []string {
+	fields := strings.Fields(text)
+	var urls []string
+	for _, f := range fields {
+		f = strings.Trim(f, "<>(),;\"'[]")
+		if strings.HasPrefix(strings.ToLower(f), "http://") || strings.HasPrefix(strings.ToLower(f), "https://") {
+			urls = append(urls, f)
+		}
+	}
+	return urls
+}
+
+// handleQueueCallback handles playlist operations.
+func (b *Bot) handleQueueCallback(chatID, userID int64, msgID int, q *tgbotapi.CallbackQuery, data string) {
+	parts := strings.Split(data, ":")
+	if len(parts) < 3 {
+		_ = b.api.AnswerCallback(q.ID, "bad queue action")
+		return
+	}
+	sub := parts[1]
+	sid := parts[2]
+	s := b.eng.Get(engine.SessionID(sid))
+	if s == nil {
+		_ = b.api.AnswerCallback(q.ID, "session not found")
+		_ = b.api.Edit(chatID, msgID, "This session has ended.", mainMenuKB())
+		return
+	}
+	st := s.Snapshot()
+	items, curIdx := s.QueueSnapshot()
+
+	switch sub {
+	case "jump":
+		if len(parts) < 4 {
+			return
+		}
+		itemID := parts[3]
+		idx := -1
+		for i, it := range items {
+			if it.ID == itemID {
+				idx = i
+				break
+			}
+		}
+		if idx >= 0 {
+			if err := s.JumpTo(idx); err != nil {
+				_ = b.api.AnswerCallback(q.ID, "jump failed: "+err.Error())
+			} else {
+				_ = b.api.AnswerCallback(q.ID, fmt.Sprintf("switched to item %d", idx+1))
+			}
+		}
+		st = s.Snapshot()
+		_ = b.api.Edit(chatID, msgID, sessionCardText(st), sessionCardKB(st))
+
+	case "clear_confirm":
+		_ = b.api.AnswerCallback(q.ID, "")
+		_ = b.api.Edit(chatID, msgID, fmt.Sprintf("⚠️ <b>Clear Upcoming Queue?</b>\n\nThis will remove all upcoming items after the currently playing item from session <code>%s</code>.", sid), queueClearConfirmKB(sid))
+
+	case "do_clear":
+		_ = s.ClearUpcoming()
+		_ = b.api.AnswerCallback(q.ID, "upcoming queue cleared")
+		items, curIdx = s.QueueSnapshot()
+		var qRecs []store.QueueItemRecord
+		for _, it := range items {
+			qRecs = append(qRecs, store.QueueItemRecord{ID: it.ID, URL: it.URL, Title: it.Title})
+		}
+		b.st.UpdateQueue(sid, qRecs, curIdx)
+		st = s.Snapshot()
+		_ = b.api.Edit(chatID, msgID, queueViewText(st, items, curIdx), queueViewKB(st, items, curIdx))
+
+	case "rm_menu":
+		_ = b.api.AnswerCallback(q.ID, "")
+		_ = b.api.Edit(chatID, msgID, "❌ <b>Select an upcoming item to remove:</b>", queueRemoveMenuKB(sid, items, curIdx))
+
+	case "rm":
+		if len(parts) < 4 {
+			return
+		}
+		itemID := parts[3]
+		_ = s.RemoveQueueItem(itemID)
+		_ = b.api.AnswerCallback(q.ID, "item removed")
+		items, curIdx = s.QueueSnapshot()
+		var qRecs []store.QueueItemRecord
+		for _, it := range items {
+			qRecs = append(qRecs, store.QueueItemRecord{ID: it.ID, URL: it.URL, Title: it.Title})
+		}
+		b.st.UpdateQueue(sid, qRecs, curIdx)
+		st = s.Snapshot()
+		_ = b.api.Edit(chatID, msgID, queueViewText(st, items, curIdx), queueViewKB(st, items, curIdx))
+	}
 }

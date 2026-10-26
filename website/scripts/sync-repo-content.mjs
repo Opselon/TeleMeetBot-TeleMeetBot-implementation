@@ -70,6 +70,10 @@ const COMMAND_DOCS = {
   new: 'Start the two-step stream wizard (Meet link → media link). Accepts both links inline.',
   stream: 'Alias of /new.',
   sessions: 'List running sessions with their state and elapsed time.',
+  audiotrack: 'Select or inspect the audio language track for multi-audio YouTube streams.',
+  audiolang: 'Alias of /audiotrack.',
+  lang: 'Alias of /audiotrack.',
+  language: 'Alias of /audiotrack.',
   health: 'Health snapshot: version, browser, disk, uptime and active sessions.',
   settings: 'Print the effective configuration summary (secrets masked).',
   help: 'Usage overview with every command and button.',
@@ -80,7 +84,7 @@ const COMMAND_DOCS = {
 };
 const flowsGo = read('internal/bot/flows.go');
 const INLINE_ACTIONS = new Set([
-  'pause', 'resume', 'mute', 'unmute', 'voldown', 'volup', 'back10', 'fwd10', 'back30', 'fwd30', 'back60', 'fwd60', 'restart', 'refresh', 'stop',
+  'pause', 'resume', 'mute', 'unmute', 'voldown', 'volup', 'back10', 'fwd10', 'back30', 'fwd30', 'back60', 'fwd60', 'restart', 'refresh', 'stop', 'next', 'prev', 'queue', 'jump', 'clear_confirm', 'do_clear', 'rm_menu', 'rm',
 ]);
 const commands = [];
 for (const m of flowsGo.matchAll(/case\s+"([a-z0-9]+)"(?:,\s*"([a-z0-9]+)")?:/g)) {
@@ -102,7 +106,7 @@ for (const m of flowsGo.matchAll(/case\s+"([a-z0-9]+)"(?:,\s*"([a-z0-9]+)")?:/g)
     description: COMMAND_DOCS[primary],
     alias: names[1] ? `/${names[1]}` : null,
     context:
-      /case\s+"(pause|resume|mute|unmute|voldown|volup|back10|fwd10|back30|fwd30|back60|fwd60|restart|refresh|stop)":/.test(m[0])
+      /case\s+"(pause|resume|mute|unmute|voldown|volup|back10|fwd10|back30|fwd30|back60|fwd60|restart|refresh|stop|next|prev|queue)":/.test(m[0])
         ? 'inline'
         : 'command',
   });
@@ -124,9 +128,12 @@ const inlineActions = [
   { action: 'restart', label: '♻️ Restart media', description: 'Reload the media tab and start playback from the beginning.' },
   { action: 'refresh', label: '🔄 Refresh', description: 'Re-render the session card from live state.' },
   { action: 'stop', label: '⏹ Stop', description: 'End the session and close its Chromium.' },
+  { action: 'next', label: '⏭ Next', description: 'Advance to the next track in the playlist queue.' },
+  { action: 'prev', label: '⏮ Prev', description: 'Return to the previous track in the playlist queue.' },
+  { action: 'queue', label: '📋 Queue', description: 'View and manage playlist queue tracks.' },
 ];
 const actionSet = new Set();
-for (const m of flowsGo.matchAll(/case\s+"(pause|resume|mute|unmute|voldown|volup|back10|fwd10|back30|fwd30|back60|fwd60|restart|refresh|stop)":/g)) {
+for (const m of flowsGo.matchAll(/case\s+"(pause|resume|mute|unmute|voldown|volup|back10|fwd10|back30|fwd30|back60|fwd60|restart|refresh|stop|next|prev|queue)":/g)) {
   actionSet.add(m[1]);
 }
 const missingActions = [...actionSet].filter((a) => !inlineActions.some((i) => i.action === a));
@@ -286,23 +293,32 @@ const unwiredConfig = Object.entries(UNWIRED_KEYS)
 // ------------------------------------------------------------------- states
 const managerGo = read('internal/engine/manager.go');
 const STATE_DOCS = {
+  queued: 'Session is enqueued and waiting for browser worker launch.',
   starting: 'Launching the session browser and preparing the player.',
   joining: 'Loading the media tab and opening Google Meet (prejoin handling included).',
+  waiting_for_admission: 'Waiting for host admission or for a host-restricted gate to clear.',
   admitting: 'Waiting in the lobby for a host to admit the bot.',
+  admitted: 'Google Meet has admitted the bot; preparing media presentation.',
   sharing: 'Meet accepted Present — waiting for the tab capture to go live.',
+  active: 'Media stream is live and actively presenting.',
   streaming: 'Playback is running; progress, volume and speed are tracked.',
   paused: 'Playback paused from the session card.',
+  leaving: 'Session is winding down and gracefully exiting the meeting.',
+  completed: 'Session completed successfully and cleanly disconnected.',
   ended: 'Session finished or stopped; Chromium was closed.',
+  failed: 'Session encountered an unrecoverable failure.',
   error: 'Session failed; the card carries the error detail.',
+  cancelled: 'Session was cancelled by user request.',
+  timed_out: 'Admission or startup deadline expired without host approval.',
 };
 const viewsGo = read('internal/bot/views.go');
 const emojiFor = (goName) => {
   const block = viewsGo.slice(viewsGo.indexOf('func stateEmoji'));
-  const match = block.match(new RegExp(`case engine\\.${goName}:\\s*\\n\\s*return "([^"]+)"`));
+  const match = block.match(new RegExp(`case[^:]*engine\\.${goName}[^:]*:\\s*\\n\\s*return "([^"]+)"`));
   return match ? match[1] : '·';
 };
 const states = [];
-for (const m of managerGo.matchAll(/State([A-Z]\w+)\s*=\s*"([a-z]+)"/g)) {
+for (const m of managerGo.matchAll(/State([A-Z]\w+)\s*=\s*"([a-z_]+)"/g)) {
   const [, goName, value] = m;
   if (!STATE_DOCS[value]) {
     throw new Error(`sync: engine state "${value}" has no documented description in STATE_DOCS`);
