@@ -1039,6 +1039,15 @@ func (s *Session) startPresenting() error {
 		if s.meetTab() != nil {
 			opened, label := s.clickPresentButton()
 			if opened {
+				if label == "opened more options" {
+					time.Sleep(350 * time.Millisecond)
+					if ok, _ := s.presenting(); ok {
+						return nil
+					}
+					if nextOpened, nextLabel := s.clickPresentButton(); nextOpened && nextLabel != "opened more options" {
+						label = nextLabel
+					}
+				}
 				lastState = label
 				s.log.Infof("[PIPELINE:present] session %s: opened present menu (%s)", s.ID, label)
 				s.setState(StateSharing, "[5/6] Opened present menu: selecting tab")
