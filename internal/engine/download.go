@@ -29,6 +29,50 @@ type downloadResult struct {
 	Via         string
 }
 
+// leaseMedia pins the downloaded file behind res to this session so the
+// media TTL cannot delete it while the session is still playing it. The TTL
+// stays an orphan-cleanup policy: an expired file is only reclaimed once no
+// lease holds it, so a long video (or a paused stream) survives its own
+// deadline for the whole owning session.
+//
+// The lease is taken before the session records the local file, so there is
+// no window in which the janitor can delete a file the session is about to
+// adopt. It is released on stop, close, media switch, mode change or failure
+// (see releaseLocalMedia).
+func (s *Session) leaseMedia(res *downloadResult) {
+	if res == nil || strings.TrimSpace(res.ID) == "" {
+		return
+	}
+	mgr := s.mediaManager()
+	if mgr == nil || !mgr.Enabled() {
+		return
+	}
+	if !mgr.Lease(res.ID, s.leaseOwner()) {
+		s.logger().Warnf("[PIPELINE:session] session %s: could not lease %s (already reaped?)", s.ID, res.ID)
+	}
+}
+
+// leaseOwner is the identity this session registers leases under. It derives
+// from the session id so the lease map and the download manifest stay
+// greppable together.
+func (s *Session) leaseOwner() string { return "owner-" + strings.TrimSpace(string(s.ID)) }
+
+// releaseLease drops this session's lease on one entry. force=false keeps the
+// file alive while another session still holds it; force=true is the session
+// teardown path, which still honours remaining owners and only deletes when
+// the entry is unowned.
+func (s *Session) releaseLease(id string, force bool) {
+	mgr := s.mediaManager()
+	if mgr == nil || !mgr.Enabled() || strings.TrimSpace(id) == "" {
+		return
+	}
+	if force {
+		mgr.ReleaseAndDelete(id, s.leaseOwner())
+	} else {
+		mgr.Release(id, s.leaseOwner())
+	}
+}
+
 // ModeOf returns the effective playback mode for this session, defaulting to
 // Browser so existing callers keep their behaviour when nothing is set.
 func (s *Session) ModeOf() mediateam.Mode {
@@ -72,6 +116,11 @@ func (s *Session) prepareLocalMedia() error {
 	// duplicate the file and point the session at a second copy; instead
 	// adopt the existing entry directly.
 	if entry, ok := mgr.FindByURL(s.MediaURL); ok {
+		// Lease before recording the local file: the entry already carries an
+		// expiry deadline, so the adoption must not race the janitor.
+		s.leaseMedia(&downloadResult{ID: entry.ID, LocalURL: s.MediaURL, Path: entry.Path,
+			ContentType: entry.ContentType, Bytes: entry.Bytes, ExpiresAt: entry.ExpiresAt,
+			Via: "telegram"})
 		s.mu.Lock()
 		s.localFile = &localMedia{
 			id:        entry.ID,
@@ -94,6 +143,9 @@ func (s *Session) prepareLocalMedia() error {
 	if res == nil || strings.TrimSpace(res.LocalURL) == "" {
 		return errors.New("download produced no local file")
 	}
+	// Lease before the local file is recorded, so the janitor cannot delete
+	// it between the download completing and the session owning it.
+	s.leaseMedia(res)
 	s.mu.Lock()
 	s.localFile = &localMedia{
 		id:        res.ID,
@@ -142,7 +194,11 @@ func (s *Session) runDownloadWithID(ctx context.Context, mgr *mediateam.Manager,
 	}, nil
 }
 
-// releaseLocalMedia removes the session's active downloaded media from disk immediately.
+// releaseLocalMedia removes the session's active downloaded media and frees
+// the file from disk immediately, while never destroying a file another
+// session still owns. The session teardown path (stop, close, switch, mode
+// change) releases the lease with force=true: the file is deleted unless a
+// different owner still holds a lease on the same entry.
 func (s *Session) releaseLocalMedia(why string) {
 	s.mu.Lock()
 	local := s.localFile
@@ -152,6 +208,10 @@ func (s *Session) releaseLocalMedia(why string) {
 	if local != nil {
 		s.freeLocalMediaEntry(local, why)
 	}
+	// Residue guard: a crashed or superseded download can leave per-id files
+	// behind with no localFile recorded. Remove() is unconditional here —
+	// this is the explicit teardown path, and any genuine co-owner holds its
+	// own lease on the manifest entry, not on these leftovers.
 	mgr := s.mediaManager()
 	if mgr != nil && mgr.Enabled() {
 		_ = mgr.Remove(s.downloadID())
@@ -159,22 +219,35 @@ func (s *Session) releaseLocalMedia(why string) {
 	}
 }
 
-// freeLocalMediaEntry deletes one downloaded file entry from disk and bookkeeping.
+// freeLocalMediaEntry releases one downloaded file. force semantics live on
+// the lease API: the file is deleted unless another session still holds a
+// lease on the same entry (two sessions sharing one Telegram-ingested file,
+// for instance).
 func (s *Session) freeLocalMediaEntry(local *localMedia, why string) {
 	if local == nil {
 		return
 	}
+	id := local.id
+	if id == "" {
+		id = s.downloadID()
+	}
 	mgr := s.mediaManager()
 	if mgr != nil && mgr.Enabled() {
-		id := local.id
-		if id == "" {
-			id = s.downloadID()
-		}
-		if err := mgr.Remove(id); err != nil {
-			s.logger().Warnf("[PIPELINE:session] session %s: remove local media %s (%s): %v", s.ID, id, why, err)
+		// Session teardown: force-release the lease, which deletes the file
+		// only when no other owner remains.
+		if !mgr.ReleaseAndDelete(id, s.leaseOwner()) {
+			owners := mgr.LeaseOwners(id)
+			if len(owners) > 0 {
+				s.logger().Infof("[PIPELINE:session] session %s: kept local media %s (%s); still owned by %v", s.ID, id, why, owners)
+				return
+			}
 		} else {
 			s.logger().Infof("[PIPELINE:session] session %s: freed local media %s (%s)", s.ID, id, why)
+			return
 		}
+		// ReleaseAndDelete returned false with no remaining owners: the entry
+		// was already gone, or the manifest write failed. Sweep any residue.
+		_ = mgr.Remove(id)
 	} else if local.path != "" {
 		_ = os.Remove(local.path)
 	}

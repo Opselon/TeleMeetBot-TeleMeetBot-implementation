@@ -458,17 +458,22 @@ func (s *Session) watch() {
 			return
 		case <-ticker.C:
 		}
-		// The one-hour expiry is mandatory: an active session never extends
-		// it. When the downloaded file is gone, playback must stop rather
-		// than silently switch back to the remote URL.
-		if local := s.localFile; local != nil && !local.expiresAt.IsZero() && time.Now().After(local.expiresAt) {
+		// The TTL is an orphan-cleanup deadline, not a playback deadline.
+		// A leased file survives past ExpiresAt for the whole owning
+		// session (any duration, any pause), so an expired-but-leased file
+		// is healthy and must NOT stop playback. Only an expired file the
+		// janitor actually deleted surfaces as a player error below, which
+		// the media status reports as a decode/source failure.
+		local := s.localFile
+		if local != nil && !local.expiresAt.IsZero() && time.Now().After(local.expiresAt) {
 			if !s.expiryWarned {
 				s.expiryWarned = true
-				s.log.Warnf("[PIPELINE:session] session %s: downloaded media expired (%s) — stopping playback", s.ID, localexpiresAtText(local))
-				s.setDetail("downloaded media expired after the 1-hour limit")
+				if mgr := s.mediaManager(); mgr != nil && mgr.Enabled() && mgr.LeaseOwners(local.id) != nil {
+					s.log.Infof("[PIPELINE:session] session %s: media is past its TTL and held by an active lease (%s) — playback continues", s.ID, local.id)
+				} else {
+					s.log.Warnf("[PIPELINE:session] session %s: downloaded media is past its TTL (%s) — the janitor will reclaim it when unused", s.ID, localexpiresAtText(local))
+				}
 			}
-			s.setError(errors.New("downloaded media expired (1-hour limit)"))
-			return
 		}
 		st, err := s.queryMedia()
 		if err != nil {
@@ -1319,8 +1324,10 @@ func (s *Session) SetPlaybackMode(mode mediateam.Mode) error {
 	return nil
 }
 
-// MediaExpiresAt returns the expiry deadline of the session's downloaded
-// media (zero when streaming from the remote URL).
+// MediaExpiresAt returns the orphan-cleanup deadline of the session's
+// downloaded media (zero when streaming from the remote URL). It is NOT a
+// playback deadline: while the session holds an active lease, the file stays
+// playable past this moment for the whole session.
 func (s *Session) MediaExpiresAt() time.Time {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

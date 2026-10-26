@@ -83,7 +83,8 @@ func testAllowLoopback(t *testing.T) {
 }
 
 // TestFileDeletedAfterExpiry proves a downloaded file is gone once its TTL
-// passes, and that the manifest stops tracking it.
+// passes and nothing holds a lease on it, and that the manifest stops tracking
+// it. This is the orphan-reclamation half of the TTL policy.
 func TestFileDeletedAfterExpiry(t *testing.T) {
 	testAllowLoopback(t)
 	m, dir := testManager(t, 500*time.Millisecond)
@@ -112,7 +113,7 @@ func TestFileDeletedAfterExpiry(t *testing.T) {
 		t.Fatal(msg)
 	}
 
-	// Sweep after expiry: the file MUST be deleted.
+	// Sweep after expiry: the file MUST be deleted (no lease holds it).
 	waitFor(func() bool {
 		n := m.Sweep(context.Background())
 		_, err := os.Stat(res.Path)
@@ -129,6 +130,91 @@ func TestFileDeletedAfterExpiry(t *testing.T) {
 		if strings.Contains(string(raw), `"clip"`) {
 			t.Fatal("manifest still references the deleted file")
 		}
+	}
+}
+
+// TestLeaseKeepsExpiredFileAndReleaseReclaimsIt proves both halves of the
+// lifecycle in one flow: an expired-but-leased file survives the janitor, and
+// the moment its owner releases the lease, the file is reclaimed.
+func TestLeaseKeepsExpiredFileAndReleaseReclaimsIt(t *testing.T) {
+	testAllowLoopback(t)
+	m, _ := testManager(t, 300*time.Millisecond)
+	srv := serveMedia(t, 0, "video/mp4", smallMP4)
+
+	res, err := m.Download(context.Background(), DownloadRequest{URL: srv.URL, Kind: "direct", ID: "pinned"})
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if !m.Lease("pinned", "owner-a") {
+		t.Fatal("Lease on a live entry must succeed")
+	}
+
+	waitFor := func(cond func() bool, msg string) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if cond() {
+				return
+			}
+			m.Sweep(context.Background())
+			time.Sleep(30 * time.Millisecond)
+		}
+		t.Fatal(msg)
+	}
+
+	// Past the deadline the janitor must NOT delete the leased file.
+	waitFor(func() bool { return time.Now().After(res.ExpiresAt) }, "deadline never passed")
+	for i := 0; i < 5; i++ {
+		if n := m.Sweep(context.Background()); n > 0 {
+			t.Fatalf("janitor deleted a leased file (%d removed)", n)
+		}
+		time.Sleep(60 * time.Millisecond)
+	}
+	if _, err := os.Stat(res.Path); err != nil {
+		t.Fatalf("leased file was deleted after its deadline: %v", err)
+	}
+	if owners := m.LeaseOwners("pinned"); len(owners) != 1 || owners[0] != "owner-a" {
+		t.Fatalf("LeaseOwners = %v, want [owner-a]", owners)
+	}
+
+	// Releasing the expired entry removes it at once: a media switch is a
+	// prompt cleanup, not a deferred one.
+	if !m.Release("pinned", "owner-a") {
+		t.Fatal("Release must remove an expired, unowned entry")
+	}
+	if _, err := os.Stat(res.Path); !os.IsNotExist(err) {
+		t.Fatal("an expired file whose lease was released was not deleted")
+	}
+}
+
+// TestReleaseKeepsFreshFileForJanitor proves a non-forced release does NOT
+// delete a file whose deadline has not passed: a still-fresh file belongs to
+// the janitor and its deadline, not to the releasing caller.
+func TestReleaseKeepsFreshFileForJanitor(t *testing.T) {
+	testAllowLoopback(t)
+	m, _ := testManager(t, time.Minute) // comfortably longer than this test
+	srv := serveMedia(t, 0, "video/mp4", smallMP4)
+
+	res, err := m.Download(context.Background(), DownloadRequest{URL: srv.URL, Kind: "direct", ID: "fresh"})
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if !m.Lease("fresh", "owner-a") {
+		t.Fatal("Lease must succeed")
+	}
+	if m.Release("fresh", "owner-a") {
+		t.Fatal("Release deleted a file whose deadline had not passed")
+	}
+	if _, err := os.Stat(res.Path); err != nil {
+		t.Fatalf("a fresh file was deleted by a non-forced release: %v", err)
+	}
+	if owners := m.LeaseOwners("fresh"); len(owners) != 0 {
+		t.Fatalf("the lease was not dropped: %v", owners)
+	}
+	// The entry is unleased and fresh: the janitor still owns it, so it must
+	// still be tracked.
+	if _, ok := m.entries.Get("fresh"); !ok {
+		t.Fatal("a fresh entry disappeared from the manifest after a release")
 	}
 }
 
@@ -187,16 +273,20 @@ func TestExpiredFilesCleanedAfterRestart(t *testing.T) {
 	}
 }
 
-// TestActiveSessionCannotRetainExpiredFile proves expiry is not deferred while
-// a file is "in use": once the deadline passes, the janitor reclaims the file
-// even though the engine may still consider the session active.
-func TestActiveSessionCannotRetainExpiredFile(t *testing.T) {
+// TestActiveLeaseRetainsExpiredFile proves the fix, not the bug: a leased
+// file survives past its deadline for as long as a session is using it, no
+// matter how many janitor sweeps run. Expiry is an orphan-cleanup policy, not
+// a hard deadline that destroys media an active session is streaming.
+func TestActiveLeaseRetainsExpiredFile(t *testing.T) {
 	testAllowLoopback(t)
 	m, _ := testManager(t, 400*time.Millisecond)
 	srv := serveMedia(t, 0, "video/mp4", smallMP4)
 	res, err := m.Download(context.Background(), DownloadRequest{URL: srv.URL, Kind: "direct", ID: "clip"})
 	if err != nil {
 		t.Fatalf("Download: %v", err)
+	}
+	if !m.Lease(res.ID, "session-a") {
+		t.Fatal("Lease must succeed for a live entry")
 	}
 	// "Playback" holds a handle for far longer than the TTL.
 	start := make(chan struct{})
@@ -210,22 +300,157 @@ func TestActiveSessionCannotRetainExpiredFile(t *testing.T) {
 			return
 		}
 		defer f.Close()
-		time.Sleep(2 * time.Second) // simulate an active session
+		time.Sleep(2 * time.Second) // simulate an active, long session
 	}()
 	<-start
 
-	// Run the janitor loop: it must not wait for "playback" to finish.
+	// Run the janitor every tick past the deadline: the file MUST survive.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		m.Sweep(context.Background())
+		if n := m.Sweep(context.Background()); n > 0 {
+			wg.Wait()
+			t.Fatalf("janitor deleted an actively leased file (%d removed)", n)
+		}
 		if _, err := os.Stat(res.Path); os.IsNotExist(err) {
 			wg.Wait()
-			return // pass: file reclaimed while a session was active
+			t.Fatal("an actively leased file was deleted after its deadline")
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 	wg.Wait()
-	t.Fatal("file was retained past its expiry because a session was active")
+	if _, err := os.Stat(res.Path); err != nil {
+		t.Fatalf("leased file vanished while its session was still active: %v", err)
+	}
+
+	// And once the session ends, the file is reclaimed promptly.
+	if !m.ReleaseAndDelete(res.ID, "session-a") {
+		t.Fatal("ReleaseAndDelete must remove an unowned expired file")
+	}
+	if _, err := os.Stat(res.Path); !os.IsNotExist(err) {
+		t.Fatal("expired file was not deleted after its owning session released it")
+	}
+}
+
+// TestMultipleSessionsShareLease proves two sessions can own the same entry:
+// the first teardown keeps the file alive for the second, and only the last
+// owner's release removes it. This is the multiple-session-ownership safety
+// case (e.g. two sessions streaming the same Telegram-ingested file).
+func TestMultipleSessionsShareLease(t *testing.T) {
+	testAllowLoopback(t)
+	m, _ := testManager(t, 400*time.Millisecond)
+	srv := serveMedia(t, 0, "video/mp4", smallMP4)
+	res, err := m.Download(context.Background(), DownloadRequest{URL: srv.URL, Kind: "direct", ID: "shared"})
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if !m.Lease(res.ID, "owner-a") || !m.Lease(res.ID, "owner-b") {
+		t.Fatal("both owners must be able to lease the entry")
+	}
+	if got := len(m.LeaseOwners(res.ID)); got != 2 {
+		t.Fatalf(" LeaseOwners = %d, want 2", got)
+	}
+
+	// First session stops: the file must survive for the second session.
+	if m.ReleaseAndDelete(res.ID, "owner-a") {
+		t.Fatal("the file must not be removed while a second owner holds it")
+	}
+	if _, err := os.Stat(res.Path); err != nil {
+		t.Fatalf("file was deleted while a second session still held a lease: %v", err)
+	}
+
+	// Past the deadline the janitor still respects the remaining owner.
+	for time.Now().Before(res.ExpiresAt) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	for i := 0; i < 5; i++ {
+		if n := m.Sweep(context.Background()); n > 0 {
+			t.Fatalf("janitor deleted a file with one active lease left (%d removed)", n)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// The last owner's teardown removes it.
+	if !m.ReleaseAndDelete(res.ID, "owner-b") {
+		t.Fatal("the last owner's release must remove the file")
+	}
+	if _, err := os.Stat(res.Path); !os.IsNotExist(err) {
+		t.Fatal("the file survived its last owner's teardown")
+	}
+}
+
+// TestLeaseOnUnknownEntryHarmless proves leases are best-effort pins: leasing
+// an entry that no longer exists (janitor race, restart) is a no-op that
+// never panics and never resurrects a file.
+func TestLeaseOnUnknownEntryHarmless(t *testing.T) {
+	m, _ := testManager(t, time.Minute)
+	if m.Lease("does-not-exist", "owner-a") {
+		t.Fatal("Lease on an unknown entry must report failure")
+	}
+	if owners := m.LeaseOwners("does-not-exist"); len(owners) != 0 {
+		t.Fatalf("LeaseOwners on an unknown entry = %v, want none", owners)
+	}
+	// Releasing an unknown entry must not panic or report a removal.
+	if m.Release("does-not-exist", "owner-a") {
+		t.Fatal("Release on an unknown entry must report no removal")
+	}
+	if m.ReleaseAndDelete("does-not-exist", "owner-a") {
+		t.Fatal("ReleaseAndDelete on an unknown entry must report no removal")
+	}
+	// Nil/empty args must be tolerated (defensive: the engine calls these on
+	// every teardown).
+	var nilMgr *Manager
+	if nilMgr.Lease("x", "y") || nilMgr.Release("x", "y") || nilMgr.ReleaseAndDelete("x", "y") {
+		t.Fatal("a nil manager must not report a removal")
+	}
+}
+
+// TestRestartDropsStaleLeases proves crash recovery: leases live in memory
+// only, so after a restart no pin protects an orphaned file and the startup
+// sweep reclaims it.
+func TestRestartDropsStaleLeases(t *testing.T) {
+	testAllowLoopback(t)
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.TTL = time.Hour
+	m1, err := NewManager(opts, &testLog{t: t})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	srv := serveMedia(t, 0, "video/mp4", smallMP4)
+	res, err := m1.Download(context.Background(), DownloadRequest{URL: srv.URL, Kind: "direct", ID: "clip"})
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if !m1.Lease("clip", "owner-a") {
+		t.Fatal("lease must succeed while the process is up")
+	}
+	// Backdate the entry so the restart sees it as expired.
+	m1.entries.RemoveIf(func(e Entry) bool { return true })
+	if err := m1.entries.Add(Entry{
+		ID: "clip", Path: res.Path, URL: srv.URL, Kind: "direct",
+		ContentType: "video/mp4", Bytes: 4096,
+		FetchedAt: time.Now().Add(-2 * time.Hour),
+		ExpiresAt: time.Now().Add(-time.Hour),
+	}); err != nil {
+		t.Fatalf("backdate entry: %v", err)
+	}
+	m1.Close()
+
+	// The "restart": a fresh manager shares no memory with the dead one, so
+	// the orphaned lease does not protect the file.
+	m2, err := NewManager(opts, &testLog{t: t})
+	if err != nil {
+		t.Fatalf("NewManager(restart): %v", err)
+	}
+	t.Cleanup(func() { m2.Close() })
+	m2.Start(context.Background())
+
+	if _, err := os.Stat(res.Path); !os.IsNotExist(err) {
+		t.Fatalf("an orphaned file protected by a stale (in-memory) lease survived a restart: %v", err)
+	}
+	if _, ok := m2.entries.Get("clip"); ok {
+		t.Fatal("restart kept an expired entry in the manifest")
+	}
 }
 
 // TestUnrelatedFilesNeverDeleted proves the janitor only removes files it

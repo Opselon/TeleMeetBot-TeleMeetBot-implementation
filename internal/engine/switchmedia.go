@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 
 	mediateam "github.com/Opselon/TeleMeetBot/internal/media"
 )
@@ -156,9 +157,14 @@ func (s *Session) applySwitch(target MediaTarget, stale func() bool) error {
 				return fmt.Errorf("download switch media: %w", err)
 			}
 			if stale() {
-				s.freeLocalMediaEntry(&localMedia{id: res.ID, path: res.Path}, "switch superseded")
+				// Never adopted: no lease was taken, so Remove is the right
+				// (unconditional) cleanup for this superseded download.
+				s.freeUnleasedResult(res, "switch superseded")
 				return errSwitchSuperseded
 			}
+			// The switch generation still owns the tab: lease the new file
+			// before the session adopts it.
+			s.leaseMedia(res)
 			newLocal = &localMedia{
 				id:        res.ID,
 				url:       res.LocalURL,
@@ -207,6 +213,9 @@ func (s *Session) applySwitch(target MediaTarget, stale func() bool) error {
 	}
 
 	s.mu.Lock()
+	// The switch landed. The OLD local file is dropped from the session and
+	// its lease released (force: this is the teardown of that ownership).
+	// Its file vanishes unless another session still leases it.
 	oldToFree := s.localFile
 	s.localFile = newLocal
 	s.mu.Unlock()
@@ -216,6 +225,24 @@ func (s *Session) applySwitch(target MediaTarget, stale func() bool) error {
 	}
 
 	return nil
+}
+
+// freeUnleasedResult cleans up a download result the session never adopted
+// (and therefore never leased): a superseded switch download. Remove is
+// unconditional because there is no lease to honour.
+func (s *Session) freeUnleasedResult(res *downloadResult, why string) {
+	if res == nil {
+		return
+	}
+	mgr := s.mediaManager()
+	if mgr == nil || !mgr.Enabled() {
+		if res.Path != "" {
+			_ = os.Remove(res.Path)
+		}
+		return
+	}
+	_ = mgr.Remove(res.ID)
+	s.logger().Infof("[PIPELINE:session] session %s: freed unleased media %s (%s)", s.ID, res.ID, why)
 }
 
 // rollBackSwitch restores the previous media after a failed switch, keeping the
