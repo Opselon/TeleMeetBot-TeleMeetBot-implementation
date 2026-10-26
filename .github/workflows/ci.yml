@@ -114,6 +114,7 @@ jobs:
           cp /tmp/bin/telemeetbot "$stage/telemeetbot"
           cp README.md README.fa.md LICENSE "$stage"/
           cp -r deploy "$stage"/
+          cp scripts/install.sh "$stage"/
           tar -C "$stage" -czf /tmp/rel/telemeetbot-linux-amd64.tar.gz .
           ( cd /tmp/rel && sha256sum telemeetbot-linux-amd64.tar.gz > SHA256SUMS )
 
@@ -130,8 +131,17 @@ jobs:
           export BASE_URL="http://127.0.0.1:18099"
           prefix="$(mktemp -d)"
 
-          echo "--- 1: a good install with --no-wizard --no-service ---"
-          bash scripts/install.sh --version v0.0.0-ci --prefix "$prefix" \
+          # The published one-command install pipes the script straight into
+          # `sh` (dash on Debian/Ubuntu, busybox on Alpine). Run the installer
+          # the same way here — invoking it with bash would let a bash-only
+          # construct ([[]], ${var//x/y}) ship and break every real user.
+          pipe_install() { # pipe_install <args…>
+            sh -c 'curl -fsS "$0" | sh -s -- "$@"' \
+              http://127.0.0.1:18099/install.sh "$@"
+          }
+
+          echo "--- 1: a good install with --no-wizard --no-service (piped into sh) ---"
+          pipe_install --version v0.0.0-ci --prefix "$prefix" \
             --config-dir "$prefix/etc/telemeetbot" --no-wizard --no-service \
             </dev/null
 
@@ -139,7 +149,7 @@ jobs:
           "$prefix/bin/telemeetbot" --version
 
           echo "--- 2: idempotent re-install ---"
-          bash scripts/install.sh --version v0.0.0-ci --prefix "$prefix" \
+          pipe_install --version v0.0.0-ci --prefix "$prefix" \
             --config-dir "$prefix/etc/telemeetbot" --no-wizard --no-service </dev/null
           "$prefix/bin/telemeetbot" --version
 
@@ -148,7 +158,7 @@ jobs:
           # from this mirror again and must find a valid checksum file.
           cp /tmp/rel/SHA256SUMS "$TMP_SUMS_BACKUP"
           echo "0000000000000000000000000000000000000000000000000000000000000000  telemeetbot-linux-amd64.tar.gz" > /tmp/rel/SHA256SUMS
-          if bash scripts/install.sh --version v0.0.0-ci --prefix "$prefix" \
+          if pipe_install --version v0.0.0-ci --prefix "$prefix" \
             --config-dir "$prefix/etc/telemeetbot" --no-wizard --no-service </dev/null; then
             echo "FAIL: installer accepted a tampered checksum"; exit 1
           else
@@ -157,7 +167,7 @@ jobs:
           cp "$TMP_SUMS_BACKUP" /tmp/rel/SHA256SUMS
 
           echo "--- 4: reject a version that is not a tag ---"
-          if bash scripts/install.sh --version head --prefix "$prefix" \
+          if pipe_install --version head --prefix "$prefix" \
             --config-dir "$prefix/etc/telemeetbot" --no-wizard --no-service </dev/null; then
             echo "FAIL: installer accepted a non-tag version"; exit 1
           else
@@ -170,13 +180,49 @@ jobs:
           # by design), so a non-root step cannot stat inside it; read the
           # file instead — that proves both the content and the install.
           prefix2="$(mktemp -d)"
-          bash scripts/install.sh --version v0.0.0-ci --prefix "$prefix2" \
+          pipe_install --version v0.0.0-ci --prefix "$prefix2" \
             --config-dir "$prefix2/etc/telemeetbot" --no-wizard --no-service </dev/null
           test -x "$prefix2/bin/telemeetbot" || { echo "FAIL: no binary in $prefix2/bin"; exit 1; }
           "$prefix2/bin/telemeetbot" --version
           sudo cat "$prefix2/etc/telemeetbot/config.yml" > /dev/null \
             || { echo "FAIL: no readable staged config"; exit 1; }
           echo "OK: binary + staged config present on a fresh prefix"
+
+          echo "--- 6: a version-mismatched binary must abort the install ---"
+          # The installer proves the install landed by running the binary and
+          # matching its --version against the requested release tag. Serve an
+          # archive whose binary reports a different stamp and expect a refusal
+          # instead of a silent, wrong-version install.
+          go build -trimpath \
+            -ldflags "-s -w -X github.com/Opselon/TeleMeetBot/internal/config.Version=v0.0.0-OTHER" \
+            -o /tmp/bin/telemeetbot-other ./cmd/telemeetbot
+          stage2="$(mktemp -d)"
+          cp /tmp/bin/telemeetbot-other "$stage2/telemeetbot"
+          cp README.md README.fa.md LICENSE "$stage2"/
+          cp -r deploy "$stage2"/
+          mkdir -p /tmp/rel-mismatch
+          tar -C "$stage2" -czf /tmp/rel-mismatch/telemeetbot-linux-amd64.tar.gz .
+          ( cd /tmp/rel-mismatch && sha256sum telemeetbot-linux-amd64.tar.gz > SHA256SUMS )
+          python3 -m http.server 18098 --directory /tmp/rel-mismatch >/dev/null 2>&1 &
+          server2=$!
+          trap 'kill $server 2>/dev/null || true; kill $server2 2>/dev/null || true' EXIT
+          sleep 1
+          if BASE_URL="http://127.0.0.1:18098" sh -c \
+            'curl -fsS http://127.0.0.1:18098/install.sh | sh -s -- --version v0.0.0-mismatch --prefix '"$prefix2"'-m --config-dir '"$prefix2"'-m/etc --no-wizard --no-service' \
+            </dev/null; then
+            echo "FAIL: installer accepted a version-mismatched binary"; exit 1
+          else
+            echo "OK: installer aborted on a version mismatch"
+          fi
+
+          echo "--- 7: the installer is POSIX sh, not bash-only ---"
+          # dash is /bin/sh on Debian/Ubuntu; busybox covers Alpine. A script
+          # that only runs under bash breaks the published one-liner.
+          if command -v dash >/dev/null 2>&1; then
+            dash -n scripts/install.sh && echo "OK: dash parses install.sh"
+          fi
+          shellcheck -s sh -S warning scripts/install.sh \
+            || { echo "FAIL: shellcheck (POSIX sh) found issues in install.sh"; exit 1; }
 
       - name: lifecycle — backup, restore, uninstall
         run: |

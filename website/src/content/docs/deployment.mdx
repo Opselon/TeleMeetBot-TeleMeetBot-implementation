@@ -84,10 +84,11 @@ prefer a file and handle rotation yourself.
 ## Installer
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/main/scripts/install.sh | sudo bash
+curl -fsSL https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/latest/download/install.sh | sh
 ```
 
-It verifies the download against `SHA256SUMS` before installing, stages the example config with mode
+It verifies the download against `SHA256SUMS` before installing, proves the binary runs by matching
+its `--version` against the release tag, stages the example config with mode
 `0640`, installs (but does not enable) the unit, then runs the wizard. Use `--version`, `--prefix`,
 `--config-dir`, `--no-wizard` or `--no-service` to change that behaviour.
 
@@ -135,7 +136,7 @@ docker compose up -d
 Bare metal:
 
 ```bash
-curl -fsSL …/scripts/install.sh | sudo bash -s -- --no-wizard
+curl -fsSL https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/latest/download/install.sh | sudo sh -s -- --no-wizard
 sudo systemctl restart telemeetbot
 ```
 

@@ -1,13 +1,19 @@
-#!/usr/bin/env bash
-# TeleMeetBot one-command installer (Linux/macOS).
+#!/bin/sh
+# TeleMeetBot one-command installer (Linux/macOS) — POSIX sh.
 #
 #   curl -fsSL https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/latest/download/install.sh | sh
 #
+# This file is intentionally written in POSIX sh (checked with `shellcheck -s sh`),
+# NOT bash: the published one-command install pipes the script straight into `sh`,
+# which is dash on Debian/Ubuntu and busybox on Alpine. A bash-only construct
+# ([[ ]], ${var//pat/re}, local in functions) dies with "[[: not found" on those
+# hosts before anything is installed. Keep it POSIX.
+
 # What it does:
 #   1. detects OS, architecture, dependencies, permissions and runtime
 #   2. downloads the matching release archive from a pinned trusted release
 #   3. verifies it against the release's published SHA-256 checksums
-#   4. installs the telemeetbot binary
+#   4. installs the telemeetbot binary, then verifies it runs (--version)
 #   5. stages a fail-closed template config (never overwrites an existing one)
 #   6. installs the OS service (systemd on Linux, launchd on macOS) — optional
 #   7. runs the interactive setup wizard (unless --no-wizard), then verifies health
@@ -20,7 +26,8 @@
 # BASE_URL swaps the download root (default https://github.com/$REPO/releases/download)
 # so the install path can be tested against a local mirror. Release asset
 # names stay exactly the same.
-set -euo pipefail
+# shellcheck shell=sh
+set -eu
 
 REPO="${REPO:-Opselon/TeleMeetBot-TeleMeetBot-implementation}"
 VERSION="${VERSION:-latest}"
@@ -33,17 +40,17 @@ SERVICE=1
 START=1
 DRY_RUN=0
 
-while [[ $# -gt 0 ]]; do
+while [ $# -gt 0 ]; do
   case "$1" in
-    --version) VERSION="${2:?}"; shift 2 ;;
-    --prefix) PREFIX="${2:?}"; shift 2 ;;
-    --config-dir) CONFIG_DIR="${2:?}"; shift 2 ;;
-    --data-dir) DATA_DIR="${2:?}"; shift 2 ;;
+    --version) VERSION="${2:-}"; [ -n "$VERSION" ] || { echo "error: --version needs a value" >&2; exit 2; }; shift 2 ;;
+    --prefix) PREFIX="${2:-}"; [ -n "$PREFIX" ] || { echo "error: --prefix needs a value" >&2; exit 2; }; shift 2 ;;
+    --config-dir) CONFIG_DIR="${2:-}"; [ -n "$CONFIG_DIR" ] || { echo "error: --config-dir needs a value" >&2; exit 2; }; shift 2 ;;
+    --data-dir) DATA_DIR="${2:-}"; [ -n "$DATA_DIR" ] || { echo "error: --data-dir needs a value" >&2; exit 2; }; shift 2 ;;
     --no-wizard) WIZARD=0; shift ;;
     --no-service) SERVICE=0; shift ;;
     --no-start) START=0; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
-    -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
@@ -77,25 +84,30 @@ command -v tar >/dev/null || die "tar is required"
 
 # ---- permission detection -------------------------------------------------
 SUDO=""
-if [[ "$(id -u)" -ne 0 ]]; then
+if [ "$(id -u)" -ne 0 ]; then
   if command -v sudo >/dev/null; then
     SUDO="sudo"
-  elif [[ "$PREFIX" == /usr/local || "$PREFIX" == /usr || "$PREFIX" == /opt ]]; then
-    die "installing to $PREFIX needs root (run with sudo or pass --prefix \$HOME/.local)"
+  else
+    case "$PREFIX" in
+      /usr/local|/usr|/opt) die "installing to $PREFIX needs root (run with sudo or pass --prefix \$HOME/.local)" ;;
+    esac
   fi
 fi
 
 # ---- 2. Resolve the pinned trusted release --------------------------------
-if [[ "$VERSION" == "latest" ]]; then
+if [ "$VERSION" = "latest" ]; then
   log "resolving the latest release"
   # Read the whole body first: piping into an early-exiting grep trips SIGPIPE
   # under `set -o pipefail` and aborts the installer.
   latest_json="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest")" \
     || die "cannot reach the GitHub API (check connectivity)"
   VERSION="$(printf '%s' "$latest_json" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
-  [[ -n "$VERSION" ]] || die "could not resolve the latest release"
+  [ -n "$VERSION" ] || die "could not resolve the latest release"
 fi
-[[ "$VERSION" == v* ]] || die "resolved version '$VERSION' does not look like a tag (vX.Y.Z); refusing to install"
+case "$VERSION" in
+  v*) ;;
+  *) die "resolved version '$VERSION' does not look like a tag (vX.Y.Z); refusing to install" ;;
+esac
 
 FILE="telemeetbot-${PLATFORM}-${ARCH}.tar.gz"
 # BASE_URL replaces the *whole* download root, so a mirror serves the release
@@ -122,41 +134,54 @@ fetch "$BASE/SHA256SUMS" "$TMP/SHA256SUMS" || die "download failed: $BASE/SHA256
 log "verifying SHA-256 checksum"
 # SHA256SUMS lines carry bare names; tolerate an optional ./ or .\ prefix
 # (the Windows build of sha256sum writes the latter).
-sum_re=" *\\.?[/\\\\]?${FILE//./\\.}\$"
+sum_re=" *\\.?[/\\\\]?$(printf '%s' "$FILE" | sed 's/\./\\./g')\$"
 ( cd "$TMP" && grep -E "$sum_re" SHA256SUMS | sha256sum -c - ) \
   || die "checksum mismatch — the archive is corrupt or the download was tampered with; aborting"
 
-if [[ "$DRY_RUN" -eq 1 ]]; then
+if [ "$DRY_RUN" -eq 1 ]; then
   log "dry run: verified $FILE, would install to ${PREFIX}/bin/telemeetbot"
   exit 0
 fi
 
 tar -C "$TMP" -xzf "$TMP/$FILE"
-[[ -x "$TMP/telemeetbot" ]] || die "archive does not contain the binary"
+[ -x "$TMP/telemeetbot" ] || die "archive does not contain the binary"
 
 # ---- 4. Install the binary ------------------------------------------------
 log "installing binary to ${PREFIX}/bin/telemeetbot"
 $SUDO install -d -m 0755 "$PREFIX/bin"
 $SUDO install -m 0755 "$TMP/telemeetbot" "$PREFIX/bin/telemeetbot"
 
+# Prove the install actually landed: a broken download, a truncated archive or
+# a glibc/musl mismatch would otherwise surface only when the operator runs
+# the bot hours later. This runs the binary we just installed, on the host we
+# just installed it on, and refuses to claim success otherwise.
+installed_version="$($SUDO "$PREFIX/bin/telemeetbot" --version 2>/dev/null | head -n1)" \
+  || die "installed binary at $PREFIX/bin/telemeetbot would not run; the archive may be corrupt or the platform wrong"
+case "$installed_version" in
+  *"$VERSION"*) log "verified: $installed_version" ;;
+  *) die "installed binary reports '$installed_version' but the release is $VERSION; refusing a version-mismatched install" ;;
+esac
+
 # ---- 5. Config + data dirs ------------------------------------------------
-[[ -n "$DATA_DIR" ]] || DATA_DIR="$CONFIG_DIR/data"
+[ -n "$DATA_DIR" ] || DATA_DIR="$CONFIG_DIR/data"
 $SUDO install -d -m 0750 "$CONFIG_DIR"
-if [[ ! -f "$CONFIG_DIR/config.yml" && -f "$TMP/deploy/config.example.yml" ]]; then
+if [ ! -f "$CONFIG_DIR/config.yml" ] && [ -f "$TMP/deploy/config.example.yml" ]; then
   $SUDO install -m 0640 "$TMP/deploy/config.example.yml" "$CONFIG_DIR/config.yml"
   log "staged a template config at ${CONFIG_DIR}/config.yml — the wizard will edit it"
 fi
 
 # ---- 6. OS service --------------------------------------------------------
 install_systemd() {
-  [[ -f "$TMP/deploy/telemeetbot.service" ]] || return 0
+  if [ ! -f "$TMP/deploy/telemeetbot.service" ]; then
+    return 0
+  fi
   log "installing systemd unit"
   $SUDO install -m 0644 "$TMP/deploy/telemeetbot.service" /etc/systemd/system/telemeetbot.service
   $SUDO systemctl daemon-reload
 }
 
 install_launchd() {
-  local plist="$HOME/Library/LaunchAgents/telemeetbot.plist"
+  plist="$HOME/Library/LaunchAgents/telemeetbot.plist"
   log "installing launchd agent"
   mkdir -p "$(dirname "$plist")"
   printf '%s\n' \
@@ -181,7 +206,7 @@ install_launchd() {
   chmod 0644 "$plist"
 }
 
-if [[ "$SERVICE" -eq 1 ]]; then
+if [ "$SERVICE" -eq 1 ]; then
   case "$PLATFORM" in
     linux)
       if command -v systemctl >/dev/null 2>&1 && $SUDO systemctl is-system-running >/dev/null 2>&1; then
@@ -208,7 +233,7 @@ fi
 
 # ---- 7. Wizard + health verification --------------------------------------
 BIN="$PREFIX/bin/telemeetbot"
-if [[ "$WIZARD" -eq 1 ]]; then
+if [ "$WIZARD" -eq 1 ]; then
   echo
   log "starting the setup wizard (Ctrl+C to abort). Config: ${CONFIG_DIR}/config.yml"
   $SUDO "$BIN" --wizard --config "${CONFIG_DIR}/config.yml"
@@ -223,7 +248,7 @@ else
   log "installed. Run the wizard:  ${SUDO:+$SUDO }$BIN --wizard --config ${CONFIG_DIR}/config.yml"
 fi
 
-if [[ "$START" -eq 1 && "$SERVICE" -eq 1 ]]; then
+if [ "$START" -eq 1 ] && [ "$SERVICE" -eq 1 ]; then
   log "verifying the health endpoint"
   # The wizard binds 127.0.0.1:18080 by default; give the service a moment.
   sleep 2

@@ -98,18 +98,23 @@ curl -fsSL https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/rel
 irm https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/latest/download/install.ps1 | iex
 ```
 
-The installer detects the OS and CPU arch (`amd64`/`arm64`/`arm v6, v7`/`386`), resolves the
-latest **release tag**, downloads the matching archive and **verifies it against the release's
-published SHA-256 checksums** before touching anything. It then installs the binary
-(`/usr/local/bin/telemeetbot` or `%ProgramFiles%\TeleMeetBot`), stages a template config
-(`deploy/config.example.yml`) without overwriting an existing one, installs the OS service
+The installer detects the OS and CPU arch (`amd64`/`arm64`/`arm v6, v7`/`386`), dependencies,
+permissions and whether it is running elevated, resolves the latest **release tag**, downloads the
+matching archive and **verifies it against the release's published SHA-256 checksums** before
+touching anything. It then installs the binary (`/usr/local/bin/telemeetbot` or
+`%ProgramFiles%\TeleMeetBot`), **runs it and matches its `--version` against the release tag** so a
+corrupt or mismatched download can never be reported as a successful install, stages a template
+config (`deploy/config.example.yml`) without overwriting an existing one, installs the OS service
 (systemd on Linux, a Windows service via the SCM, a launchd agent on macOS) and launches the
 setup wizard.
+
+> The installer is written in POSIX `sh`, not bash: the one-command install pipes it straight into
+> `sh`, which is `dash` on Debian/Ubuntu and `busybox` on Alpine. It is tested under both in CI.
 
 Pin a specific release (recommended for unattended installs):
 
 ```bash
-curl -fsSL https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.1.0/install.sh | sh -s -- --version v1.1.0
+curl -fsSL https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.2.0/install.sh | sh -s -- --version v1.2.0
 ```
 
 Other flags: `--version vX.Y.Z` · `--prefix DIR` · `--config-dir DIR` · `--data-dir DIR`
@@ -118,7 +123,7 @@ Other flags: `--version vX.Y.Z` · `--prefix DIR` · `--config-dir DIR` · `--da
 Verify a downloaded archive yourself before installing:
 
 ```bash
-curl -fsSLO https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.1.0/SHA256SUMS
+curl -fsSLO https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.2.0/SHA256SUMS
 sha256sum -c SHA256SUMS --ignore-missing
 ```
 
@@ -393,7 +398,7 @@ internal/
   health/   runtime health snapshot
   web/      /healthz + /livez only
 deploy/     systemd unit example
-scripts/    install.sh, release.sh
+scripts/    install.sh, install.ps1, release.sh
 docs/       release notes
 .github/    CI (tests + real-Chromium integration, docker build)
 ```

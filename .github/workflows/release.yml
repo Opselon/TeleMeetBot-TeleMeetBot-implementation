@@ -174,6 +174,17 @@ jobs:
           # A version print proves the whole binary linked and launched on
           # the target platform, not just that it was compiled.
           "$bin" --version
+          # The version stamped at build time must match the release tag: a
+          # mismatch here means the ldflags wiring is broken, and the
+          # installer's own version gate would then refuse every install.
+          # Refname is vX.Y.Z on tag pushes, or the dispatch input.
+          version="${{ github.ref_name }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+          fi
+          "$bin" --version | grep -F "$version" \
+            || { echo "FAIL: binary version does not contain the release tag $version"; exit 1; }
+          echo "OK: binary reports the release tag"
 
   # ---- build and push the multi-arch Docker image --------------------------
   docker:
@@ -343,3 +354,34 @@ jobs:
             echo "$f -> HTTP $code"
             [ "$code" = "200" ] || { echo "asset $f is not downloadable"; exit 1; }
           done
+
+  # ---- prove the published one-command install actually works ---------------
+  install-from-release:
+    name: install (published release)
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run the published installer against the release it shipped with
+        run: |
+          set -euo pipefail
+          version="${{ github.ref_name }}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            version="${{ inputs.version }}"
+          fi
+          echo "==> one-command install from the published release assets"
+          # Exactly the README one-liner, pinned to the release we just cut.
+          # This is the only test that proves a stranger can actually install
+          # the release: the earlier jobs proved the binaries build and the
+          # assets exist, this one consumes them as a user would.
+          curl -fsSL "https://github.com/${GITHUB_REPOSITORY}/releases/download/${version}/install.sh" \
+            | sh -s -- --version "${version}" --prefix "$HOME/.telemeetbot-install" \
+                 --config-dir "$HOME/.telemeetbot-install/etc" --no-wizard --no-service
+
+          test -x "$HOME/.telemeetbot-install/bin/telemeetbot" \
+            || { echo "FAIL: installer did not install the binary"; exit 1; }
+          # The installer already ran --version and matched the tag; assert it
+          # once more from the install root so the claim is unambiguous.
+          "$HOME/.telemeetbot-install/bin/telemeetbot" --version
+          "$HOME/.telemeetbot-install/bin/telemeetbot" --version | grep -F "${version}" \
+            || { echo "FAIL: installed binary does not report the release tag ${version}"; exit 1; }
+          echo "OK: one-command install from the published release works"
