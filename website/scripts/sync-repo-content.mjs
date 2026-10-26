@@ -81,30 +81,37 @@ const COMMAND_DOCS = {
   stop: 'Stop one session: /stop <id>. Without an id it lists what can be stopped.',
   id: 'Return your numeric Telegram user id (use it in telegram.admins).',
   ping: 'Liveness probe: replies with the process uptime.',
+  playlists: 'Open your persistent playlist library to manage, reorder, or launch playlists.',
+  playlist: 'Alias of /playlists.',
+  library: 'Alias of /playlists.',
+  pl: 'Alias of /playlists.',
+  manage: 'Open the management console: system health, storage, admins, backups and broadcasts.',
+  admin: 'Alias of /manage.',
+  dashboard: 'Alias of /manage.',
+  queue: 'Inspect and manage the media queue of an active session.',
 };
 const flowsGo = read('internal/bot/flows.go');
 const INLINE_ACTIONS = new Set([
-  'pause', 'resume', 'mute', 'unmute', 'voldown', 'volup', 'back10', 'fwd10', 'back30', 'fwd30', 'back60', 'fwd60', 'restart', 'refresh', 'stop', 'next', 'prev', 'queue', 'jump', 'clear_confirm', 'do_clear', 'do_clear_all', 'rm_menu', 'rm',
+  'pause', 'resume', 'mute', 'unmute', 'voldown', 'volup', 'back10', 'fwd10', 'back30', 'fwd30', 'back60', 'fwd60', 'restart', 'refresh', 'stop', 'next', 'prev', 'queue', 'jump', 'clear_confirm', 'do_clear', 'do_clear_all', 'rm_menu', 'rm', 'tools',
 ]);
 const commands = [];
-for (const m of flowsGo.matchAll(/case\s+"([a-z0-9]+)"(?:,\s*"([a-z0-9]+)")?:/g)) {
-  const names = [m[1], m[2]].filter(Boolean);
-  if (INLINE_ACTIONS.has(names[0])) continue;
-  if (!(names[0] in COMMAND_DOCS)) {
-    throw new Error(
-      `sync: bot command "${names[0]}" has no documented description. ` +
-        'Add it to COMMAND_DOCS in website/scripts/sync-repo-content.mjs so the docs cannot drift.',
-    );
-  }
-  if (names[1] && !(names[1] in COMMAND_DOCS)) {
-    throw new Error(`sync: bot command alias "${names[1]}" has no documented description`);
+for (const m of flowsGo.matchAll(/case\s+("[a-z0-9]+"(?:\s*,\s*"[a-z0-9]+")*):/g)) {
+  const names = m[1].split(',').map((s) => s.trim().replace(/"/g, '')).filter(Boolean);
+  if (names.length === 0 || INLINE_ACTIONS.has(names[0])) continue;
+  for (const name of names) {
+    if (!(name in COMMAND_DOCS)) {
+      throw new Error(
+        `sync: bot command "${name}" has no documented description. ` +
+          'Add it to COMMAND_DOCS in website/scripts/sync-repo-content.mjs so the docs cannot drift.',
+      );
+    }
   }
   const primary = names[0];
   commands.push({
     command: `/${names.join(', /')}`,
     name: primary,
     description: COMMAND_DOCS[primary],
-    alias: names[1] ? `/${names[1]}` : null,
+    alias: names[1] ? `/${names.slice(1).join(', /')}` : null,
     context:
       /case\s+"(pause|resume|mute|unmute|voldown|volup|back10|fwd10|back30|fwd30|back60|fwd60|restart|refresh|stop|next|prev|queue)":/.test(m[0])
         ? 'inline'
@@ -131,6 +138,7 @@ const inlineActions = [
   { action: 'next', label: '⏭ Next', description: 'Advance to the next track in the playlist queue.' },
   { action: 'prev', label: '⏮ Prev', description: 'Return to the previous track in the playlist queue.' },
   { action: 'queue', label: '📋 Queue', description: 'View and manage playlist queue tracks.' },
+  { action: 'tools', label: '🎛 Tools', description: 'Open advanced session tools (shuffle, sort, reorder).' },
 ];
 const actionSet = new Set();
 for (const m of flowsGo.matchAll(/case\s+"(pause|resume|mute|unmute|voldown|volup|back10|fwd10|back30|fwd30|back60|fwd60|restart|refresh|stop|next|prev|queue)":/g)) {
