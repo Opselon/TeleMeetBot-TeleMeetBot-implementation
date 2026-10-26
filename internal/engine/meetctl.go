@@ -283,7 +283,27 @@ func (s *Session) clickPresentButton() (bool, string) {
     document.dispatchEvent(evt);
   } catch (e) {}
 
-  // Target leaf button elements only; never match large toolbar containers.
+  // 1. Check if a popup menu is already open and contains a visible present/share menu item:
+  const menuItems = Array.from(document.querySelectorAll('[role="menuitem"], [role="menu"] [role="button"], [role="menu"] li, [role="listbox"] [role="option"]'));
+  for (const item of menuItems) {
+    const r = item.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) continue;
+
+    const itemAria = norm(item.getAttribute('aria-label') || "");
+    const itemTooltip = norm(item.getAttribute('data-tooltip') || "");
+    const itemText = norm(item.innerText || item.textContent || "");
+    if (itemAria.includes("stop") || itemTooltip.includes("stop") || itemText.includes("stop")) continue;
+    if (itemAria.includes("present") || itemAria.includes("share screen") || itemAria.includes("share your screen") ||
+        itemTooltip.includes("present") || itemTooltip.includes("share screen") ||
+        itemText.includes("present") || itemText.includes("share screen") || itemText.includes("share your screen") ||
+        itemText === "share" || itemAria === "share") {
+      try { item.scrollIntoView({block: 'center'}); } catch (e) {}
+      item.click();
+      return (itemAria || itemText || "present menuitem").slice(0, 40);
+    }
+  }
+
+  // 2. Target leaf button elements only; never match large toolbar containers.
   const els = Array.from(document.querySelectorAll('button, [role=button]'));
   let best = null;
   let bestScore = 0;
@@ -331,11 +351,36 @@ func (s *Session) clickPresentButton() (bool, string) {
       best = el;
     }
   }
-  if (!best) return "";
-  const label = norm((best.getAttribute('aria-label') || "") + " " + (best.innerText || ""));
-  try { best.scrollIntoView({block: 'center'}); } catch (e) {}
-  best.click();
-  return (label || "present").slice(0, 40);
+
+  if (best) {
+    const label = norm((best.getAttribute('aria-label') || "") + " " + (best.innerText || ""));
+    try { best.scrollIntoView({block: 'center'}); } catch (e) {}
+    best.click();
+    return (label || "present").slice(0, 40);
+  }
+
+  // 3. Fallback: If no direct present button is visible on toolbar, find and click "More options"
+  // so the menu opens and reveals "Share screen" / "Present now".
+  const moreBtn = els.find(el => {
+    if (el.querySelector('button, [role=button]')) return false;
+    const aria = norm(el.getAttribute('aria-label') || "");
+    const tooltip = norm(el.getAttribute('data-tooltip') || "");
+    const txt = norm(el.innerText || el.textContent || "");
+    const r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return false;
+    // Don't match participant menu (e.g. "More options for Mehrad InanLu")
+    if (aria.includes("for") || tooltip.includes("for")) return false;
+    return aria === "more options" || tooltip === "more options" || txt === "more_vert" ||
+           aria.includes("more options") || tooltip.includes("more options");
+  });
+
+  if (moreBtn) {
+    try { moreBtn.scrollIntoView({block: 'center'}); } catch (e) {}
+    moreBtn.click();
+    return "opened more options";
+  }
+
+  return "";
 }`)
 	if err != nil {
 		return false, ""

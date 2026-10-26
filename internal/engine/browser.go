@@ -275,14 +275,14 @@ func widthOf(cfg BrowserConfig) int {
 	if cfg.WindowWidth > 0 {
 		return cfg.WindowWidth
 	}
-	return 1280
+	return 1920
 }
 
 func heightOf(cfg BrowserConfig) int {
 	if cfg.WindowHeight > 0 {
 		return cfg.WindowHeight
 	}
-	return 800
+	return 1080
 }
 
 func languageOf(cfg BrowserConfig) string {

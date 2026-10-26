@@ -166,3 +166,85 @@ func TestPresentSourceSkipsMenuContainer(t *testing.T) {
 		t.Fatalf("label-matched an element other than the A tab item")
 	}
 }
+
+// meetToolbarMoreOptionsPage reproduces narrow Google Meet layout where "Present now"
+// is nested inside the "More options" popup menu rather than on the toolbar.
+const meetToolbarMoreOptionsPage = `<!doctype html>
+<html><head><meta charset="utf-8"><title>Meet</title></head>
+<body>
+  <div id="controls" role="button">
+    <button id="audio" aria-label="Audio settings">Audio settings</button>
+    <button id="mic" aria-label="Turn off microphone">Microphone</button>
+    <button id="cam" aria-label="Turn off camera">Camera</button>
+    <button id="more" aria-label="More options" onclick="openMoreMenu()">more_vert</button>
+    <button id="leave" aria-label="Leave call">Leave call</button>
+  </div>
+
+  <div id="moreMenu" role="menu" style="display:none">
+    <div role="menuitem" id="itempresent" onclick="openShare()">Share screen</div>
+    <div role="menuitem" id="itemsettings">Settings</div>
+  </div>
+
+  <div id="banner"></div>
+
+<script>
+  function openMoreMenu() {
+    document.getElementById('moreMenu').style.display = 'block';
+    window.__moreOpened = true;
+  }
+  function openShare() {
+    document.getElementById('moreMenu').style.display = 'none';
+    window.__shareClicked = true;
+  }
+</script>
+</body></html>`
+
+func TestClickPresentButtonUnderMoreOptionsMenu(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(meetToolbarMoreOptionsPage))
+	}))
+	defer srv.Close()
+
+	b, closeFn := newTestBrowser(t)
+	defer closeFn()
+
+	page, err := b.Page(proto.TargetCreateTarget{})
+	if err != nil {
+		t.Fatalf("new page: %v", err)
+	}
+	if err := page.Timeout(30 * time.Second).Navigate(srv.URL); err != nil {
+		t.Fatalf("navigate: %v", err)
+	}
+	_ = page.WaitLoad()
+
+	s := &Session{
+		ID:       "s-more-opt",
+		state:    StateSharing,
+		ctx:      context.Background(),
+		meetPage: page,
+		log:      testLogger{t},
+		mgr: &Manager{
+			meetCfg: MeetOptions{PresentMode: "tab", PresentTimeoutSeconds: 8},
+			log:     testLogger{t},
+		},
+	}
+
+	// First call should click "More options" and open the menu
+	opened, label := s.clickPresentButton()
+	if !opened || label != "opened more options" {
+		t.Fatalf("expected opened more options, got opened=%v label=%q", opened, label)
+	}
+	if got := evaluate(t, page, "String(window.__moreOpened === true)"); got != "true" {
+		t.Fatal("more options menu was not opened")
+	}
+
+	// Second call should find "Share screen" in the open menu and click it
+	opened2, label2 := s.clickPresentButton()
+	if !opened2 {
+		t.Fatal("clickPresentButton failed to click item from open menu")
+	}
+	if got := evaluate(t, page, "String(window.__shareClicked === true)"); got != "true" {
+		t.Fatalf("share screen menu item was not clicked, label=%q", label2)
+	}
+}
