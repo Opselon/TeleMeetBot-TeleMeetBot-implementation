@@ -121,7 +121,11 @@ func (s *Session) fillGuestName() bool {
 		s.log.Debugf("[PIPELINE:meet] session %s: fillGuestName skipped: meetTab is nil", s.ID)
 		return false
 	}
-	name, _ := json.Marshal(s.mgr.meetCfg.GuestName)
+	nameToUse := s.mgr.meetCfg.GuestName
+	if s.guestNameOverride != "" {
+		nameToUse = s.guestNameOverride
+	}
+	name, _ := json.Marshal(nameToUse)
 	js := fmt.Sprintf(`() => {
   const NAME = %s;
   if (!NAME) return "no_name";
@@ -155,10 +159,10 @@ func (s *Session) fillGuestName() bool {
 	}
 	status := res.Value.Str()
 	if status == "filled" || status == "already_set" {
-		s.log.Infof("[PIPELINE:meet] session %s: fillGuestName status=%s name=%q", s.ID, status, s.mgr.meetCfg.GuestName)
+		s.log.Infof("[PIPELINE:meet] session %s: fillGuestName status=%s name=%q", s.ID, status, nameToUse)
 		return true
 	}
-	s.log.Debugf("[PIPELINE:meet] session %s: fillGuestName status=%s name=%q", s.ID, status, s.mgr.meetCfg.GuestName)
+	s.log.Debugf("[PIPELINE:meet] session %s: fillGuestName status=%s name=%q", s.ID, status, nameToUse)
 	return false
 }
 

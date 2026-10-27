@@ -1,14 +1,8 @@
 package bot
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"io"
-	"net/http"
-	"time"
-
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
 // showAccount displays or edits the Google Account profile card for a user.
@@ -18,8 +12,13 @@ func (b *Bot) showAccount(chatID, userID int64, msgID int) {
 		return
 	}
 	sum := b.gauth.Summary(userID)
+	authURL, err := b.gauth.AuthURL(userID)
+	if err != nil && b.log != nil {
+		b.log.Debugf("[PIPELINE:googleauth] generate authURL for user %d: %v", userID, err)
+	}
+
 	text := accountText(sum)
-	kb := accountKB(sum.Connected)
+	kb := accountKB(sum, authURL)
 	if msgID > 0 {
 		_ = b.api.Edit(chatID, msgID, text, kb)
 	} else {
@@ -27,7 +26,7 @@ func (b *Bot) showAccount(chatID, userID int64, msgID int) {
 	}
 }
 
-// hasGoogleAccount reports whether userID has active Google authentication cookies.
+// hasGoogleAccount reports whether userID has an active Google authentication profile.
 func (b *Bot) hasGoogleAccount(userID int64) bool {
 	if b.gauth == nil {
 		return false
@@ -35,75 +34,28 @@ func (b *Bot) hasGoogleAccount(userID int64) bool {
 	return b.gauth.Summary(userID).Connected
 }
 
-// saveUserCookies validates and persists raw cookie data for userID.
-func (b *Bot) saveUserCookies(chatID, userID int64, raw []byte, source string) {
+// handleAccountDisconnect revokes and deletes the stored Google OAuth profile for userID.
+func (b *Bot) handleAccountDisconnect(chatID, userID int64, msgID int) {
 	if b.gauth == nil {
-		b.sendText(chatID, "🔴 Google Account profile management is unavailable on this installation.", mainMenuKB())
 		return
 	}
-
-	sum, err := b.gauth.Save(userID, raw)
-	if err != nil {
-		b.log.Warnf("[PIPELINE:googleauth] user %d: failed to save cookies from %s: %v", userID, source, err)
-		b.sendText(chatID, fmt.Sprintf("❌ <b>Failed to load cookies:</b>\n%s\n\nMake sure the file contains active Google cookies (.google.com) and is not expired.", esc(err.Error())), cancelKB())
-		return
+	if err := b.gauth.Revoke(context.Background(), userID); err != nil && b.log != nil {
+		b.log.Warnf("[PIPELINE:googleauth] user %d: revoke profile error: %v", userID, err)
 	}
-
-	b.clearFlow(userID)
-	b.log.Infof("[PIPELINE:googleauth] user %d: successfully saved %d Google cookies from %s", userID, sum.CookieCount, source)
-
-	msg := fmt.Sprintf("✅ <b>Google Account Connected!</b>\n\nSuccessfully saved <b>%d</b> Google session cookies.\nFuture Google Meet and YouTube sessions will join with your authenticated profile.", sum.CookieCount)
-	b.sendText(chatID, msg, accountKB(true))
+	b.showAccount(chatID, userID, msgID)
 }
 
-// handleCookieDocUpload downloads an incoming Telegram document and parses it as cookies.
-func (b *Bot) handleCookieDocUpload(m *tgbotapi.Message, userID, chatID int64) {
-	if m.Document == nil {
-		return
+// NotifyGoogleConnected notifies a user in Telegram when their Google OAuth flow succeeds.
+func (b *Bot) NotifyGoogleConnected(userID int64, email, name string) {
+	displayName := name
+	if displayName == "" {
+		displayName = email
 	}
+	text := fmt.Sprintf("🎉 <b>Google Account Connected!</b>\n\n"+
+		"Signed in as: <b>%s</b> (<code>%s</code>)\n\n"+
+		"Your verified Google identity is now securely linked to your Telegram account. Future sessions will present this identity when joining Google Meet.",
+		esc(displayName), esc(email))
 
-	b.log.Infof("[PIPELINE:googleauth] user %d: downloading cookie file %s (%d bytes)", userID, m.Document.FileName, m.Document.FileSize)
-	data, err := b.downloadTelegramBytes(m.Document.FileID)
-	if err != nil {
-		b.log.Warnf("[PIPELINE:googleauth] user %d: download cookie file failed: %v", userID, err)
-		b.sendText(chatID, fmt.Sprintf("❌ <b>Download failed:</b> %s", esc(err.Error())), cancelKB())
-		return
-	}
-
-	b.saveUserCookies(chatID, userID, data, m.Document.FileName)
-}
-
-// downloadTelegramBytes downloads up to 2MB from the Telegram Bot API file storage.
-func (b *Bot) downloadTelegramBytes(fileID string) ([]byte, error) {
-	file, err := b.api.File(fileID)
-	if err != nil {
-		return nil, fmt.Errorf("lookup file: %w", err)
-	}
-
-	url := b.api.FileDirectURL(file.FilePath)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create download request: %w", err)
-	}
-	req.Header.Set("User-Agent", "TeleMeetBot/1.0")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("fetch file: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("download HTTP %d", resp.StatusCode)
-	}
-
-	var buf bytes.Buffer
-	// Cap at 2MB for cookies
-	if _, err := io.Copy(&buf, io.LimitReader(resp.Body, 2<<20)); err != nil {
-		return nil, fmt.Errorf("read file body: %w", err)
-	}
-	return buf.Bytes(), nil
+	// Send to user's chat ID (for private bots, chatID == userID)
+	b.sendText(userID, text, mainMenuKB())
 }

@@ -184,6 +184,8 @@ type StartRequest struct {
 	PlayMode string
 	// Queue holds additional media links to populate the playlist in submission order.
 	Queue []string
+	// GuestName optionally overrides the configured default Meet guest name.
+	GuestName string
 	// GoogleCookies injects authenticated Google account cookies into the session context.
 	GoogleCookies []*proto.NetworkCookieParam
 }
@@ -473,8 +475,9 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (*Session, error)
 			Volume:   m.mediaCfg.DefaultVolume,
 			Speed:    m.mediaCfg.DefaultSpeed,
 		},
-		adSkipEnabled: m.mediaCfg.SkipYouTubeAds,
-		googleCookies: req.GoogleCookies,
+		adSkipEnabled:     m.mediaCfg.SkipYouTubeAds,
+		googleCookies:     req.GoogleCookies,
+		guestNameOverride: req.GuestName,
 	}
 	s.InitQueue(media.URL, req.Queue)
 

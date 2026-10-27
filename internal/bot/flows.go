@@ -39,8 +39,6 @@ const (
 	// Admin-console text steps: adding an admin id and composing a broadcast.
 	stepAdminAdd
 	stepAdminBroadcast
-	// stepUploadCookies waits for cookies.txt or JSON cookie data.
-	stepUploadCookies
 )
 
 // flowTimeout drops half-finished wizards after inactivity.
@@ -185,20 +183,6 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 
 	// Free text or documents belong to the cookie flow when active.
 	f := b.getFlow(userID)
-	if f != nil && f.step == stepUploadCookies {
-		if m.Document != nil {
-			b.handleCookieDocUpload(m, userID, chatID)
-			return
-		}
-		if text := strings.TrimSpace(m.Text); text != "" {
-			b.saveUserCookies(chatID, userID, []byte(text), "chat message")
-			return
-		}
-	}
-	if m.Document != nil && strings.Contains(strings.ToLower(m.Document.FileName), "cookie") {
-		b.handleCookieDocUpload(m, userID, chatID)
-		return
-	}
 
 	// Forwarded media (audio/video/document/voice) arrives through the ingestion path.
 	if tgHasMedia(m) {
@@ -450,9 +434,14 @@ func (b *Bot) launch(chatID, userID int64) {
 		req.Queue = f.queue
 	}
 	if b.gauth != nil {
-		if cookies, err := b.gauth.GetCookieParams(userID); err == nil && len(cookies) > 0 {
-			req.GoogleCookies = cookies
-			b.log.Infof("[PIPELINE:googleauth] launching session with %d Google cookies for user=%d", len(cookies), userID)
+		sum := b.gauth.Summary(userID)
+		if sum.Connected {
+			if sum.Name != "" {
+				req.GuestName = fmt.Sprintf("%s (%s)", sum.Name, sum.Email)
+			} else {
+				req.GuestName = sum.Email
+			}
+			b.log.Infof("[PIPELINE:googleauth] launching session with verified Google identity: %s for user=%d", req.GuestName, userID)
 		}
 	}
 	sess, err := b.eng.Start(context.Background(), req)
@@ -534,18 +523,14 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 		b.log.Infof("[PIPELINE:bot] action: view account by user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "")
 		b.showAccount(chatID, userID, msgID)
-	case data == cbAccountUpload:
-		b.log.Infof("[PIPELINE:bot] action: prompt cookie upload by user=%d chat=%d", userID, chatID)
+	case data == cbAccountConnect:
+		b.log.Infof("[PIPELINE:bot] action: connect account by user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "")
-		b.setFlow(userID, &flow{step: stepUploadCookies})
-		b.sendText(chatID, "📥 <b>Upload Google Account Cookies</b>\n\nPlease send or forward your <code>cookies.txt</code> or JSON cookie file, or paste the cookie contents directly in chat.", cancelKB())
+		b.showAccount(chatID, userID, msgID)
 	case data == cbAccountRemove:
 		b.log.Infof("[PIPELINE:bot] action: remove account by user=%d chat=%d", userID, chatID)
-		if b.gauth != nil {
-			_ = b.gauth.Delete(userID)
-		}
 		_ = b.api.AnswerCallback(q.ID, "Google Account disconnected")
-		b.showAccount(chatID, userID, msgID)
+		b.handleAccountDisconnect(chatID, userID, msgID)
 	case data == cbAccountHelp:
 		b.log.Infof("[PIPELINE:bot] action: account help by user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "")
