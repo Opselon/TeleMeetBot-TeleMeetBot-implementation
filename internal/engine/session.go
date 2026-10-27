@@ -90,6 +90,8 @@ type Session struct {
 
 	// googleCookies holds authenticated Google account cookies injected for this session.
 	googleCookies []*proto.NetworkCookieParam
+	// guestNameOverride optionally replaces the default Meet guest name.
+	guestNameOverride string
 
 	browser   *rod.Browser
 	mediaPage *rod.Page

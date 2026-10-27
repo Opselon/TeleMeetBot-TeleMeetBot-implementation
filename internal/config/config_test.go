@@ -41,6 +41,27 @@ func TestValidateCatchesProblems(t *testing.T) {
 		{"speed", func(c *Config) { c.Media.DefaultSpeed = 9 }, "0.25..4"},
 		{"sessions", func(c *Config) { c.Limits.MaxSessions = 0 }, "1..8"},
 		{"data dir", func(c *Config) { c.Paths.DataDir = " " }, "paths.data_dir is empty"},
+		{"google auth enabled missing client_id", func(c *Config) {
+			c.Google.Enabled = true
+			c.Google.ClientSecret = "secret"
+			c.Google.RedirectURL = "http://localhost:18080/auth/google/callback"
+		}, "google.client_id is required"},
+		{"google auth enabled missing client_secret", func(c *Config) {
+			c.Google.Enabled = true
+			c.Google.ClientID = "client-id"
+			c.Google.RedirectURL = "http://localhost:18080/auth/google/callback"
+		}, "google.client_secret is required"},
+		{"google auth enabled missing redirect_url", func(c *Config) {
+			c.Google.Enabled = true
+			c.Google.ClientID = "client-id"
+			c.Google.ClientSecret = "secret"
+		}, "google.redirect_url is required"},
+		{"google auth enabled invalid redirect_url", func(c *Config) {
+			c.Google.Enabled = true
+			c.Google.ClientID = "client-id"
+			c.Google.ClientSecret = "secret"
+			c.Google.RedirectURL = "ftp://invalid-url"
+		}, "google.redirect_url must be a valid http or https URL"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

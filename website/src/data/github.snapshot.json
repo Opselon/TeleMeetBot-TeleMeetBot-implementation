@@ -1,18 +1,438 @@
 {
   "live": true,
   "source": "api",
-  "fetchedAt": "2026-10-26T19:55:16.811Z",
+  "fetchedAt": "2026-10-27T02:24:35.066Z",
   "repo": {
-    "stars": 0,
-    "forks": 1,
+    "stars": 1,
+    "forks": 2,
     "watchers": 0,
-    "openIssues": 1,
+    "openIssues": 0,
     "language": "Go",
     "license": "MIT",
     "defaultBranch": "main",
-    "pushedAt": "2026-10-26T19:50:45Z"
+    "pushedAt": "2026-10-27T02:07:13Z"
   },
   "releases": [
+    {
+      "tag": "v1.4.3",
+      "name": "TeleMeetBot v1.4.3",
+      "publishedAt": "2026-10-27T00:29:03Z",
+      "createdAt": "2026-10-27T00:17:38Z",
+      "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/tag/v1.4.3",
+      "prerelease": false,
+      "draft": false,
+      "body": "TeleMeetBot v1.4.3. See the release notes in docs/ and the installation guide in the README.",
+      "assets": [
+        {
+          "name": "install.ps1",
+          "size": 9699,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.3/install.ps1"
+        },
+        {
+          "name": "install.sh",
+          "size": 10852,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.3/install.sh"
+        },
+        {
+          "name": "SHA256SUMS",
+          "size": 869,
+          "downloads": 2,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.3/SHA256SUMS"
+        },
+        {
+          "name": "telemeetbot-darwin-amd64.tar.gz",
+          "size": 8251395,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.3/telemeetbot-darwin-amd64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-darwin-arm64.tar.gz",
+          "size": 7937400,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.3/telemeetbot-darwin-arm64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-386.tar.gz",
+          "size": 7868149,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.3/telemeetbot-linux-386.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-amd64.tar.gz",
+          "size": 8147874,
+          "downloads": 2,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.3/telemeetbot-linux-amd64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm6.tar.gz",
+          "size": 7849200,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.3/telemeetbot-linux-arm6.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm64.tar.gz",
+          "size": 7682519,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.3/telemeetbot-linux-arm64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm7.tar.gz",
+          "size": 7835581,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.3/telemeetbot-linux-arm7.tar.gz"
+        },
+        {
+          "name": "telemeetbot-windows-amd64.zip",
+          "size": 7263268,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.3/telemeetbot-windows-amd64.zip"
+        },
+        {
+          "name": "telemeetbot-windows-arm64.zip",
+          "size": 6732468,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.3/telemeetbot-windows-arm64.zip"
+        }
+      ]
+    },
+    {
+      "tag": "v1.4.2",
+      "name": "TeleMeetBot v1.4.2",
+      "publishedAt": "2026-10-26T23:48:32Z",
+      "createdAt": "2026-10-26T23:34:48Z",
+      "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/tag/v1.4.2",
+      "prerelease": false,
+      "draft": false,
+      "body": "TeleMeetBot v1.4.2. See the release notes in docs/ and the installation guide in the README.",
+      "assets": [
+        {
+          "name": "install.ps1",
+          "size": 9699,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.2/install.ps1"
+        },
+        {
+          "name": "install.sh",
+          "size": 10852,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.2/install.sh"
+        },
+        {
+          "name": "SHA256SUMS",
+          "size": 869,
+          "downloads": 2,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.2/SHA256SUMS"
+        },
+        {
+          "name": "telemeetbot-darwin-amd64.tar.gz",
+          "size": 8251107,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.2/telemeetbot-darwin-amd64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-darwin-arm64.tar.gz",
+          "size": 7936179,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.2/telemeetbot-darwin-arm64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-386.tar.gz",
+          "size": 7866673,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.2/telemeetbot-linux-386.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-amd64.tar.gz",
+          "size": 8147026,
+          "downloads": 2,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.2/telemeetbot-linux-amd64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm6.tar.gz",
+          "size": 7849494,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.2/telemeetbot-linux-arm6.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm64.tar.gz",
+          "size": 7681882,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.2/telemeetbot-linux-arm64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm7.tar.gz",
+          "size": 7833262,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.2/telemeetbot-linux-arm7.tar.gz"
+        },
+        {
+          "name": "telemeetbot-windows-amd64.zip",
+          "size": 7263212,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.2/telemeetbot-windows-amd64.zip"
+        },
+        {
+          "name": "telemeetbot-windows-arm64.zip",
+          "size": 6730082,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.2/telemeetbot-windows-arm64.zip"
+        }
+      ]
+    },
+    {
+      "tag": "v1.4.1",
+      "name": "TeleMeetBot v1.4.1",
+      "publishedAt": "2026-10-26T23:29:45Z",
+      "createdAt": "2026-10-26T23:16:31Z",
+      "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/tag/v1.4.1",
+      "prerelease": false,
+      "draft": false,
+      "body": "TeleMeetBot v1.4.1. See the release notes in docs/ and the installation guide in the README.",
+      "assets": [
+        {
+          "name": "install.ps1",
+          "size": 9699,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.1/install.ps1"
+        },
+        {
+          "name": "install.sh",
+          "size": 10852,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.1/install.sh"
+        },
+        {
+          "name": "SHA256SUMS",
+          "size": 869,
+          "downloads": 2,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.1/SHA256SUMS"
+        },
+        {
+          "name": "telemeetbot-darwin-amd64.tar.gz",
+          "size": 8250495,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.1/telemeetbot-darwin-amd64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-darwin-arm64.tar.gz",
+          "size": 7936271,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.1/telemeetbot-darwin-arm64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-386.tar.gz",
+          "size": 7866353,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.1/telemeetbot-linux-386.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-amd64.tar.gz",
+          "size": 8146262,
+          "downloads": 2,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.1/telemeetbot-linux-amd64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm6.tar.gz",
+          "size": 7848997,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.1/telemeetbot-linux-arm6.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm64.tar.gz",
+          "size": 7680649,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.1/telemeetbot-linux-arm64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm7.tar.gz",
+          "size": 7833183,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.1/telemeetbot-linux-arm7.tar.gz"
+        },
+        {
+          "name": "telemeetbot-windows-amd64.zip",
+          "size": 7261523,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.1/telemeetbot-windows-amd64.zip"
+        },
+        {
+          "name": "telemeetbot-windows-arm64.zip",
+          "size": 6729326,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.1/telemeetbot-windows-arm64.zip"
+        }
+      ]
+    },
+    {
+      "tag": "v1.4.0",
+      "name": "TeleMeetBot v1.4.0",
+      "publishedAt": "2026-10-26T22:59:01Z",
+      "createdAt": "2026-10-26T22:45:31Z",
+      "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/tag/v1.4.0",
+      "prerelease": false,
+      "draft": false,
+      "body": "# TeleMeetBot v1.4.0 Release Notes\n\nTeleMeetBot v1.4.0 introduces persistent playlists, an administrative management console, interactive queue management tools, and live database backup capabilities.\n\n## Highlights\n\n### 1. Persistent Playlist Library (`playlists.db`)\n- **Dedicated SQLite Persistence**: Added a dedicated `playlists.db` database to store named, reusable playlists independently of live sessions and meeting links.\n- **Fail-Closed Multi-Tenant Isolation**: Every playlist query, mutation, item reordering, and deletion strictly checks and verifies ownership by Telegram User ID.\n- **Full Library Management**: Create, rename, describe, list, duplicate, and delete playlists through an intuitive Telegram inline wizard.\n- **Bulk Import & Reordering**: Import raw URLs in bulk, append media, move tracks up or down with automatic contiguous re-indexing, and launch entire playlists directly into Google Meet meetings.\n\n### 2. Comprehensive Management Console (`/manage`)\n- **System Overview & Health Metrics**: Real-time monitoring of host memory, active streams, database records, and system telemetry.\n- **Runtime Admin Access Control**: Add or remove Telegram admin IDs dynamically without process restarts; prevents lockout by protecting the last admin.\n- **Automated SQLite Backups (`VACUUM INTO`)**: Create consistent point-in-time snapshots of `config.yml`, `state.json`, `meetings.db`, and `playlists.db` using SQLite's atomic `VACUUM INTO`.\n- **Admin Broadcasts**: Send formatted announcements and system notices to all configured administrators.\n\n### 3. Advanced Session Queue Tools\n- **Tail Shuffle & Sort**: Shuffle upcoming queue items (`ShuffleUpcoming`) without interrupting active playback, or sort upcoming tracks alphabetically by title (`SortUpcoming`).\n- **Interactive Track Reordering**: Reorder upcoming queue items interactively in Telegram with automatic index tracking.\n- **Save Live Queue as Playlist**: Convert any active Google Meet streaming queue directly into a permanent playlist in your library with one click.\n- **Play Next Insertion**: Enqueue tracks directly after the current playing item (`EnqueueNext`) for instant priority playback.\n\n### 4. Structured Observability & Comprehensive Test Suite\n- Structured telemetry and pipeline logs (`[PIPELINE:manage]`, `[PIPELINE:playlists]`, `[PIPELINE:queue]`) across all management endpoints and callback flows.\n- Unit and concurrency test suite added for playlist storage, multi-tenant isolation, admin operations, snapshot backups, and queue tools.\n",
+      "assets": [
+        {
+          "name": "install.ps1",
+          "size": 9699,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.0/install.ps1"
+        },
+        {
+          "name": "install.sh",
+          "size": 10852,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.0/install.sh"
+        },
+        {
+          "name": "SHA256SUMS",
+          "size": 869,
+          "downloads": 2,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.0/SHA256SUMS"
+        },
+        {
+          "name": "telemeetbot-darwin-amd64.tar.gz",
+          "size": 8249371,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.0/telemeetbot-darwin-amd64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-darwin-arm64.tar.gz",
+          "size": 7936620,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.0/telemeetbot-darwin-arm64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-386.tar.gz",
+          "size": 7865721,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.0/telemeetbot-linux-386.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-amd64.tar.gz",
+          "size": 8146374,
+          "downloads": 2,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.0/telemeetbot-linux-amd64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm6.tar.gz",
+          "size": 7849042,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.0/telemeetbot-linux-arm6.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm64.tar.gz",
+          "size": 7680002,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.0/telemeetbot-linux-arm64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm7.tar.gz",
+          "size": 7831362,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.0/telemeetbot-linux-arm7.tar.gz"
+        },
+        {
+          "name": "telemeetbot-windows-amd64.zip",
+          "size": 7261187,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.0/telemeetbot-windows-amd64.zip"
+        },
+        {
+          "name": "telemeetbot-windows-arm64.zip",
+          "size": 6729240,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.4.0/telemeetbot-windows-arm64.zip"
+        }
+      ]
+    },
+    {
+      "tag": "v1.3.3",
+      "name": "TeleMeetBot v1.3.3",
+      "publishedAt": "2026-10-26T20:08:20Z",
+      "createdAt": "2026-10-26T19:58:36Z",
+      "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/tag/v1.3.3",
+      "prerelease": false,
+      "draft": false,
+      "body": "# TeleMeetBot v1.3.3 Release Notes\n\nTeleMeetBot v1.3.3 fixes switch media reverts from canvas security errors, adds expanded queue clear options, and introduces comprehensive action logging.\n\n## Highlights\n\n### 1. Robust Switch Playback Verification & CORS Hardening\n- **Tainted Canvas Handling**: Fixed an issue where media playback verification failed during `SwitchMedia` due to cross-origin HTML5 canvas tainting (`SecurityError: Failed to execute 'getImageData' on 'CanvasRenderingContext2D': The canvas has been tainted by cross-origin data.`), which erroneously caused the engine to revert to the previous media track.\n- **Cross-Origin Headers**: Enabled permissive CORS headers (`Access-Control-Allow-Origin: *`, `Access-Control-Allow-Methods`, `Access-Control-Allow-Headers`) on internal file servers.\n- **Playback Progress Verification**: Playback verification now accepts verifiable timeline advancement (`advance >= minAdvance && !paused && ready >= 2`) when frame pixel readouts are restricted by canvas security policies.\n\n### 2. Strengthened Queue Management & Clear Options\n- **Clear Options Expansion**: Added `ClearAllExceptCurrent()` to allow operators to wipe both past and upcoming playlist items in one click while preserving the currently playing track.\n- **Queue State Safety**: Strengthened `ClearUpcoming()` to safely clear upcoming items when queue playback has not yet begun (`queueIdx < 0`).\n- **Interactive Clear Confirmation**: Inline keyboard now provides explicit granular choices: \"🗑 Clear Upcoming Only\", \"🧹 Clear All Except Current\", and \"❌ Cancel\".\n\n### 3. Telegram Large File Streaming & Ingest Clarification\n- Supported custom Bot API endpoint (`telegram.api_endpoint`) and configurable size ceiling (`telegram.max_file_size_mb`) for local Bot API setups up to 2000 MiB.\n- Clarified error messaging when a forwarded file exceeds cloud Bot API limits, explaining that media must be retrieved to present in Chromium and suggesting direct URL streaming.\n\n### 4. Comprehensive Structured Logging (`[PIPELINE:...]`)\n- Added comprehensive logging across all Telegram inline keyboard buttons, callback queries, navigation events, and command dispatches.\n- Added structured logs for Google Meet guest name entry, join button detection/clicks, and present actions.\n- Added session control execution logs with status toasts and detailed error tracking.\n",
+      "assets": [
+        {
+          "name": "install.ps1",
+          "size": 9699,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.3/install.ps1"
+        },
+        {
+          "name": "install.sh",
+          "size": 10852,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.3/install.sh"
+        },
+        {
+          "name": "SHA256SUMS",
+          "size": 869,
+          "downloads": 2,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.3/SHA256SUMS"
+        },
+        {
+          "name": "telemeetbot-darwin-amd64.tar.gz",
+          "size": 8083973,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.3/telemeetbot-darwin-amd64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-darwin-arm64.tar.gz",
+          "size": 7783195,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.3/telemeetbot-darwin-arm64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-386.tar.gz",
+          "size": 7712554,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.3/telemeetbot-linux-386.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-amd64.tar.gz",
+          "size": 7979759,
+          "downloads": 2,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.3/telemeetbot-linux-amd64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm6.tar.gz",
+          "size": 7694090,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.3/telemeetbot-linux-arm6.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm64.tar.gz",
+          "size": 7536285,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.3/telemeetbot-linux-arm64.tar.gz"
+        },
+        {
+          "name": "telemeetbot-linux-arm7.tar.gz",
+          "size": 7680572,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.3/telemeetbot-linux-arm7.tar.gz"
+        },
+        {
+          "name": "telemeetbot-windows-amd64.zip",
+          "size": 7095564,
+          "downloads": 1,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.3/telemeetbot-windows-amd64.zip"
+        },
+        {
+          "name": "telemeetbot-windows-arm64.zip",
+          "size": 6586165,
+          "downloads": 0,
+          "url": "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.3.3/telemeetbot-windows-arm64.zip"
+        }
+      ]
+    },
     {
       "tag": "v1.3.2",
       "name": "TeleMeetBot v1.3.2",

@@ -34,10 +34,10 @@ const (
 	// selects one of browser/download/auto.
 	cbMediaMode = "menu:mediamode"
 	// cbAccount opens the Google Account profile card.
-	cbAccount       = "menu:account"
-	cbAccountUpload = "account:upload"
-	cbAccountRemove = "account:remove"
-	cbAccountHelp   = "account:help"
+	cbAccount        = "menu:account"
+	cbAccountConnect = "account:connect"
+	cbAccountRemove  = "account:remove"
+	cbAccountHelp    = "account:help"
 )
 
 // stateEmoji maps engine states to dashboard emoji.

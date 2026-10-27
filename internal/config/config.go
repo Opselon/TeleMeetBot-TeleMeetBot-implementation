@@ -28,6 +28,7 @@ type Config struct {
 	Logging  LoggingConfig  `yaml:"logging"`
 	Paths    PathsConfig    `yaml:"paths"`
 	Download DownloadConfig `yaml:"download"`
+	Google   GoogleConfig   `yaml:"google"`
 
 	// path is where the config was loaded from / should be saved to.
 	path string
@@ -185,6 +186,25 @@ type LoggingConfig struct {
 	File  string `yaml:"file"`
 }
 
+// GoogleConfig controls the Google OAuth 2.0 / OpenID Connect integration.
+type GoogleConfig struct {
+	// Enabled toggles the Google OAuth integration. When ClientID is provided,
+	// Enabled is automatically considered true.
+	Enabled bool `yaml:"enabled"`
+	// ClientID is the OAuth 2.0 Client ID from Google Cloud Console.
+	ClientID string `yaml:"client_id"`
+	// ClientSecret is the OAuth 2.0 Client Secret from Google Cloud Console.
+	ClientSecret string `yaml:"client_secret"`
+	// RedirectURL is the authorized redirect URI registered in Google Cloud Console
+	// (e.g. "https://example.com/auth/google/callback" or "http://127.0.0.1:18080/auth/google/callback").
+	RedirectURL string `yaml:"redirect_url"`
+	// TokenEncryptionKey is a 32-byte hex-encoded key for AES-256-GCM token encryption at rest.
+	// If empty, an encryption key is securely generated and saved in <data_dir>/secrets/oauth_cipher.key.
+	TokenEncryptionKey string `yaml:"token_encryption_key"`
+	// Scopes specifies the OAuth scopes. Defaults to ["openid", "email", "profile"].
+	Scopes []string `yaml:"scopes"`
+}
+
 // PathsConfig holds writable locations.
 type PathsConfig struct {
 	DataDir string `yaml:"data_dir"`
@@ -234,6 +254,13 @@ func Default() *Config {
 		},
 		Logging: LoggingConfig{Level: "info"},
 		Paths:   PathsConfig{DataDir: "data"},
+		Google: GoogleConfig{
+			Scopes: []string{
+				"openid",
+				"https://www.googleapis.com/auth/userinfo.email",
+				"https://www.googleapis.com/auth/userinfo.profile",
+			},
+		},
 	}
 }
 
@@ -383,6 +410,28 @@ func (c *Config) normalize() {
 	if c.Download.MaxSizeMB < 0 {
 		c.Download.MaxSizeMB = 0
 	}
+	if cid := os.Getenv("TELEMEETBOT_GOOGLE_CLIENT_ID"); cid != "" {
+		c.Google.ClientID = cid
+	}
+	if csec := os.Getenv("TELEMEETBOT_GOOGLE_CLIENT_SECRET"); csec != "" {
+		c.Google.ClientSecret = csec
+	}
+	if rurl := os.Getenv("TELEMEETBOT_GOOGLE_REDIRECT_URL"); rurl != "" {
+		c.Google.RedirectURL = rurl
+	}
+	if tkey := os.Getenv("TELEMEETBOT_GOOGLE_TOKEN_ENCRYPTION_KEY"); tkey != "" {
+		c.Google.TokenEncryptionKey = tkey
+	}
+	if strings.TrimSpace(c.Google.ClientID) != "" && !c.Google.Enabled {
+		c.Google.Enabled = true
+	}
+	if len(c.Google.Scopes) == 0 {
+		c.Google.Scopes = []string{
+			"openid",
+			"https://www.googleapis.com/auth/userinfo.email",
+			"https://www.googleapis.com/auth/userinfo.profile",
+		}
+	}
 }
 
 // Save writes the config back to disk (0600, atomic replace).
@@ -493,6 +542,22 @@ func (c *Config) Validate() error {
 		switch strings.ToLower(strings.TrimSpace(c.Download.Dir)) {
 		case "/", "/etc", "/usr", "/bin", "/sbin", "/var", "/root", "/home":
 			problems = append(problems, "download.dir must not be a system directory")
+		}
+	}
+	if c.Google.Enabled {
+		if strings.TrimSpace(c.Google.ClientID) == "" {
+			problems = append(problems, "google.client_id is required when google auth is enabled")
+		}
+		if strings.TrimSpace(c.Google.ClientSecret) == "" {
+			problems = append(problems, "google.client_secret is required when google auth is enabled")
+		}
+		if strings.TrimSpace(c.Google.RedirectURL) == "" {
+			problems = append(problems, "google.redirect_url is required when google auth is enabled")
+		} else {
+			u, err := url.Parse(c.Google.RedirectURL)
+			if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+				problems = append(problems, "google.redirect_url must be a valid http or https URL")
+			}
 		}
 	}
 	if len(problems) > 0 {

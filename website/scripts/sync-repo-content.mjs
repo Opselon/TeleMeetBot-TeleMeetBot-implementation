@@ -89,7 +89,7 @@ const COMMAND_DOCS = {
   admin: 'Alias of /manage.',
   dashboard: 'Alias of /manage.',
   queue: 'Inspect and manage the media queue of an active session.',
-  account: 'Manage your authenticated Google Account profile and session cookies for direct Google Meet entry.',
+  account: 'Manage your connected Google Account via secure OAuth 2.0 and OpenID Connect.',
   google: 'Alias of /account.',
   profile: 'Alias of /account.',
 };

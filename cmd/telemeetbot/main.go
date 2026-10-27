@@ -254,8 +254,21 @@ func run(cfg *config.Config, cfgPath string, log *slogLogger) error {
 	if playlists != nil {
 		botOpts = append(botOpts, bot.WithPlaylists(playlists))
 	}
-	gauth := googleauth.New(filepath.Join(cfg.Paths.DataDir, "user-profiles"), log)
-	botOpts = append(botOpts, bot.WithGoogleAuth(gauth))
+	var gauth *googleauth.Manager
+	gauthCfg := googleauth.Config{
+		ClientID:           cfg.Google.ClientID,
+		ClientSecret:       cfg.Google.ClientSecret,
+		RedirectURL:        cfg.Google.RedirectURL,
+		TokenEncryptionKey: cfg.Google.TokenEncryptionKey,
+		Scopes:             cfg.Google.Scopes,
+	}
+	var gauthErr error
+	gauth, gauthErr = googleauth.New(filepath.Join(cfg.Paths.DataDir, "user-profiles"), gauthCfg, log)
+	if gauthErr != nil {
+		log.Warnf("[PIPELINE:googleauth] initialize googleauth: %v", gauthErr)
+	} else if gauth != nil {
+		botOpts = append(botOpts, bot.WithGoogleAuth(gauth))
+	}
 
 	bCfg, mCfg, meetCfg := engine.FromConfig(cfg)
 	browserPath, browserErr := engine.ResolveBrowser(bCfg, log)
@@ -308,7 +321,11 @@ func run(cfg *config.Config, cfgPath string, log *slogLogger) error {
 		b.Broadcast(fmt.Sprintf("⚠️ <b>Restarted</b>\n\n%d session(s) were interrupted by the previous shutdown and are no longer in their meetings.", len(interrupted)))
 	}
 
-	healthSrv := web.New(cfg.Server.HealthAddr, b.Snapshot, log)
+	var webOpts []web.Option
+	if gauth != nil {
+		webOpts = append(webOpts, web.WithGoogleAuth(gauth, b.NotifyGoogleConnected))
+	}
+	healthSrv := web.New(cfg.Server.HealthAddr, b.Snapshot, log, webOpts...)
 	errCh := make(chan error, 2)
 
 	go func() { errCh <- b.Run(ctx) }()
