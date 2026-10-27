@@ -165,7 +165,9 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 		case "account", "google", "profile":
 			b.showAccount(chatID, userID, 0)
 		case "help":
-			b.sendText(chatID, helpText(), backKB())
+			b.sendText(chatID, helpText(), helpKB())
+		case "about":
+			b.sendText(chatID, aboutText(b.api.BotUsername()), helpKB())
 		case "cancel":
 			b.clearFlow(userID)
 			b.sendText(chatID, "✖️ Cancelled. Nothing pending.", mainMenuKB())
@@ -538,7 +540,7 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 	case data == cbHelp:
 		b.log.Infof("[PIPELINE:bot] action: view help by user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "")
-		_ = b.api.Edit(chatID, msgID, helpText(), backKB())
+		_ = b.api.Edit(chatID, msgID, helpText(), helpKB())
 	case data == cbAudioLang:
 		b.log.Infof("[PIPELINE:bot] action: audio language menu by user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "")

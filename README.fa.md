@@ -1,9 +1,15 @@
 # TeleMeetBot — ربات استریم گوگل میت با داشبورد تلگرام (۱۰۰٪ Go)
 
+[![GitHub Stars](https://img.shields.io/github/stars/Opselon/TeleMeetBot-TeleMeetBot-implementation?style=social)](https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation)
+[![CI Pipeline](https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/actions/workflows/ci.yml/badge.svg)](https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/actions/workflows/ci.yml)
+[![Docker All-in-One](https://img.shields.io/badge/docker-all--in--one-blue?logo=docker)](https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/pkgs/container/telemeetbot-telemeetbot-implementation)
+
 یک باینری، بدون دسکتاپ، بدون Python/Selenium. لینک جلسه و لینک محتوا را می‌دهید؛ ربات
 Chromium را headless بالا می‌آورد، به جلسه‌ی گوگل میت **به‌عنوان مهمان** می‌رود، شروع به
 ارائه (Present) می‌کند، تبی که محتوا در آن پخش می‌شود را شِیر می‌کند و کنترل کامل پخش —
 **Pause/Resume، Seek، Volume، Speed، Mute، Restart، Stop** — را مستقیم در تلگرام می‌دهد.
+
+> ⭐ **حمایت از پروژه:** اگر از تله‌میت‌بات استفاده می‌کنید، با [استار دادن به مخزن گیت‌هاب](https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation) از توسعه و بهبود پروژه حمایت کنید!
 
 ```
               ┌───────────────────────────── Telegram ─────────────────────────────┐
@@ -58,21 +64,37 @@ UA هدلس را می‌پسندد؟ نپسندید → ما آن را override 
 
 ## شروع سریع
 
-### الف) Docker (روی سرور پیشنهادی)
+### الف) استقرار تک‌دستوری و مهاجرت سریع بین سرورها (پیشنهادی)
+
+راه‌اندازی فوری روی هر سرور اوبونتو/دبیان لینوکس با داکر:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/main/scripts/deploy.sh | sh
+```
+
+**انتقال به سرور جدید در کمتر از ۱ دقیقه:**
+```bash
+# ۱. در سرور قبلی، یک نسخه پشتیبان از دیتابیس‌ها و تنظیمات بگیرید:
+./scripts/backup.sh /root/telemeetbot-data .
+
+# ۲. فایل بکاپ را به سرور جدید منتقل کرده و اجرا کنید:
+./scripts/deploy.sh --restore telemeetbot-backup-YYYYMMDD_HHMMSS.tar.gz
+```
+تمامی تنظیمات، پروفایل‌های احرازهویت گوگل، جلسات ذخیره‌شده و پلی‌لیست‌ها بدون وقفه بازگردانی می‌شوند.
+
+### ب) Docker Compose
 
 ```bash
 git clone https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation
 cd TeleMeetBot-TeleMeetBot-implementation
 
-docker compose run --rm telemeetbot telemeetbot --wizard --config /data/telemeetbot.yml
+cp .env.example .env
 docker compose up -d
 docker compose logs -f
 curl http://127.0.0.1:18080/healthz
 ```
 
-> داخل کانتینر آدرس health را `0.0.0.0:18080` بدهید تا از پورت map‌شده قابل دسترس باشد.
-
-### ب) نصب یک‌کاماندی (بدون داکر)
+### ج) نصب یک‌کاماندی (بدون داکر)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/main/scripts/install.sh | bash

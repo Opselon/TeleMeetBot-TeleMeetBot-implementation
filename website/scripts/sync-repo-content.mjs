@@ -92,6 +92,7 @@ const COMMAND_DOCS = {
   account: 'Manage your connected Google Account via secure OAuth 2.0 and OpenID Connect.',
   google: 'Alias of /account.',
   profile: 'Alias of /account.',
+  about: 'View project information, capabilities, and repository links.',
 };
 const flowsGo = read('internal/bot/flows.go');
 const INLINE_ACTIONS = new Set([

@@ -7,25 +7,32 @@
 # The wizard should bind the health endpoint to 0.0.0.0:18080 inside the container.
 services:
   telemeetbot:
+    image: ${TELEMEETBOT_IMAGE:-ghcr.io/opselon/telemeetbot-telemeetbot-implementation:latest}
     build:
       context: .
       args:
         VERSION: ${TELEMEETBOT_VERSION:-dev}
-    image: telemeetbot:${TELEMEETBOT_VERSION:-dev}
     container_name: telemeetbot
     restart: unless-stopped
     init: true
-    shm_size: "1gb"          # Chromium needs more shared memory than the default 64m
+    shm_size: "1gb"          # Chromium needs more shared memory than default 64m
     ports:
-      - "127.0.0.1:18080:18080"
+      - "${HEALTH_PORT:-18080}:18080"
     volumes:
-      - ./data:/data
+      - ${DATA_DIR:-./data}:/data
     environment:
-      TZ: UTC
-      # Bound the Go runtime heap so GC works aggressively on a small VPS
-      # instead of letting the heap swell with CDP/JSON payloads. The browser
-      # processes are the real memory consumers; see docs/sizing.
+      TZ: ${TZ:-UTC}
       GOMEMLIMIT: "256MiB"
+      TELEGRAM_TOKEN: ${TELEGRAM_TOKEN:-}
+      TELEGRAM_ADMINS: ${TELEGRAM_ADMINS:-}
+      TELEGRAM_NOTIFY_CHAT_ID: ${TELEGRAM_NOTIFY_CHAT_ID:-}
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID:-17349}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH:-344583e45741c457fe1862106095a5eb}
+      TELEGRAM_LOCAL_BOT_API_ENABLED: ${TELEGRAM_LOCAL_BOT_API_ENABLED:-true}
+      TELEMEETBOT_GOOGLE_CLIENT_ID: ${TELEMEETBOT_GOOGLE_CLIENT_ID:-}
+      TELEMEETBOT_GOOGLE_CLIENT_SECRET: ${TELEMEETBOT_GOOGLE_CLIENT_SECRET:-}
+      TELEMEETBOT_GOOGLE_REDIRECT_URL: ${TELEMEETBOT_GOOGLE_REDIRECT_URL:-}
+      TELEMEETBOT_PROXY: ${TELEMEETBOT_PROXY:-}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:18080/livez"]
       interval: 30s

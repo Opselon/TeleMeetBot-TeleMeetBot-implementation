@@ -1,5 +1,10 @@
 # TeleMeetBot
 
+[![GitHub Stars](https://img.shields.io/github/stars/Opselon/TeleMeetBot-TeleMeetBot-implementation?style=social)](https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation)
+[![CI Pipeline](https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/actions/workflows/ci.yml/badge.svg)](https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/actions/workflows/ci.yml)
+[![Docker All-in-One](https://img.shields.io/badge/docker-all--in--one-blue?logo=docker)](https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/pkgs/container/telemeetbot-telemeetbot-implementation)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **A 100% Go, headless streaming bot for Google Meet with a Telegram dashboard.**
 
 Send it a meeting link and any media link — YouTube, a direct `.mp4`/`.mp3`, or a public web page —
@@ -8,6 +13,8 @@ plays your link in the shared tab and hands you **pause / resume / seek / volume
 restart / stop** controls straight inside Telegram.
 
 No desktop environment. No Python/Selenium. No external automation service. One binary.
+
+> ⭐ **Support the Project:** If you find TeleMeetBot useful, please consider [giving the repository a star](https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation)! Your support motivates ongoing development and improvements.
 
 **Documentation:** [opselon.github.io/TeleMeetBot-TeleMeetBot-implementation](https://opselon.github.io/TeleMeetBot-TeleMeetBot-implementation/) — install, configuration, Meet integration, playback troubleshooting, CLI and deployment.
 
@@ -68,25 +75,41 @@ For a **screen** (Xvfb) mode instead of headless, set `present_mode: "screen"`, 
 
 ## Quick start
 
-### Option A — Docker (recommended on servers)
+### Option A — Turnkey 1-Command Deploy & Easy Migration (Fastest)
+
+Deploy instantly on any fresh server with Docker:
+
+```bash
+# Automated launch with sensible defaults and health checks
+curl -fsSL https://raw.githubusercontent.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/main/scripts/deploy.sh | sh
+```
+
+**Moving to a new server in 1 minute?**
+```bash
+# 1. On your old server, take a clean backup snapshot:
+./scripts/backup.sh /root/telemeetbot-data .
+
+# 2. Transfer the backup file to your new server and run:
+./scripts/deploy.sh --restore telemeetbot-backup-YYYYMMDD_HHMMSS.tar.gz
+```
+All bot settings, Google OAuth profiles, SQLite meeting favorites, and playlists are restored seamlessly.
+
+### Option B — Docker Compose
 
 ```bash
 git clone https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation
 cd TeleMeetBot-TeleMeetBot-implementation
 
-# first run: interactive wizard writes ./data/telemeetbot.yml
-docker compose run --rm telemeetbot telemeetbot --wizard --config /data/telemeetbot.yml
+# Copy and customize environment variables:
+cp .env.example .env
 
+# Start with Docker Compose:
 docker compose up -d
 docker compose logs -f
 curl http://127.0.0.1:18080/healthz
 ```
 
-> In Docker, answer `0.0.0.0:18080` as the health address so `/healthz` is reachable
-> from the mapped port. The compose file maps only `127.0.0.1` — put a reverse proxy
-> in front if you need it from elsewhere.
-
-### Option B — one-command install (bare metal)
+### Option C — one-command install (bare metal)
 
 **Linux / macOS:**
 
