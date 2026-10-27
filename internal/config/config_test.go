@@ -235,3 +235,43 @@ func TestEnvOverridesGeneral(t *testing.T) {
 		t.Errorf("unexpected proxy: %s", c.Browser.Proxy)
 	}
 }
+
+func TestEnvOverridesGoogleAndLocalBotAPI(t *testing.T) {
+	t.Setenv("TELEGRAM_API_ID", "17349")
+	t.Setenv("TELEGRAM_API_HASH", "test_hash_abcdef")
+	t.Setenv("GOOGLE_OAUTH_CLIENT_ID", "test_client_id.apps.googleusercontent.com")
+	t.Setenv("GOOGLE_OAUTH_CLIENT_SECRET", "test_secret_123")
+	t.Setenv("GOOGLE_OAUTH_REDIRECT_URL", "https://googlemeet.example.com/callback")
+
+	c := validConfig()
+	c.Telegram.LocalBotAPI.APIID = 0
+	c.Telegram.LocalBotAPI.APIHash = ""
+	c.Telegram.LocalBotAPI.Enabled = false
+	c.Google.Enabled = false
+	c.Google.ClientID = ""
+	c.Google.ClientSecret = ""
+	c.Google.RedirectURL = ""
+	c.normalize()
+
+	if !c.Telegram.LocalBotAPI.Enabled {
+		t.Errorf("expected LocalBotAPI.Enabled=true from env vars")
+	}
+	if c.Telegram.LocalBotAPI.APIID != 17349 {
+		t.Errorf("expected APIID=17349, got %d", c.Telegram.LocalBotAPI.APIID)
+	}
+	if c.Telegram.LocalBotAPI.APIHash != "test_hash_abcdef" {
+		t.Errorf("expected APIHash=test_hash_abcdef, got %s", c.Telegram.LocalBotAPI.APIHash)
+	}
+	if !c.Google.Enabled {
+		t.Errorf("expected Google.Enabled=true from env vars")
+	}
+	if c.Google.ClientID != "test_client_id.apps.googleusercontent.com" {
+		t.Errorf("unexpected Google.ClientID: %s", c.Google.ClientID)
+	}
+	if c.Google.ClientSecret != "test_secret_123" {
+		t.Errorf("unexpected Google.ClientSecret: %s", c.Google.ClientSecret)
+	}
+	if c.Google.RedirectURL != "https://googlemeet.example.com/callback" {
+		t.Errorf("unexpected Google.RedirectURL: %s", c.Google.RedirectURL)
+	}
+}

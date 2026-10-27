@@ -462,21 +462,40 @@ func (c *Config) normalize() {
 		}
 	}
 	if pxy := os.Getenv("TELEMEETBOT_PROXY"); pxy != "" {
-		c.Browser.Proxy = pxy
+		c.Browser.Proxy = strings.TrimSpace(pxy)
 	} else if pxy := os.Getenv("BROWSER_PROXY"); pxy != "" && c.Browser.Proxy == "" {
-		c.Browser.Proxy = pxy
+		c.Browser.Proxy = strings.TrimSpace(pxy)
 	}
-	if cid := os.Getenv("TELEMEETBOT_GOOGLE_CLIENT_ID"); cid != "" {
-		c.Google.ClientID = cid
+	if apiIDStr := os.Getenv("TELEGRAM_API_ID"); apiIDStr != "" {
+		if id, err := strconv.Atoi(strings.TrimSpace(apiIDStr)); err == nil && id > 0 {
+			c.Telegram.LocalBotAPI.APIID = id
+		}
 	}
-	if csec := os.Getenv("TELEMEETBOT_GOOGLE_CLIENT_SECRET"); csec != "" {
-		c.Google.ClientSecret = csec
+	if apiHash := os.Getenv("TELEGRAM_API_HASH"); apiHash != "" {
+		c.Telegram.LocalBotAPI.APIHash = strings.TrimSpace(apiHash)
 	}
-	if rurl := os.Getenv("TELEMEETBOT_GOOGLE_REDIRECT_URL"); rurl != "" {
-		c.Google.RedirectURL = rurl
+	if c.Telegram.LocalBotAPI.APIID > 0 && c.Telegram.LocalBotAPI.APIHash != "" {
+		c.Telegram.LocalBotAPI.Enabled = true
 	}
-	if tkey := os.Getenv("TELEMEETBOT_GOOGLE_TOKEN_ENCRYPTION_KEY"); tkey != "" {
-		c.Google.TokenEncryptionKey = tkey
+	if cid := os.Getenv("GOOGLE_OAUTH_CLIENT_ID"); cid != "" {
+		c.Google.ClientID = strings.TrimSpace(cid)
+	} else if cid := os.Getenv("TELEMEETBOT_GOOGLE_CLIENT_ID"); cid != "" {
+		c.Google.ClientID = strings.TrimSpace(cid)
+	}
+	if csec := os.Getenv("GOOGLE_OAUTH_CLIENT_SECRET"); csec != "" {
+		c.Google.ClientSecret = strings.TrimSpace(csec)
+	} else if csec := os.Getenv("TELEMEETBOT_GOOGLE_CLIENT_SECRET"); csec != "" {
+		c.Google.ClientSecret = strings.TrimSpace(csec)
+	}
+	if rurl := os.Getenv("GOOGLE_OAUTH_REDIRECT_URL"); rurl != "" {
+		c.Google.RedirectURL = strings.TrimSpace(rurl)
+	} else if rurl := os.Getenv("TELEMEETBOT_GOOGLE_REDIRECT_URL"); rurl != "" {
+		c.Google.RedirectURL = strings.TrimSpace(rurl)
+	}
+	if tkey := os.Getenv("GOOGLE_OAUTH_TOKEN_ENCRYPTION_KEY"); tkey != "" {
+		c.Google.TokenEncryptionKey = strings.TrimSpace(tkey)
+	} else if tkey := os.Getenv("TELEMEETBOT_GOOGLE_TOKEN_ENCRYPTION_KEY"); tkey != "" {
+		c.Google.TokenEncryptionKey = strings.TrimSpace(tkey)
 	}
 	if strings.TrimSpace(c.Google.ClientID) != "" && !c.Google.Enabled {
 		c.Google.Enabled = true

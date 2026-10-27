@@ -117,6 +117,36 @@ To expose Google OAuth 2.0 callbacks and health probes securely over the interne
 
 - **PR Verification (`ci.yml`)**: Every pull request undergoes formatting, linting, cross-OS compilation (Linux, macOS, Windows; AMD64 & ARM64), unit tests, docs synchronization, and Docker container build tests.
 - **Continuous Deployment (GHCR)**: When code merges into `main`, GitHub Actions automatically builds the multi-arch all-in-one Docker image and publishes it to `ghcr.io/opselon/telemeetbot-telemeetbot-implementation:latest`.
+- **Automated Remote CD (`cd.yml`)**: Deploys directly to your server via SSH.
+
+---
+
+## 7. Configuring GitHub Secrets for Seamless CD
+
+To deploy automatically on every push or trigger a remote deployment with one click from GitHub Actions, configure the following secrets in your repository settings (**Settings ➔ Secrets and variables ➔ Actions**):
+
+| Secret Name | Description | Example |
+|---|---|---|
+| `SERVER_HOST` | Target server IP address or hostname | `80.47.236.99` |
+| `SERVER_PORT` | SSH port (default: 22) | `22` |
+| `SERVER_USER` | SSH user | `root` |
+| `SERVER_SSH_KEY` | Private SSH key for key-based authentication | `-----BEGIN OPENSSH PRIVATE KEY-----...` |
+| `SERVER_PASSWORD` | Password (if not using SSH key) | `YourPassword` |
+| `TELEGRAM_TOKEN` | BotFather token | `123456789:ABCdef...` |
+| `TELEGRAM_ADMINS` | Comma-separated admin IDs | `5094837833` |
+| `TELEGRAM_API_ID` | Telegram API ID for 2GB local server | `17349` |
+| `TELEGRAM_API_HASH` | Telegram API Hash | `344583e45741c457...` |
+| `GOOGLE_OAUTH_CLIENT_ID` | Google Web OAuth 2.0 Client ID | `xxx.apps.googleusercontent.com` |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | Google Client Secret | `GOCSPX-...` |
+| `GOOGLE_OAUTH_REDIRECT_URL` | OAuth redirect URL | `https://googlemeet.legoten.com/auth/google/callback` |
+| `APP_DOMAIN` | Your application domain | `googlemeet.legoten.com` |
+| `TELEMEETBOT_PROXY` | Proxy (optional) | `http://172.17.0.1:3339` |
+
+### Changing Servers in the Future?
+When migrating to a new server:
+1. Update `SERVER_HOST` (and `SERVER_SSH_KEY` or `SERVER_PASSWORD` if changed) in GitHub Secrets.
+2. Run the **cd** workflow from GitHub Actions tab (**Run workflow** button) or push to `main`.
+3. GitHub Actions will SSH into the new server, set up configurations, pull the latest image, stop any older container, start the new container, and verify health automatically!
 
 ---
 
