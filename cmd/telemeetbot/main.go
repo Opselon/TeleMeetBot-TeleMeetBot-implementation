@@ -17,6 +17,7 @@ import (
 	"github.com/Opselon/TeleMeetBot/internal/bot"
 	"github.com/Opselon/TeleMeetBot/internal/config"
 	"github.com/Opselon/TeleMeetBot/internal/engine"
+	"github.com/Opselon/TeleMeetBot/internal/googleauth"
 	"github.com/Opselon/TeleMeetBot/internal/health"
 	"github.com/Opselon/TeleMeetBot/internal/setup"
 	"github.com/Opselon/TeleMeetBot/internal/store"
@@ -253,6 +254,8 @@ func run(cfg *config.Config, cfgPath string, log *slogLogger) error {
 	if playlists != nil {
 		botOpts = append(botOpts, bot.WithPlaylists(playlists))
 	}
+	gauth := googleauth.New(filepath.Join(cfg.Paths.DataDir, "user-profiles"), log)
+	botOpts = append(botOpts, bot.WithGoogleAuth(gauth))
 
 	bCfg, mCfg, meetCfg := engine.FromConfig(cfg)
 	browserPath, browserErr := engine.ResolveBrowser(bCfg, log)

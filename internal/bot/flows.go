@@ -39,6 +39,8 @@ const (
 	// Admin-console text steps: adding an admin id and composing a broadcast.
 	stepAdminAdd
 	stepAdminBroadcast
+	// stepUploadCookies waits for cookies.txt or JSON cookie data.
+	stepUploadCookies
 )
 
 // flowTimeout drops half-finished wizards after inactivity.
@@ -162,6 +164,8 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 			b.sendHealth(chatID)
 		case "settings":
 			b.sendText(chatID, settingsText(b.cfg), backKB())
+		case "account", "google", "profile":
+			b.showAccount(chatID, userID, 0)
 		case "help":
 			b.sendText(chatID, helpText(), backKB())
 		case "cancel":
@@ -179,6 +183,23 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 		return
 	}
 
+	// Free text or documents belong to the cookie flow when active.
+	f := b.getFlow(userID)
+	if f != nil && f.step == stepUploadCookies {
+		if m.Document != nil {
+			b.handleCookieDocUpload(m, userID, chatID)
+			return
+		}
+		if text := strings.TrimSpace(m.Text); text != "" {
+			b.saveUserCookies(chatID, userID, []byte(text), "chat message")
+			return
+		}
+	}
+	if m.Document != nil && strings.Contains(strings.ToLower(m.Document.FileName), "cookie") {
+		b.handleCookieDocUpload(m, userID, chatID)
+		return
+	}
+
 	// Forwarded media (audio/video/document/voice) arrives through the ingestion path.
 	if tgHasMedia(m) {
 		b.handleTelegramMedia(chatID, userID, m)
@@ -187,7 +208,6 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 
 	urls := extractURLs(text)
 	// Free text belongs to the wizard when one is open.
-	f := b.getFlow(userID)
 	if f == nil || f.step == stepNone {
 		if len(urls) > 0 {
 			if len(b.eng.Active()) > 0 {
@@ -278,7 +298,7 @@ func (b *Bot) stepInput(chatID, userID int64, f *flow, text string) {
 					}
 				}
 			}
-			b.sendText(chatID, confirmText(f.meet, f.media, kind, userLang, b.st.GetUserMediaMode(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID)))
+			b.sendText(chatID, confirmText(f.meet, f.media, kind, userLang, b.st.GetUserMediaMode(userID), b.hasGoogleAccount(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID), b.hasGoogleAccount(userID)))
 			return
 		}
 		f.step = stepMedia
@@ -322,7 +342,7 @@ func (b *Bot) applyWizardMedia(chatID, userID int64, f *flow, target engine.Medi
 	f.step = stepNone
 	b.setFlow(userID, f)
 	userLang := b.st.GetUserAudioLang(userID)
-	b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang, b.st.GetUserMediaMode(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID)))
+	b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang, b.st.GetUserMediaMode(userID), b.hasGoogleAccount(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID), b.hasGoogleAccount(userID)))
 }
 
 // applyMediaSwitch hands a validated replacement link to the engine, which
@@ -401,7 +421,7 @@ func (b *Bot) startFlow(chatID, userID int64, args string) {
 		f.step = stepNone
 		b.setFlow(userID, f)
 		userLang := b.st.GetUserAudioLang(userID)
-		b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang, b.st.GetUserMediaMode(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID)))
+		b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang, b.st.GetUserMediaMode(userID), b.hasGoogleAccount(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID), b.hasGoogleAccount(userID)))
 		return
 	}
 	b.setFlow(userID, f)
@@ -428,6 +448,12 @@ func (b *Bot) launch(chatID, userID int64) {
 	}
 	if len(f.queue) > 0 {
 		req.Queue = f.queue
+	}
+	if b.gauth != nil {
+		if cookies, err := b.gauth.GetCookieParams(userID); err == nil && len(cookies) > 0 {
+			req.GoogleCookies = cookies
+			b.log.Infof("[PIPELINE:googleauth] launching session with %d Google cookies for user=%d", len(cookies), userID)
+		}
 	}
 	sess, err := b.eng.Start(context.Background(), req)
 	if err != nil {
@@ -504,6 +530,26 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 		b.log.Infof("[PIPELINE:bot] action: view settings by user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "")
 		_ = b.api.Edit(chatID, msgID, settingsText(b.cfg), backKB())
+	case data == cbAccount:
+		b.log.Infof("[PIPELINE:bot] action: view account by user=%d chat=%d", userID, chatID)
+		_ = b.api.AnswerCallback(q.ID, "")
+		b.showAccount(chatID, userID, msgID)
+	case data == cbAccountUpload:
+		b.log.Infof("[PIPELINE:bot] action: prompt cookie upload by user=%d chat=%d", userID, chatID)
+		_ = b.api.AnswerCallback(q.ID, "")
+		b.setFlow(userID, &flow{step: stepUploadCookies})
+		b.sendText(chatID, "📥 <b>Upload Google Account Cookies</b>\n\nPlease send or forward your <code>cookies.txt</code> or JSON cookie file, or paste the cookie contents directly in chat.", cancelKB())
+	case data == cbAccountRemove:
+		b.log.Infof("[PIPELINE:bot] action: remove account by user=%d chat=%d", userID, chatID)
+		if b.gauth != nil {
+			_ = b.gauth.Delete(userID)
+		}
+		_ = b.api.AnswerCallback(q.ID, "Google Account disconnected")
+		b.showAccount(chatID, userID, msgID)
+	case data == cbAccountHelp:
+		b.log.Infof("[PIPELINE:bot] action: account help by user=%d chat=%d", userID, chatID)
+		_ = b.api.AnswerCallback(q.ID, "")
+		_ = b.api.Edit(chatID, msgID, accountHelpText(), backKB())
 	case data == cbHelp:
 		b.log.Infof("[PIPELINE:bot] action: view help by user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "")

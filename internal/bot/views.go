@@ -33,6 +33,11 @@ const (
 	// cbMediaMode opens the Download & Stream mode picker; "mode:<choice>"
 	// selects one of browser/download/auto.
 	cbMediaMode = "menu:mediamode"
+	// cbAccount opens the Google Account profile card.
+	cbAccount       = "menu:account"
+	cbAccountUpload = "account:upload"
+	cbAccountRemove = "account:remove"
+	cbAccountHelp   = "account:help"
 )
 
 // stateEmoji maps engine states to dashboard emoji.
@@ -119,6 +124,7 @@ func mainMenuKB() *tgbotapi.InlineKeyboardMarkup {
 			tgbotapi.NewInlineKeyboardButtonData("⚙️ Settings", cbSettings),
 		},
 		{
+			tgbotapi.NewInlineKeyboardButtonData("👤 Google Account", cbAccount),
 			tgbotapi.NewInlineKeyboardButtonData("ℹ️ Help", cbHelp),
 		},
 	}}
@@ -506,7 +512,7 @@ func switchMediaText(st engine.Status) string {
 }
 
 // confirmText summarises the pending stream.
-func confirmText(meetLink, mediaLink string, kind engine.MediaKind, userAudioLang, userMediaMode string) string {
+func confirmText(meetLink, mediaLink string, kind engine.MediaKind, userAudioLang, userMediaMode string, hasGoogleAccount bool) string {
 	kindLabel := "web page"
 	switch kind {
 	case engine.MediaYouTube:
@@ -527,14 +533,24 @@ func confirmText(meetLink, mediaLink string, kind engine.MediaKind, userAudioLan
 	if (kind == engine.MediaYouTube || kind == engine.MediaDirect) && mode != engine.MediaModeBrowser {
 		sb.WriteString("<i>The media is downloaded before playback; file is freed when the session ends or switches.</i>\n")
 	}
-	sb.WriteString("\nThe bot will open Chromium, join as a guest, share a tab and play the media.")
+	if hasGoogleAccount {
+		sb.WriteString("\n👤 Profile: <b>Google Account</b> ✅\n")
+		sb.WriteString("The bot will open Chromium, join with your Google profile, share a tab and play the media.")
+	} else {
+		sb.WriteString("\n👤 Profile: <b>Guest</b> 🚪\n")
+		sb.WriteString("The bot will open Chromium, join as a guest, share a tab and play the media.")
+	}
 	return sb.String()
 }
 
 // confirmKB offers launch/cancel for a pending stream.
-func confirmKB(userAudioLang, userMediaMode string) *tgbotapi.InlineKeyboardMarkup {
+func confirmKB(userAudioLang, userMediaMode string, hasGoogleAccount bool) *tgbotapi.InlineKeyboardMarkup {
 	norm := engine.NormalizeAudioLang(userAudioLang)
 	mode := engine.NormalizePlaybackMode(userMediaMode)
+	profileLabel := "👤 Profile: Guest 🚪"
+	if hasGoogleAccount {
+		profileLabel = "👤 Profile: Google ✅"
+	}
 	return &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{
 		{tgbotapi.NewInlineKeyboardButtonData("🚀 Launch", cbLaunch)},
 		{
@@ -542,6 +558,9 @@ func confirmKB(userAudioLang, userMediaMode string) *tgbotapi.InlineKeyboardMark
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData(engine.PlaybackModeEmoji(mode)+" Mode: "+engine.PlaybackModeDisplay(mode), cbMediaMode),
+		},
+		{
+			tgbotapi.NewInlineKeyboardButtonData(profileLabel, cbAccount),
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData("✏️ Change links", cbAgain),

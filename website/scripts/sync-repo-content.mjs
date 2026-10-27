@@ -89,6 +89,9 @@ const COMMAND_DOCS = {
   admin: 'Alias of /manage.',
   dashboard: 'Alias of /manage.',
   queue: 'Inspect and manage the media queue of an active session.',
+  account: 'Manage your authenticated Google Account profile and session cookies for direct Google Meet entry.',
+  google: 'Alias of /account.',
+  profile: 'Alias of /account.',
 };
 const flowsGo = read('internal/bot/flows.go');
 const INLINE_ACTIONS = new Set([

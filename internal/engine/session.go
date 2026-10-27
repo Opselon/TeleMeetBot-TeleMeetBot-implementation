@@ -88,6 +88,9 @@ type Session struct {
 	// expiryWarned avoids repeating the "media expired" notice on the card.
 	expiryWarned bool
 
+	// googleCookies holds authenticated Google account cookies injected for this session.
+	googleCookies []*proto.NetworkCookieParam
+
 	browser   *rod.Browser
 	mediaPage *rod.Page
 	meetPage  *rod.Page
@@ -312,6 +315,17 @@ func (s *Session) run() {
 	}
 
 	s.log.Infof("[PIPELINE:session] [STEP 1/6] session %s: Chromium ready", s.ID)
+	s.mu.Lock()
+	br := s.browser
+	s.mu.Unlock()
+	if len(s.googleCookies) > 0 && br != nil {
+		s.log.Infof("[PIPELINE:googleauth] session %s: injecting %d Google session cookies into browser context", s.ID, len(s.googleCookies))
+		if err := (proto.NetworkSetCookies{Cookies: s.googleCookies}).Call(br); err != nil {
+			s.log.Warnf("[PIPELINE:googleauth] session %s: inject cookies into browser: %v", s.ID, err)
+		} else {
+			s.log.Infof("[PIPELINE:googleauth] session %s: successfully injected %d Google cookies", s.ID, len(s.googleCookies))
+		}
+	}
 
 	// Skippable ads: the monitor watches the media tab from the moment it
 	// exists, so a pre-roll is dismissed before it ever reaches the share.
@@ -796,6 +810,11 @@ func (s *Session) openMeet() error {
 	if _, err := p.EvalOnNewDocument(meetPeerHookJS()); err != nil {
 		s.log.Warnf("[PIPELINE:publish] session %s: install publisher hook: %v", s.ID, err)
 	}
+	if len(s.googleCookies) > 0 {
+		if err := (proto.NetworkSetCookies{Cookies: s.googleCookies}).Call(p); err != nil {
+			s.log.Warnf("[PIPELINE:googleauth] session %s: inject cookies into meet tab: %v", s.ID, err)
+		}
+	}
 	if err := p.Timeout(60 * time.Second).Navigate(s.MeetURL); err != nil {
 		return fmt.Errorf("load meet link: %w", err)
 	}
@@ -925,7 +944,10 @@ func (s *Session) joinMeeting() error {
 				s.logHostWait(&lastWaitNote, "blocked", "host-restricted meeting", reloadCount, hostWaitStarted)
 			}
 		case "login":
-			return errors.New("this meeting requires a signed-in Google account; TeleMeetBot joins as a guest only")
+			if len(s.googleCookies) > 0 {
+				return errors.New("Google account cookies were rejected or expired; please re-export and update via /account")
+			}
+			return errors.New("this meeting requires a signed-in Google account; TeleMeetBot joins as a guest only (add your Google account in /account)")
 		case "prejoin":
 			s.setState(StateJoining, "[4/6] Prejoin screen: muting camera/mic & entering")
 			s.fillGuestName()

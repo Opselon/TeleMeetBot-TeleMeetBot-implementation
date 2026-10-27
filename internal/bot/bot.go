@@ -14,6 +14,7 @@ import (
 
 	"github.com/Opselon/TeleMeetBot/internal/config"
 	"github.com/Opselon/TeleMeetBot/internal/engine"
+	"github.com/Opselon/TeleMeetBot/internal/googleauth"
 	"github.com/Opselon/TeleMeetBot/internal/health"
 	"github.com/Opselon/TeleMeetBot/internal/media"
 	"github.com/Opselon/TeleMeetBot/internal/store"
@@ -100,6 +101,8 @@ type Bot struct {
 	// unavailable (an old data directory or a store that failed to open);
 	// the dashboard then hides the playlist entry point.
 	pl Playlists
+	// gauth manages per-user Google Account profile cookies.
+	gauth *googleauth.Manager
 }
 
 // Option customizes a Bot after the required dependencies are wired.
@@ -108,6 +111,11 @@ type Option func(*Bot)
 // WithPlaylists attaches the persistent playlist library.
 func WithPlaylists(pl Playlists) Option {
 	return func(b *Bot) { b.pl = pl }
+}
+
+// WithGoogleAuth attaches the per-user Google Account profile manager.
+func WithGoogleAuth(gauth *googleauth.Manager) Option {
+	return func(b *Bot) { b.gauth = gauth }
 }
 
 // New wires a Telegram bot. (api can be a fake in tests.)
