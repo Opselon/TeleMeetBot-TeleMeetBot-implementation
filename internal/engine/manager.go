@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/go-rod/rod"
+	"github.com/go-rod/rod/lib/proto"
 
 	mediateam "github.com/Opselon/TeleMeetBot/internal/media"
 )
@@ -183,6 +184,8 @@ type StartRequest struct {
 	PlayMode string
 	// Queue holds additional media links to populate the playlist in submission order.
 	Queue []string
+	// GoogleCookies injects authenticated Google account cookies into the session context.
+	GoogleCookies []*proto.NetworkCookieParam
 }
 
 // Manager owns browsers and sessions.
@@ -471,6 +474,7 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (*Session, error)
 			Speed:    m.mediaCfg.DefaultSpeed,
 		},
 		adSkipEnabled: m.mediaCfg.SkipYouTubeAds,
+		googleCookies: req.GoogleCookies,
 	}
 	s.InitQueue(media.URL, req.Queue)
 

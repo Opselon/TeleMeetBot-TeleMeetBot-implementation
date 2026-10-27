@@ -960,6 +960,12 @@ func (b *Bot) launchPlaylist(chatID, userID, playlistID int64, meetURL string) {
 	if len(urls) > 1 {
 		req.Queue = urls[1:]
 	}
+	if b.gauth != nil {
+		if cookies, err := b.gauth.GetCookieParams(userID); err == nil && len(cookies) > 0 {
+			req.GoogleCookies = cookies
+			b.log.Infof("[PIPELINE:googleauth] launching playlist session with %d Google cookies for user=%d", len(cookies), userID)
+		}
+	}
 	sess, err := b.eng.Start(context.Background(), req)
 	if err != nil {
 		b.sendText(chatID, "❌ "+esc(err.Error()), mainMenuKB())
