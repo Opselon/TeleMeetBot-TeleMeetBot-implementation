@@ -62,6 +62,17 @@ func TestValidateCatchesProblems(t *testing.T) {
 			c.Google.ClientSecret = "secret"
 			c.Google.RedirectURL = "ftp://invalid-url"
 		}, "google.redirect_url must be a valid http or https URL"},
+		{"local bot api invalid port", func(c *Config) {
+			c.Telegram.LocalBotAPI.Enabled = true
+			c.Telegram.LocalBotAPI.APIID = 12345
+			c.Telegram.LocalBotAPI.APIHash = "validhash"
+			c.Telegram.LocalBotAPI.HTTPPort = 80
+		}, "telegram.local_bot_api.http_port must be within 1024..65535"},
+		{"local bot api missing hash", func(c *Config) {
+			c.Telegram.LocalBotAPI.Enabled = true
+			c.Telegram.LocalBotAPI.HTTPPort = 8081
+			c.Telegram.LocalBotAPI.APIHash = ""
+		}, "telegram.local_bot_api.api_hash must not be empty"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -180,5 +191,20 @@ func TestTokenPreview(t *testing.T) {
 	}
 	if strings.Contains(c.TokenPreview(), "secret") {
 		t.Fatal("preview leaks the secret")
+	}
+}
+
+func TestLocalBotAPIDefaultsAndOverrides(t *testing.T) {
+	t.Setenv("TELEMEETBOT_TELEGRAM_LOCAL_API_ENABLED", "true")
+	c := validConfig()
+	c.Telegram.LocalBotAPI.Enabled = true
+	c.normalize()
+
+	if c.Telegram.MaxFileSizeMB != 2000 {
+		t.Errorf("expected MaxFileSizeMB=2000, got %d", c.Telegram.MaxFileSizeMB)
+	}
+	expectedEndpoint := "http://127.0.0.1:8081/bot%s/%s"
+	if c.Telegram.APIEndpoint != expectedEndpoint {
+		t.Errorf("expected APIEndpoint %s, got %s", expectedEndpoint, c.Telegram.APIEndpoint)
 	}
 }

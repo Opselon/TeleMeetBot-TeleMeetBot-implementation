@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Opselon/TeleMeetBot/internal/localbotapi"
+
 	"gopkg.in/yaml.v3"
 )
 
@@ -100,6 +102,8 @@ type TelegramConfig struct {
 	NotifyChatID int64 `yaml:"notify_chat_id"`
 	// PollTimeoutSeconds is the long-poll timeout used for getUpdates.
 	PollTimeoutSeconds int `yaml:"poll_timeout_seconds"`
+	// LocalBotAPI configures the embedded or supervised local telegram-bot-api server.
+	LocalBotAPI localbotapi.Config `yaml:"local_bot_api"`
 }
 
 // ServerConfig is the local HTTP surface (health checks only, no remote login).
@@ -385,6 +389,34 @@ func (c *Config) normalize() {
 	if c.Telegram.PollTimeoutSeconds <= 0 {
 		c.Telegram.PollTimeoutSeconds = 30
 	}
+	c.Telegram.LocalBotAPI.EnvOverrides()
+	if c.Telegram.LocalBotAPI.Enabled {
+		if c.Telegram.LocalBotAPI.HTTPPort <= 0 {
+			c.Telegram.LocalBotAPI.HTTPPort = 8081
+		}
+		if c.Telegram.LocalBotAPI.APIID <= 0 {
+			c.Telegram.LocalBotAPI.APIID = 17349
+		}
+		if c.Telegram.LocalBotAPI.APIHash == "" {
+			c.Telegram.LocalBotAPI.APIHash = "344583e45741c457fe1862106095a5eb"
+		}
+		if strings.TrimSpace(c.Telegram.LocalBotAPI.Dir) == "" {
+			dataDir := c.Paths.DataDir
+			if dataDir == "" {
+				dataDir = os.TempDir()
+			}
+			c.Telegram.LocalBotAPI.Dir = filepath.Join(dataDir, "telegram-bot-api")
+		}
+		if strings.TrimSpace(c.Telegram.LocalBotAPI.TempDir) == "" {
+			c.Telegram.LocalBotAPI.TempDir = filepath.Join(os.TempDir(), "telegram-bot-api")
+		}
+		if strings.TrimSpace(c.Telegram.APIEndpoint) == "" {
+			c.Telegram.APIEndpoint = fmt.Sprintf("http://127.0.0.1:%d/bot%%s/%%s", c.Telegram.LocalBotAPI.HTTPPort)
+		}
+		if c.Telegram.MaxFileSizeMB <= 0 || c.Telegram.MaxFileSizeMB == 20 {
+			c.Telegram.MaxFileSizeMB = 2000
+		}
+	}
 	if strings.TrimSpace(c.Meet.PresentMode) == "" {
 		c.Meet.PresentMode = "tab"
 	}
@@ -559,6 +591,20 @@ func (c *Config) Validate() error {
 				problems = append(problems, "google.redirect_url must be a valid http or https URL")
 			}
 		}
+	}
+	if c.Telegram.LocalBotAPI.Enabled {
+		if c.Telegram.LocalBotAPI.APIID <= 0 {
+			problems = append(problems, "telegram.local_bot_api.api_id must be positive")
+		}
+		if strings.TrimSpace(c.Telegram.LocalBotAPI.APIHash) == "" {
+			problems = append(problems, "telegram.local_bot_api.api_hash must not be empty")
+		}
+		if c.Telegram.LocalBotAPI.HTTPPort < 1024 || c.Telegram.LocalBotAPI.HTTPPort > 65535 {
+			problems = append(problems, "telegram.local_bot_api.http_port must be within 1024..65535")
+		}
+	}
+	if c.Telegram.MaxFileSizeMB < 0 || c.Telegram.MaxFileSizeMB > 4000 {
+		problems = append(problems, "telegram.max_file_size_mb must be within 0..4000")
 	}
 	if len(problems) > 0 {
 		return errors.New("invalid config: " + strings.Join(problems, "; "))
