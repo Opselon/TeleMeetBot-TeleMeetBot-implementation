@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -131,7 +130,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	cmd.Dir = m.cfg.Dir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroup(cmd)
 
 	m.log.Infof("[PIPELINE:localbotapi] starting local telegram-bot-api server (port=%d, dir=%s)",
 		m.cfg.HTTPPort, m.cfg.Dir)
@@ -184,24 +183,14 @@ func (m *Manager) Stop() error {
 	}
 	m.log.Infof("[PIPELINE:localbotapi] shutting down local telegram-bot-api server...")
 
-	pid := cmd.Process.Pid
-	pgid, err := syscall.Getpgid(pid)
-	if err == nil {
-		_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	} else {
-		_ = cmd.Process.Signal(syscall.SIGTERM)
-	}
+	terminateProcess(cmd)
 
 	select {
 	case <-done:
 		return nil
 	case <-time.After(3 * time.Second):
 		m.log.Warnf("[PIPELINE:localbotapi] process did not exit within 3s, sending SIGKILL")
-		if err == nil {
-			_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		} else {
-			_ = cmd.Process.Kill()
-		}
+		killProcess(cmd)
 		<-done
 		return nil
 	}
