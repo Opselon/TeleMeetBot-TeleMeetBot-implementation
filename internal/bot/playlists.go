@@ -957,16 +957,9 @@ func (b *Bot) launchPlaylist(chatID, userID, playlistID int64, meetURL string) {
 	if len(urls) > 1 {
 		req.Queue = urls[1:]
 	}
-	if b.gauth != nil {
-		sum := b.gauth.Summary(userID)
-		if sum.Connected {
-			if sum.Name != "" {
-				req.GuestName = fmt.Sprintf("%s (%s)", sum.Name, sum.Email)
-			} else {
-				req.GuestName = sum.Email
-			}
-			b.log.Infof("[PIPELINE:googleauth] launching playlist session with verified Google identity: %s for user=%d", req.GuestName, userID)
-		}
+	if guestName, source := b.effectiveGuestName(userID); guestName != "" {
+		req.GuestName = guestName
+		b.log.Infof("[PIPELINE:workflow] playlist guest name from %s for user=%d", source, userID)
 	}
 	sess, err := b.eng.Start(context.Background(), req)
 	if err != nil {

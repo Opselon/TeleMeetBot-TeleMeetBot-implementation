@@ -36,6 +36,7 @@ func newHarnessWithSettings(t *testing.T, admins []int64, maxSessions int) *harn
 // binds it to the user's chat, like a real launch would.
 func (h *harness) addSessionWithQueue(userID int64, n int) *engine.Session {
 	s := &engine.Session{ID: "s-queue-test"}
+	s.SetStopForTesting()
 	s.SetSwitchRunForTesting(func(target engine.MediaTarget, stale func() bool) error { return nil })
 	s.SetMediaRunForTesting(func(action string, arg float64) (engine.MediaStatus, error) {
 		var st engine.MediaStatus
@@ -49,6 +50,9 @@ func (h *harness) addSessionWithQueue(userID int64, n int) *engine.Session {
 			return st, nil
 		case "seekTo":
 			st.CurrentTime = arg
+			return st, nil
+		case "rate":
+			st.PlaybackRate = arg
 			return st, nil
 		default:
 			return st, nil
@@ -479,6 +483,8 @@ func routesToHandler(data string) bool {
 		data == cbRefresh || data == cbMediaMode || data == cbAccount ||
 		data == cbAccountConnect || data == cbAccountRemove || data == cbAccountHelp ||
 		data == cbLangFa || data == cbLangEn || data == cbLangOrig || data == cbLangAuto:
+		return true
+	case data == cbEditMeet || data == cbEditMedia || data == cbResumeDraft:
 		return true
 	case strings.HasPrefix(data, "mode:"),
 		strings.HasPrefix(data, "lang:"),

@@ -20,6 +20,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -27,6 +28,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	_ "modernc.org/sqlite"
 )
@@ -59,6 +61,31 @@ type UserSettings struct {
 	Speed      float64 `json:"speed"`  // 0 = unset (use global default)
 	Autoplay   bool    `json:"autoplay"`
 	RepeatMode string  `json:"repeat_mode"`
+	// GuestName overrides the Meet display name when non-empty. Empty means
+	// "use the verified Google identity or the configured default".
+	GuestName string `json:"guest_name,omitempty"`
+}
+
+// MaxGuestNameRunes bounds the user-supplied Meet display name.
+const MaxGuestNameRunes = 60
+
+// SanitizeGuestName trims and validates a guest display name. Empty input is
+// valid (it clears the override). Control characters are rejected: the name
+// is typed into Google Meet's input, not into a Telegram message.
+func SanitizeGuestName(raw string) (string, error) {
+	name := strings.Join(strings.Fields(strings.TrimSpace(raw)), " ")
+	if name == "" {
+		return "", nil
+	}
+	if utf8.RuneCountInString(name) > MaxGuestNameRunes {
+		return "", fmt.Errorf("%w: guest name is too long (max %d characters)", ErrUserInvalid, MaxGuestNameRunes)
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return "", fmt.Errorf("%w: guest name contains control characters", ErrUserInvalid)
+		}
+	}
+	return name, nil
 }
 
 // DefaultUserSettings returns the built-in defaults applied when a user has
@@ -80,6 +107,12 @@ func (u UserSettings) normalize() UserSettings {
 	u.AudioLang = NormalizeAudioLang(u.AudioLang)
 	u.MediaMode = NormalizeMediaMode(u.MediaMode)
 	u.RepeatMode = NormalizeRepeatMode(u.RepeatMode)
+	// A guest name that no longer validates is dropped rather than applied.
+	if sanitized, err := SanitizeGuestName(u.GuestName); err != nil {
+		u.GuestName = ""
+	} else {
+		u.GuestName = sanitized
+	}
 	if u.Volume < 0 || u.Volume > 100 {
 		u.Volume = 0
 	}
@@ -120,11 +153,15 @@ const (
 	QueueStateInterrupted = "interrupted"
 )
 
-// userSchemaVersion is recorded in schema_migrations. Bump together with a
-// new idempotent step in userMigrations.
-const userSchemaVersion = 1
+// userSchemaVersion is the latest schema version recorded in
+// schema_migrations. Bump it together with a new step in userMigrations.
+const userSchemaVersion = 2
 
-// userMigrations maps a version to idempotent DDL, mirroring the other stores.
+// userMigrations maps a version to its DDL. Version 1 is idempotent
+// (CREATE ... IF NOT EXISTS). Version 2 adds the guest-name preference and
+// the workflow-draft table; its ALTER TABLE is column-guarded so a crash
+// between the ALTER and the version insert cannot make the migration
+// un-runnable. Steps are applied strictly in order, once per version.
 var userMigrations = map[int]string{
 	1: `CREATE TABLE IF NOT EXISTS user_preferences (
 		user_id     INTEGER PRIMARY KEY,
@@ -161,6 +198,16 @@ var userMigrations = map[int]string{
 		version    INTEGER PRIMARY KEY,
 		applied_at INTEGER NOT NULL
 	);`,
+	2: `ALTER TABLE user_preferences ADD COLUMN guest_name TEXT NOT NULL DEFAULT '';
+	CREATE TABLE IF NOT EXISTS user_workflows (
+		user_id    INTEGER PRIMARY KEY,
+		state      TEXT    NOT NULL DEFAULT 'idle',
+		meet_url   TEXT    NOT NULL DEFAULT '',
+		media_url  TEXT    NOT NULL DEFAULT '',
+		media_kind TEXT    NOT NULL DEFAULT '',
+		extra_queue TEXT   NOT NULL DEFAULT '[]',
+		updated_at INTEGER NOT NULL
+	);`,
 }
 
 // ErrUserInvalid wraps invalid user-scoped input.
@@ -190,7 +237,10 @@ func NewUserStore(ctx context.Context, path string) (*UserStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open user sqlite: %w", err)
 	}
-	// One connection serializes writers, matching the other stores.
+	// One connection serializes writers, matching the other stores. The
+	// setters are read-modify-write cycles, so they serialize in-process
+	// through the store mutex instead of relying on transaction upgrade
+	// semantics (see upsertSettings).
 	db.SetMaxOpenConns(1)
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
@@ -219,26 +269,64 @@ func (us *UserStore) Close() error {
 	return err
 }
 
-// migrate applies the baseline DDL and records the schema version. Safe to
-// re-run on an existing database.
+// migrate applies migrations strictly in version order and records each
+// applied version. Safe to re-run: version rows gate every step, and the
+// version-2 ALTER TABLE is additionally column-guarded against a crash
+// between the DDL and its version bookkeeping.
 func (us *UserStore) migrate(ctx context.Context) error {
 	us.mu.Lock()
 	defer us.mu.Unlock()
 
+	// Step 1 is the baseline and stays unconditionally idempotent, so a
+	// database created before versions were recorded upgrades cleanly.
 	if _, err := us.db.ExecContext(ctx, userMigrations[1]); err != nil {
 		return fmt.Errorf("apply user migration 1: %w", err)
 	}
 	var version int
 	err := us.db.QueryRowContext(ctx,
-		`SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1`).Scan(&version)
-	if errors.Is(err, sql.ErrNoRows) {
-		if _, err := us.db.ExecContext(ctx,
-			`INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)`,
-			userSchemaVersion, time.Now().Unix()); err != nil {
-			return fmt.Errorf("record user schema version: %w", err)
-		}
-	} else if err != nil {
+		`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version)
+	if err != nil {
 		return fmt.Errorf("read user schema version: %w", err)
+	}
+	for v := version + 1; v <= userSchemaVersion; v++ {
+		switch v {
+		case 2:
+			// Column-guarded ALTER: a partially applied v2 must not fail
+			// the rerun.
+			var haveGuest int
+			if err := us.db.QueryRowContext(ctx,
+				`SELECT COUNT(*) FROM pragma_table_info('user_preferences') WHERE name = 'guest_name'`).
+				Scan(&haveGuest); err != nil {
+				return fmt.Errorf("inspect user_preferences columns: %w", err)
+			}
+			if haveGuest == 0 {
+				if _, err := us.db.ExecContext(ctx,
+					`ALTER TABLE user_preferences ADD COLUMN guest_name TEXT NOT NULL DEFAULT ''`); err != nil {
+					return fmt.Errorf("apply user migration 2 (alter): %w", err)
+				}
+			}
+			if _, err := us.db.ExecContext(ctx,
+				`CREATE TABLE IF NOT EXISTS user_workflows (
+					user_id     INTEGER PRIMARY KEY,
+					state       TEXT    NOT NULL DEFAULT 'idle',
+					meet_url    TEXT    NOT NULL DEFAULT '',
+					media_url   TEXT    NOT NULL DEFAULT '',
+					media_kind  TEXT    NOT NULL DEFAULT '',
+					extra_queue TEXT    NOT NULL DEFAULT '[]',
+					updated_at  INTEGER NOT NULL
+				)`); err != nil {
+				return fmt.Errorf("apply user migration 2 (table): %w", err)
+			}
+		default:
+			if _, err := us.db.ExecContext(ctx, userMigrations[v]); err != nil {
+				return fmt.Errorf("apply user migration %d: %w", v, err)
+			}
+		}
+		if _, err := us.db.ExecContext(ctx,
+			`INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)
+			 ON CONFLICT(version) DO NOTHING`, v, time.Now().Unix()); err != nil {
+			return fmt.Errorf("record user schema version %d: %w", v, err)
+		}
 	}
 	return nil
 }
@@ -247,7 +335,7 @@ func (us *UserStore) migrate(ctx context.Context) error {
 
 // userPrefDataColumns lists the value columns (no user_id): the single-row
 // readers filter by user_id and scan only these.
-const userPrefDataColumns = `audio_lang, media_mode, volume, speed, autoplay, repeat_mode`
+const userPrefDataColumns = `audio_lang, media_mode, volume, speed, autoplay, repeat_mode, guest_name`
 
 // userPrefColumns adds user_id for the map-shaped listing query.
 const userPrefColumns = `user_id, ` + userPrefDataColumns
@@ -255,7 +343,7 @@ const userPrefColumns = `user_id, ` + userPrefDataColumns
 func scanUserSettings(row *sql.Row) (UserSettings, error) {
 	var u UserSettings
 	var autoplay int
-	err := row.Scan(&u.AudioLang, &u.MediaMode, &u.Volume, &u.Speed, &autoplay, &u.RepeatMode)
+	err := row.Scan(&u.AudioLang, &u.MediaMode, &u.Volume, &u.Speed, &autoplay, &u.RepeatMode, &u.GuestName)
 	if err != nil {
 		return UserSettings{}, err
 	}
@@ -343,9 +431,9 @@ func (us *UserStore) upsertSettings(ctx context.Context, userID int64, apply fun
 		autoplay = 1
 	}
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE user_preferences SET audio_lang = ?, media_mode = ?, volume = ?, speed = ?, autoplay = ?, repeat_mode = ?, updated_at = ?
+		`UPDATE user_preferences SET audio_lang = ?, media_mode = ?, volume = ?, speed = ?, autoplay = ?, repeat_mode = ?, guest_name = ?, updated_at = ?
 		 WHERE user_id = ?`,
-		u.AudioLang, u.MediaMode, u.Volume, u.Speed, autoplay, u.RepeatMode, time.Now().Unix(), userID); err != nil {
+		u.AudioLang, u.MediaMode, u.Volume, u.Speed, autoplay, u.RepeatMode, u.GuestName, time.Now().Unix(), userID); err != nil {
 		return UserSettings{}, fmt.Errorf("update preferences: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -389,6 +477,16 @@ func (us *UserStore) SetAutoplay(ctx context.Context, userID int64, on bool) (Us
 // SetRepeatMode persists the repeat preference.
 func (us *UserStore) SetRepeatMode(ctx context.Context, userID int64, mode string) (UserSettings, error) {
 	return us.upsertSettings(ctx, userID, func(u *UserSettings) { u.RepeatMode = NormalizeRepeatMode(mode) })
+}
+
+// SetGuestName persists the Meet display-name override. Empty input clears
+// the override so the verified identity or server default applies again.
+func (us *UserStore) SetGuestName(ctx context.Context, userID int64, name string) (UserSettings, error) {
+	sanitized, err := SanitizeGuestName(name)
+	if err != nil {
+		return UserSettings{}, err
+	}
+	return us.upsertSettings(ctx, userID, func(u *UserSettings) { u.GuestName = sanitized })
 }
 
 // ResetUser deletes one user's preferences row. It returns true when a row
@@ -440,7 +538,7 @@ func (us *UserStore) Preferences(ctx context.Context) (map[int64]UserSettings, e
 		var id int64
 		var u UserSettings
 		var autoplay int
-		if err := rows.Scan(&id, &u.AudioLang, &u.MediaMode, &u.Volume, &u.Speed, &autoplay, &u.RepeatMode); err != nil {
+		if err := rows.Scan(&id, &u.AudioLang, &u.MediaMode, &u.Volume, &u.Speed, &autoplay, &u.RepeatMode, &u.GuestName); err != nil {
 			return nil, fmt.Errorf("scan preference: %w", err)
 		}
 		u.Autoplay = autoplay != 0
@@ -729,6 +827,151 @@ func (us *UserStore) PruneQueues(ctx context.Context, maxAge time.Duration) (int
 		return 0, fmt.Errorf("prune session queues rows: %w", err)
 	}
 	return int(n), nil
+}
+
+// ---- workflow drafts --------------------------------------------------------
+
+// Workflow states for the session-creation draft.
+const (
+	WorkflowAwaitingMeet  = "awaiting_meet_url"
+	WorkflowAwaitingMedia = "awaiting_media_url"
+	WorkflowReviewing     = "reviewing_configuration"
+)
+
+// WorkflowDraft is the resumable draft of a session under construction.
+// It is intentionally tiny: two URLs, the validated media kind and the
+// state the wizard stopped at. Abandoned drafts expire by updated_at.
+type WorkflowDraft struct {
+	UserID     int64
+	State      string
+	MeetURL    string
+	MediaURL   string
+	MediaKind  string
+	ExtraQueue []string
+	UpdatedAt  time.Time
+}
+
+// ValidateWorkflowDraft fences a draft before it is stored: the state must
+// be one of the known creation states and URLs stay within the playlist
+// URL length bound.
+func ValidateWorkflowDraft(d WorkflowDraft) (WorkflowDraft, error) {
+	switch d.State {
+	case WorkflowAwaitingMeet, WorkflowAwaitingMedia, WorkflowReviewing:
+	default:
+		return WorkflowDraft{}, fmt.Errorf("%w: workflow state %q", ErrUserInvalid, d.State)
+	}
+	if d.UserID <= 0 {
+		return WorkflowDraft{}, fmt.Errorf("%w: user id", ErrUserInvalid)
+	}
+	if utf8.RuneCountInString(d.MeetURL) > MaxPlaylistURLRunes ||
+		utf8.RuneCountInString(d.MediaURL) > MaxPlaylistURLRunes {
+		return WorkflowDraft{}, fmt.Errorf("%w: workflow URL too long", ErrUserInvalid)
+	}
+	if len(d.ExtraQueue) > MaxPlaylistItems {
+		return WorkflowDraft{}, fmt.Errorf("%w: workflow queue too large", ErrUserInvalid)
+	}
+	if utf8.RuneCountInString(d.MediaKind) > 24 {
+		d.MediaKind = truncateRunes(d.MediaKind, 24)
+	}
+	return d, nil
+}
+
+// SaveWorkflowDraft upserts the user's creation draft. The draft replaces
+// any previous one: a user has at most one wizard in flight.
+func (us *UserStore) SaveWorkflowDraft(ctx context.Context, d WorkflowDraft) error {
+	d, err := ValidateWorkflowDraft(d)
+	if err != nil {
+		return err
+	}
+	queue, err := json.Marshal(d.ExtraQueue)
+	if err != nil {
+		return fmt.Errorf("encode workflow queue: %w", err)
+	}
+	us.mu.Lock()
+	defer us.mu.Unlock()
+	_, err = us.db.ExecContext(ctx,
+		`INSERT INTO user_workflows (user_id, state, meet_url, media_url, media_kind, extra_queue, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(user_id) DO UPDATE SET state = excluded.state, meet_url = excluded.meet_url,
+			media_url = excluded.media_url, media_kind = excluded.media_kind,
+			extra_queue = excluded.extra_queue, updated_at = excluded.updated_at`,
+		d.UserID, d.State, d.MeetURL, d.MediaURL, d.MediaKind, string(queue), time.Now().Unix())
+	if err != nil {
+		return fmt.Errorf("save workflow draft: %w", err)
+	}
+	return nil
+}
+
+// LoadWorkflowDraft returns the user's draft, or found=false. Stale drafts
+// (older than maxAge) are treated as absent and deleted on read, so a
+// restart never resurrects an abandoned wizard.
+func (us *UserStore) LoadWorkflowDraft(ctx context.Context, userID int64, maxAge time.Duration) (WorkflowDraft, bool, error) {
+	if userID <= 0 {
+		return WorkflowDraft{}, false, nil
+	}
+	us.mu.Lock()
+	defer us.mu.Unlock()
+
+	var d WorkflowDraft
+	var queue string
+	var updated int64
+	err := us.db.QueryRowContext(ctx,
+		`SELECT user_id, state, meet_url, media_url, media_kind, extra_queue, updated_at
+		 FROM user_workflows WHERE user_id = ?`, userID).
+		Scan(&d.UserID, &d.State, &d.MeetURL, &d.MediaURL, &d.MediaKind, &queue, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return WorkflowDraft{}, false, nil
+	}
+	if err != nil {
+		return WorkflowDraft{}, false, fmt.Errorf("load workflow draft: %w", err)
+	}
+	if maxAge > 0 && time.Since(time.Unix(updated, 0)) > maxAge {
+		_, _ = us.db.ExecContext(ctx, `DELETE FROM user_workflows WHERE user_id = ?`, userID)
+		return WorkflowDraft{}, false, nil
+	}
+	d.UpdatedAt = time.Unix(updated, 0)
+	if err := json.Unmarshal([]byte(queue), &d.ExtraQueue); err != nil {
+		// A malformed queue payload must not lose the URLs.
+		d.ExtraQueue = nil
+	}
+	d, err = ValidateWorkflowDraft(d)
+	if err != nil {
+		// Unknown persisted state (older schema, corrupt row): drop it.
+		_, _ = us.db.ExecContext(ctx, `DELETE FROM user_workflows WHERE user_id = ?`, userID)
+		return WorkflowDraft{}, false, nil
+	}
+	return d, true, nil
+}
+
+// DeleteWorkflowDraft removes the user's draft. It is a no-op when none
+// exists, so cancel paths can call it unconditionally.
+func (us *UserStore) DeleteWorkflowDraft(ctx context.Context, userID int64) error {
+	if userID <= 0 {
+		return nil
+	}
+	us.mu.Lock()
+	defer us.mu.Unlock()
+	if _, err := us.db.ExecContext(ctx, `DELETE FROM user_workflows WHERE user_id = ?`, userID); err != nil {
+		return fmt.Errorf("delete workflow draft: %w", err)
+	}
+	return nil
+}
+
+// BackdateWorkflowDraftForTest ages a draft by the given duration so the
+// expiry path can be exercised without sleeping. Test-only helper.
+func (us *UserStore) BackdateWorkflowDraftForTest(userID int64, age time.Duration) error {
+	if userID <= 0 {
+		return nil
+	}
+	us.mu.Lock()
+	defer us.mu.Unlock()
+	_, err := us.db.ExecContext(context.Background(),
+		`UPDATE user_workflows SET updated_at = updated_at - ? WHERE user_id = ?`,
+		int64(age.Seconds()), userID)
+	if err != nil {
+		return fmt.Errorf("backdate workflow draft: %w", err)
+	}
+	return nil
 }
 
 // QueueStats is the aggregate shown on the management storage screen.

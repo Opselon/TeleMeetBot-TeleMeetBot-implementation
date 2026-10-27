@@ -75,7 +75,9 @@ const COMMAND_DOCS = {
   lang: 'Alias of /audiotrack.',
   language: 'Alias of /audiotrack.',
   health: 'Health snapshot: version, browser, disk, uptime and active sessions.',
-  settings: 'Open your personal settings: audio language, media mode, start volume/speed, auto-advance and repeat — saved in SQLite per user.',
+  settings: 'Open your personal settings: audio language, media mode, start volume/speed, auto-advance, repeat and guest display name — saved in SQLite per user.',
+  home: 'Return to the main dashboard without touching running sessions.',
+  back: 'Step back in the creation wizard, keeping the values you already validated.',
   prefs: 'Alias of /settings.',
   preferences: 'Alias of /settings.',
   help: 'Usage overview with every command and button.',
@@ -98,7 +100,7 @@ const COMMAND_DOCS = {
 };
 const flowsGo = read('internal/bot/flows.go');
 const INLINE_ACTIONS = new Set([
-  'pause', 'resume', 'mute', 'unmute', 'voldown', 'volup', 'back10', 'fwd10', 'back30', 'fwd30', 'back60', 'fwd60', 'restart', 'refresh', 'stop', 'next', 'prev', 'queue', 'jump', 'page', 'repeat', 'shuftoggle', 'add', 'addnext', 'load', 'loadpl', 'loadok', 'clear_confirm', 'do_clear', 'do_clear_all', 'rm_menu', 'rm', 'tools',
+  'pause', 'resume', 'mute', 'unmute', 'voldown', 'volup', 'back10', 'fwd10', 'back30', 'fwd30', 'back60', 'fwd60', 'restart', 'refresh', 'stop', 'stop_confirm', 'stop_ok', 'speed', 'rate', 'next', 'prev', 'queue', 'jump', 'page', 'repeat', 'shuftoggle', 'add', 'addnext', 'load', 'loadpl', 'loadok', 'clear_confirm', 'do_clear', 'do_clear_all', 'rm_menu', 'rm', 'tools',
 ]);
 const commands = [];
 for (const m of flowsGo.matchAll(/case\s+("[a-z0-9]+"(?:\s*,\s*"[a-z0-9]+")*):/g)) {

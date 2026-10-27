@@ -58,8 +58,11 @@ For a **screen** (Xvfb) mode instead of headless, set `present_mode: "screen"`, 
 ## Features
 
 * **2-minute onboarding wizard** — `telemeetbot --wizard` (token, admins, Chromium detection, save, optional systemd/capture-test)
+* **Stateful creation workflow** — explicit states (`awaiting_meet_url` → `awaiting_media_url` → `reviewing_configuration`), `/back` keeps validated input, per-field ✏️ Edit buttons on the review card, drafts survive a bot restart (15-minute expiry) and launch consumes them
+* **Destructive-action confirmation** — ⏹ Stop re-asks before the bot leaves the meeting; the confirm re-checks the session id so a stale button can never stop a different session
 * **Telegram dashboard** — home, sessions, settings, health, per-session control cards that refresh automatically
-* **Playback control** — pause/resume, mute/unmute, volume 0–100, speed 0.25–4×, seek ±10s/±30s/±60s (verified against the live player), loop, restart, repeat (off / one / all) and shuffle for queued playback
+* **Playback control** — pause/resume, mute/unmute, volume 0–100, speed 0.25–4× (⚡ Speed presets on the session card), seek ±10s/±30s/±60s (verified against the live player), loop, restart, repeat (off / one / all) and shuffle for queued playback
+* **Guest display name** — optional per-user Meet display name in Settings; your explicit setting wins over the verified Google identity and the server default, and the review card shows the effective name
 * **Any link** — YouTube (`watch`/`youtu.be`/`shorts`/`live`), direct media (`.mp4 .m4v .webm .mkv .mov .ogv .mp3 .m4a .aac .flac .wav .opus .oga`), and generic pages via a built-in player
 * **Smart source detection** — a live HTTP probe (Content-Type, redirects, HEAD→GET fallback) classifies links by what the server actually serves, not by extension: an `.mp3` URL serving HTML is a page; a bare CDN link serving `video/mp4` is direct media
 * **Telegram media** — forward an audio/video/document to the bot: it is downloaded through the Bot API, content-sniffed, and played as direct media (never routed through YouTube logic)
@@ -214,10 +217,12 @@ and keeps it live.
 | `/new <meet> <media>` | one-shot: both links in one message (space separated) |
 | `/sessions` | list running sessions |
 | `/health` | health + doctor-style snapshot |
-| `/settings` | current config summary |
+| `/settings` | your per-user settings (audio, mode, volume/speed, auto-advance, repeat, guest name) |
 | `/help` | usage overview |
-| `/stop <id>` | end a session |
-| `/cancel` | abort an open wizard |
+| `/stop <id>` | open the stop confirmation for a session |
+| `/cancel` | abort an open wizard (draft deleted) |
+| `/back` | step back in the creation wizard, keeping validated input |
+| `/home` | return to the dashboard without touching running sessions |
 | `/id` | show your Telegram user id |
 | `/ping` | liveness probe |
 | `/playlists` | open your persistent playlist library |

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -163,13 +164,14 @@ func TestUserSettingsPersistAcrossReopen(t *testing.T) {
 	if got.RepeatMode != RepeatOne || got.Volume != 40 {
 		t.Fatalf("settings lost on reopen: %+v", got)
 	}
-	// The migration version was recorded exactly once.
-	var versions int
-	if err := us2.db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&versions); err != nil {
-		t.Fatalf("count migrations: %v", err)
+	// The schema is at the latest recorded version, with no duplicate rows.
+	var version int
+	var rows int
+	if err := us2.db.QueryRow(`SELECT MAX(version), COUNT(*) FROM schema_migrations`).Scan(&version, &rows); err != nil {
+		t.Fatalf("read migrations: %v", err)
 	}
-	if versions != 1 {
-		t.Fatalf("schema_migrations rows = %d, want 1", versions)
+	if version != userSchemaVersion || rows != userSchemaVersion {
+		t.Fatalf("schema_migrations version=%d rows=%d, want %d/%d", version, rows, userSchemaVersion, userSchemaVersion)
 	}
 }
 
@@ -527,3 +529,169 @@ func TestUserStoreCascadeDelete(t *testing.T) {
 // compile-time guards: the SQL strings must stay parseable.
 var _ = sql.ErrNoRows
 var _ = fmt.Sprintf
+
+// ---- workflow drafts and guest names (schema v2) ---------------------------
+
+func TestWorkflowDraftRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	us := newTestUserStore(t)
+
+	d := WorkflowDraft{
+		UserID:     42,
+		State:      WorkflowAwaitingMedia,
+		MeetURL:    "https://meet.google.com/abc-defg-hij",
+		MediaURL:   "https://example.com/a.mp4",
+		MediaKind:  "direct",
+		ExtraQueue: []string{"https://example.com/b.mp4", "https://example.com/c.mp4"},
+	}
+	if err := us.SaveWorkflowDraft(ctx, d); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, found, err := us.LoadWorkflowDraft(ctx, 42, 24*time.Hour)
+	if err != nil || !found {
+		t.Fatalf("load: found=%v err=%v", found, err)
+	}
+	if got.State != WorkflowAwaitingMedia || got.MeetURL != d.MeetURL ||
+		got.MediaURL != d.MediaURL || got.MediaKind != "direct" || len(got.ExtraQueue) != 2 {
+		t.Fatalf("draft = %+v", got)
+	}
+
+	// Only one draft per user: saving replaces.
+	d.State = WorkflowReviewing
+	if err := us.SaveWorkflowDraft(ctx, d); err != nil {
+		t.Fatalf("resave: %v", err)
+	}
+	got, found, _ = us.LoadWorkflowDraft(ctx, 42, 24*time.Hour)
+	if !found || got.State != WorkflowReviewing {
+		t.Fatalf("resave = %+v found=%v", got, found)
+	}
+
+	// Ownership: another user sees nothing.
+	if _, found, _ := us.LoadWorkflowDraft(ctx, 43, 24*time.Hour); found {
+		t.Fatal("foreign user read a draft")
+	}
+
+	if err := us.DeleteWorkflowDraft(ctx, 42); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, found, _ := us.LoadWorkflowDraft(ctx, 42, 24*time.Hour); found {
+		t.Fatal("draft survived deletion")
+	}
+}
+
+func TestWorkflowDraftValidationAndExpiry(t *testing.T) {
+	ctx := context.Background()
+	us := newTestUserStore(t)
+
+	if err := us.SaveWorkflowDraft(ctx, WorkflowDraft{UserID: 42, State: "bogus"}); err == nil {
+		t.Fatal("bogus state accepted")
+	}
+	if err := us.SaveWorkflowDraft(ctx, WorkflowDraft{UserID: -1, State: WorkflowReviewing}); err == nil {
+		t.Fatal("bad user id accepted")
+	}
+
+	_ = us.SaveWorkflowDraft(ctx, WorkflowDraft{UserID: 42, State: WorkflowAwaitingMeet, MeetURL: "https://meet.google.com/abc-defg-hij"})
+	// Backdate beyond the limit: the read drops the row.
+	if err := us.BackdateWorkflowDraftForTest(42, 30*time.Minute); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+	if _, found, _ := us.LoadWorkflowDraft(ctx, 42, 15*time.Minute); found {
+		t.Fatal("stale draft not expired")
+	}
+	if _, found, _ := us.LoadWorkflowDraft(ctx, 42, 15*time.Minute); found {
+		t.Fatal("expired draft reappeared")
+	}
+	// maxAge 0 disables the expiry check (tests / recovery tooling).
+	_ = us.SaveWorkflowDraft(ctx, WorkflowDraft{UserID: 42, State: WorkflowAwaitingMeet})
+	if _, found, _ := us.LoadWorkflowDraft(ctx, 42, 0); !found {
+		t.Fatal("maxAge=0 expired a fresh draft")
+	}
+}
+
+func TestGuestNamePreference(t *testing.T) {
+	ctx := context.Background()
+	us := newTestUserStore(t)
+
+	u, err := us.SetGuestName(ctx, 42, "  Ada   Lovelace ")
+	if err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if u.GuestName != "Ada Lovelace" {
+		t.Fatalf("guest name = %q", u.GuestName)
+	}
+	if u, _ := us.Get(ctx, 42); u.GuestName != "Ada Lovelace" {
+		t.Fatalf("persisted guest name = %q", u.GuestName)
+	}
+
+	// Empty clears the override.
+	if u, _ := us.SetGuestName(ctx, 42, "-"); true {
+		_ = u
+	}
+	u, err = us.SetGuestName(ctx, 42, "")
+	if err != nil || u.GuestName != "" {
+		t.Fatalf("clear: %v %+v", err, u)
+	}
+
+	// Over-long names are rejected.
+	if _, err := us.SetGuestName(ctx, 42, strings.Repeat("x", 100)); err == nil {
+		t.Fatal("over-long guest name accepted")
+	}
+	// Control characters are rejected.
+	if _, err := us.SetGuestName(ctx, 42, "badname"); err == nil {
+		t.Fatal("control-character guest name accepted")
+	}
+	// A corrupt stored value is dropped on read.
+	if _, err := us.db.Exec(`UPDATE user_preferences SET guest_name = ? WHERE user_id = 42`, strings.Repeat("y", 200)); err != nil {
+		t.Fatalf("corrupt: %v", err)
+	}
+	if u, _ := us.Get(ctx, 42); u.GuestName != "" {
+		t.Fatalf("corrupt guest name not normalized: %q", u.GuestName)
+	}
+}
+
+// TestUserStoreMigrationV2PreservesV1Data creates a database with only the
+// version-1 schema and rows, then reopens it with the current code: the v2
+// migration must run once and keep every existing value readable.
+func TestUserStoreMigrationV2PreservesV1Data(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "users.db")
+
+	// Build a v1 database by hand.
+	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)")
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := db.Exec(userMigrations[1]); err != nil {
+		t.Fatalf("apply v1: %v", err)
+	}
+	now := time.Now().Unix()
+	if _, err := db.Exec(`INSERT INTO user_preferences (user_id, audio_lang, media_mode, volume, speed, autoplay, repeat_mode, created_at, updated_at)
+		VALUES (7, 'en', 'download', 55, 1.25, 0, 'all', ?, ?)`, now, now); err != nil {
+		t.Fatalf("seed v1 row: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw: %v", err)
+	}
+
+	// Reopen with the current store: v2 runs and preserves the row.
+	us, err := NewUserStore(context.Background(), path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer us.Close()
+	u, err := us.Get(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("get after migration: %v", err)
+	}
+	if u.AudioLang != "en" || u.MediaMode != "download" || u.Volume != 55 || u.Speed != 1.25 || u.Autoplay || u.RepeatMode != RepeatAll {
+		t.Fatalf("v1 data lost in migration: %+v", u)
+	}
+	// The new column works on migrated rows.
+	if _, err := us.SetGuestName(context.Background(), 7, "Grace Hopper"); err != nil {
+		t.Fatalf("set guest name on migrated row: %v", err)
+	}
+	// And the drafts table exists.
+	if err := us.SaveWorkflowDraft(context.Background(), WorkflowDraft{UserID: 7, State: WorkflowAwaitingMeet}); err != nil {
+		t.Fatalf("draft on migrated db: %v", err)
+	}
+}
