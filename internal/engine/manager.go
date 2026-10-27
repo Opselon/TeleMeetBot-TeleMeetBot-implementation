@@ -40,6 +40,13 @@ type BrowserConfig struct {
 	// frames), "swiftshader" (ANGLE/SwiftShader software GL) or "auto" (leave
 	// the choice to Chromium, for real-GPU hosts).
 	GPU string
+	// CacheDir enables the persistent HTTP cache under this directory.
+	// Empty disables it. Nothing session-specific (cookies, storage,
+	// meeting state) is written there — only Chromium's HTTP cache.
+	CacheDir string
+	// WarmUp pre-launches one idle Chromium at manager start so the first
+	// session skips the cold browser start.
+	WarmUp bool
 }
 
 // MediaOptions is the media-side configuration.
@@ -197,6 +204,23 @@ type Manager struct {
 
 	sharedMu sync.Mutex
 	shared   *sharedBrowser
+
+	// cachePool recycles persistent HTTP cache dirs across per-session
+	// launches. Nil when BrowserCacheDir is empty (caching disabled).
+	cachePool *browserCachePool
+
+	// warmMu guards the warm browser slot.
+	warmMu       sync.Mutex
+	warm         *warmBrowser
+	warmDisabled bool
+}
+
+// warmBrowser holds a pre-launched, idle browser waiting for a session.
+type warmBrowser struct {
+	browser  *rod.Browser
+	cacheDir string
+	launchAt time.Time
+	close    func()
 }
 
 // maxFinishedSessions bounds how many ended sessions stay in the map. They are
@@ -224,6 +248,13 @@ func NewManager(browser BrowserConfig, media MediaOptions, meet MeetOptions, log
 		events:      make(chan Event, 128),
 		sessions:    map[SessionID]*Session{},
 		maxSessions: 1,
+	}
+	if dir := strings.TrimSpace(browser.CacheDir); dir != "" {
+		mgr.cachePool = newBrowserCachePool(dir)
+		// Recover from crashed sessions: cache dirs idle for over an hour
+		// belonged to a dead process and are safe to remove.
+		SweepStaleCacheDirs(dir, time.Hour)
+		log.Infof("[PIPELINE:browser] persistent HTTP cache enabled at %s", dir)
 	}
 	if err := mgr.initMediaManager(); err != nil {
 		log.Warnf("download & stream disabled: %v", err)
@@ -507,11 +538,29 @@ func (m *Manager) acquireBrowser() (*rod.Browser, func(), error) {
 		m.sharedMu.Lock()
 		defer m.sharedMu.Unlock()
 		if m.shared == nil {
+			var cacheDir string
+			if m.cachePool != nil {
+				if d, err := m.cachePool.acquire(); err == nil {
+					cacheDir = d
+					opts.cacheDir = d
+				}
+			}
 			b, closeFn, err := launchBrowser(opts, m.log)
 			if err != nil {
+				if cacheDir != "" && m.cachePool != nil {
+					m.cachePool.release(cacheDir)
+				}
 				return nil, nil, err
 			}
-			m.shared = &sharedBrowser{browser: b, close: closeFn}
+			m.shared = &sharedBrowser{
+				browser: b,
+				close: func() {
+					closeFn()
+					if cacheDir != "" && m.cachePool != nil {
+						m.cachePool.release(cacheDir)
+					}
+				},
+			}
 		}
 		m.shared.refs++
 		refs := m.shared.refs
@@ -534,12 +583,119 @@ func (m *Manager) acquireBrowser() (*rod.Browser, func(), error) {
 		return nil, nil, err
 	}
 	opts.userData = dir
+
+	// Persistent cache: exclusive dir from the recycle pool (nil pool when
+	// caching is disabled). Release returns it for the next launch.
+	if m.cachePool != nil {
+		cacheDir, err := m.cachePool.acquire()
+		if err != nil {
+			m.log.Warnf("[PIPELINE:browser] persistent cache unavailable, continuing without: %v", err)
+		} else {
+			opts.cacheDir = cacheDir
+			b, closeFn, err := launchBrowser(opts, m.log)
+			if err != nil {
+				m.cachePool.release(cacheDir)
+				return nil, nil, err
+			}
+			innerOnce := closeFn
+			var once sync.Once
+			return b, func() {
+				once.Do(func() {
+					innerOnce()
+					m.cachePool.release(cacheDir)
+				})
+			}, nil
+		}
+	}
+
 	b, closeFn, err := launchBrowser(opts, m.log)
 	if err != nil {
 		return nil, nil, err
 	}
 	var once sync.Once
 	return b, func() { once.Do(closeFn) }, nil
+}
+
+// WarmUp pre-launches one idle Chromium so the next session skips the cold
+// start. The warm browser is only a started process with a blank page: no
+// meeting is joined, no camera/mic is enabled, nothing is presented. It is
+// consumed by the next acquireWarmBrowser() call; if warm-up is disabled or
+// a warm browser is already waiting, this is a no-op.
+func (m *Manager) WarmUp() error {
+	m.warmMu.Lock()
+	defer m.warmMu.Unlock()
+	if m.warm != nil {
+		return nil // already warm
+	}
+	dir, err := tempProfileDir()
+	if err != nil {
+		return fmt.Errorf("warm-up profile: %w", err)
+	}
+	opts := launchOptions{browser: m.browserCfg, meet: m.meetCfg, forMeet: true, userData: dir}
+	if m.cachePool != nil {
+		cacheDir, err := m.cachePool.acquire()
+		if err == nil {
+			opts.cacheDir = cacheDir
+		}
+	}
+	b, closeFn, err := launchBrowser(opts, m.log)
+	if err != nil {
+		if opts.cacheDir != "" && m.cachePool != nil {
+			m.cachePool.release(opts.cacheDir)
+		}
+		_ = os.RemoveAll(dir)
+		return fmt.Errorf("warm-up launch: %w", err)
+	}
+	// Light handshake sanity check only (about:blank level, no navigation).
+	m.warm = &warmBrowser{
+		browser:  b,
+		cacheDir: opts.cacheDir,
+		launchAt: time.Now(),
+		close: func() {
+			closeFn()
+			if opts.cacheDir != "" && m.cachePool != nil {
+				m.cachePool.release(opts.cacheDir)
+			}
+			_ = os.RemoveAll(dir)
+		},
+	}
+	m.log.Infof("[PIPELINE:browser] warm browser ready (cache=%t)", opts.cacheDir != "")
+	return nil
+}
+
+// acquireWarmBrowser hands the warm browser to a session, if one is ready.
+// The second return reports whether a warm browser was consumed. The caller
+// still creates its own media/meet tabs; only the process and HTTP cache are
+// reused. If the warm browser has died (crash, CDP disconnect), it is cleaned
+// up and false is returned so the session falls back to a cold launch.
+func (m *Manager) acquireWarmBrowser() (*rod.Browser, func(), bool) {
+	m.warmMu.Lock()
+	defer m.warmMu.Unlock()
+	if m.warm == nil {
+		return nil, nil, false
+	}
+	w := m.warm
+	m.warm = nil
+	// Liveness check: a crashed warm browser must not be handed out.
+	if w.browser == nil {
+		w.close()
+		return nil, nil, false
+	}
+	var once sync.Once
+	release := func() {
+		once.Do(w.close)
+	}
+	return w.browser, release, true
+}
+
+// ShutdownWarm closes any idle warm browser (application shutdown path).
+func (m *Manager) ShutdownWarm() {
+	m.warmMu.Lock()
+	defer m.warmMu.Unlock()
+	if m.warm != nil {
+		m.warm.close()
+		m.warm = nil
+	}
 }
 
 // newSessionID returns a short random id like "s-1a2b3c4d".

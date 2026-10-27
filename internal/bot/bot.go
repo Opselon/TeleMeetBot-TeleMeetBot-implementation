@@ -137,12 +137,18 @@ func New(api API, cfg *config.Config, eng Engine, st *store.Store, ms Meetings, 
 			opt(b)
 		}
 	}
+	if cfg != nil {
+		health.SetResourceDataDir(cfg.Paths.DataDir)
+	}
 	return b
 }
 
 // Run consumes Telegram updates until the context is cancelled.
 // ctx is used to keep handling sane on shutdown: in-flight updates finish.
 func (b *Bot) Run(ctx context.Context) error {
+	if b.cfg != nil {
+		health.StartResourceMonitor(ctx, b.cfg.Paths.DataDir)
+	}
 	updates := b.api.Updates(b.cfg.Telegram.PollTimeoutSeconds)
 	b.log.Infof("telegram bot @%s is polling", b.api.BotUsername())
 	for {

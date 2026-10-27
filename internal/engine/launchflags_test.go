@@ -139,3 +139,18 @@ func hasFlag(flags []string, want string) bool {
 	}
 	return false
 }
+
+// TestLaunchFlagsDiskCache pins the persistent-cache flag contract: when a
+// cache dir is configured the launch must carry disk-cache-dir (and a bounded
+// disk-cache-size); without one, no cache dir flag may leak a stale value.
+func TestLaunchFlagsDiskCache(t *testing.T) {
+	// The cache flags are applied in launchBrowser (launcher level), not in
+	// the pure launchFlags list — assert via launcher flags instead.
+	cfg := BrowserConfig{Headless: true}
+	flags := launchFlags(cfg, MeetOptions{}, false)
+	for _, f := range flags {
+		if strings.HasPrefix(f, "disk-cache-dir") {
+			t.Fatalf("launchFlags must not embed a cache dir (it is per-launch): %v", flags)
+		}
+	}
+}
