@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -441,6 +442,29 @@ func (c *Config) normalize() {
 	}
 	if c.Download.MaxSizeMB < 0 {
 		c.Download.MaxSizeMB = 0
+	}
+	if tok := os.Getenv("TELEGRAM_TOKEN"); tok != "" && c.Telegram.Token == "" {
+		c.Telegram.Token = tok
+	} else if tok := os.Getenv("TELEMEETBOT_TOKEN"); tok != "" && c.Telegram.Token == "" {
+		c.Telegram.Token = tok
+	}
+	if admins := os.Getenv("TELEGRAM_ADMINS"); admins != "" && len(c.Telegram.Admins) == 0 {
+		for _, part := range strings.Split(admins, ",") {
+			part = strings.TrimSpace(part)
+			if id, err := strconv.ParseInt(part, 10, 64); err == nil && id > 0 {
+				c.Telegram.Admins = append(c.Telegram.Admins, id)
+			}
+		}
+	}
+	if nchat := os.Getenv("TELEGRAM_NOTIFY_CHAT_ID"); nchat != "" && c.Telegram.NotifyChatID == 0 {
+		if id, err := strconv.ParseInt(strings.TrimSpace(nchat), 10, 64); err == nil {
+			c.Telegram.NotifyChatID = id
+		}
+	}
+	if pxy := os.Getenv("TELEMEETBOT_PROXY"); pxy != "" {
+		c.Browser.Proxy = pxy
+	} else if pxy := os.Getenv("BROWSER_PROXY"); pxy != "" && c.Browser.Proxy == "" {
+		c.Browser.Proxy = pxy
 	}
 	if cid := os.Getenv("TELEMEETBOT_GOOGLE_CLIENT_ID"); cid != "" {
 		c.Google.ClientID = cid

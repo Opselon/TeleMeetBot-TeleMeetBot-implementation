@@ -127,6 +127,21 @@ func mainMenuKB() *tgbotapi.InlineKeyboardMarkup {
 			tgbotapi.NewInlineKeyboardButtonData("👤 Google Account", cbAccount),
 			tgbotapi.NewInlineKeyboardButtonData("ℹ️ Help", cbHelp),
 		},
+		{
+			tgbotapi.NewInlineKeyboardButtonURL("⭐ Star us on GitHub", "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation"),
+		},
+	}}
+}
+
+// helpKB is a keyboard for help and about screens with a star button.
+func helpKB() *tgbotapi.InlineKeyboardMarkup {
+	return &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{
+		{
+			tgbotapi.NewInlineKeyboardButtonURL("⭐ Star on GitHub", "https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation"),
+		},
+		{
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ Dashboard", cbHome),
+		},
 	}}
 }
 
@@ -440,28 +455,48 @@ func helpText() string {
 	return strings.TrimSpace(`
 ℹ️ <b>How TeleMeetBot works</b>
 
-1. Open <b>New stream</b>.
+1. Open <b>➕ New stream</b>.
 2. Send a Google Meet link (<code>meet.google.com/abc-defg-hij</code>).
-3. Send the media link you want on the screen (YouTube, mp4/webm/mp3, or any web page).
-4. Confirm — the bot opens Meet as a guest, shares a tab and plays it.
+3. Send the media link you want on the screen (YouTube, web page, or direct file).
+   <i>Tip: You can also forward Telegram audio/video files up to <b>2.0 GiB (2000 MiB)</b>!</i>
+4. Confirm — the bot opens Meet, shares the tab and streams it.
 
-<b>Controls</b>
-⏸ Pause / ▶️ Resume — pause the stream
-🔇 Mute — mute the shared audio
-⏪ ⏩ — seek 10s (configurable)
-🔉 🔊 — volume
-♻️ Restart — reload the media from the start
-🔀 Switch media — swap the shared URL without rejoining
-⏹ Stop — leave the meeting
+<b>Controls &amp; Features</b>
+• ⏸ Pause / ▶️ Resume — pause or resume the stream
+• 🔇 Mute / 🔉 🔊 — control audio and volume
+• ⏪ ⏩ — seek 10s (configurable)
+• 🔀 Switch media — swap media without rejoining
+• 🌐 Audio Language — choose Persian (fa), creator original, or dubbed audio
+• 👤 Google Account — link your Google account (/account) to display your verified name
+• 📚 Playlists &amp; Queue — manage multi-track streaming queues
+• ⏹ Stop — leave the meeting
 
-<b>Download &amp; Stream</b>
-⬇️ Download &amp; Stream — fetch the media to the server first, then play the local file (YouTube via yt-dlp, direct mp4/webm/mkv/mov/mp3/m4a…). Files are freed when the session ends or switches (1-hour safety cap).
-🤖 Auto — browser first, download as a one-time fallback.
+<b>Supported Media</b>
+• YouTube (watch &amp; shorts with auto-dubbing preference &amp; ad skipping)
+• Direct web video/audio files (<code>.mp4 .webm .mkv .mp3 .m4a</code>)
+• Telegram forwarded files up to <b>2000 MiB (2.0 GiB)</b>
 
-<b>Notes</b>
-• The bot joins as a guest; meetings that require a Google sign-in cannot be joined.
-• If the host requires approval, the card shows <i>admitting</i> until someone lets the bot in.
-• Multiple sessions are allowed up to <code>limits.max_sessions</code>.
+⭐ <b>Support Open Source:</b>
+If you enjoy TeleMeetBot, please give us a star on <a href="https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation">GitHub</a>!
+`)
+}
+
+// aboutText renders project information and links.
+func aboutText(botName string) string {
+	return strings.TrimSpace(`
+🤖 <b>TeleMeetBot</b>
+<i>Headless Google Meet media streaming bot powered by Go and Chromium.</i>
+
+<b>Capabilities:</b>
+• Stream YouTube, direct video/audio, and web media to Google Meet
+• Forward Telegram files up to <b>2.0 GiB (2000 MiB)</b>
+• Multi-track audio switching (Persian, Original, Dubbed)
+• Google OAuth 2.0 &amp; OpenID Connect identity verification
+• Full media playlist and queue management
+• All-in-One Docker container deployment
+
+⭐ <b>Star us on GitHub:</b>
+https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation
 `)
 }
 

@@ -208,3 +208,30 @@ func TestLocalBotAPIDefaultsAndOverrides(t *testing.T) {
 		t.Errorf("expected APIEndpoint %s, got %s", expectedEndpoint, c.Telegram.APIEndpoint)
 	}
 }
+
+func TestEnvOverridesGeneral(t *testing.T) {
+	t.Setenv("TELEGRAM_TOKEN", "123:env-token")
+	t.Setenv("TELEGRAM_ADMINS", "5094837833, 999888")
+	t.Setenv("TELEGRAM_NOTIFY_CHAT_ID", "5094837833")
+	t.Setenv("TELEMEETBOT_PROXY", "socks5://127.0.0.1:9050")
+
+	c := validConfig()
+	c.Telegram.Token = ""
+	c.Telegram.Admins = nil
+	c.Telegram.NotifyChatID = 0
+	c.Browser.Proxy = ""
+	c.normalize()
+
+	if c.Telegram.Token != "123:env-token" {
+		t.Errorf("expected token 123:env-token, got %s", c.Telegram.Token)
+	}
+	if len(c.Telegram.Admins) != 2 || c.Telegram.Admins[0] != 5094837833 || c.Telegram.Admins[1] != 999888 {
+		t.Errorf("unexpected admins: %v", c.Telegram.Admins)
+	}
+	if c.Telegram.NotifyChatID != 5094837833 {
+		t.Errorf("unexpected notify chat id: %d", c.Telegram.NotifyChatID)
+	}
+	if c.Browser.Proxy != "socks5://127.0.0.1:9050" {
+		t.Errorf("unexpected proxy: %s", c.Browser.Proxy)
+	}
+}
