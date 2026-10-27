@@ -101,6 +101,10 @@ type Bot struct {
 	// unavailable (an old data directory or a store that failed to open);
 	// the dashboard then hides the playlist entry point.
 	pl Playlists
+	// set is the persistent per-user settings store (SQLite). Nil means the
+	// preferences stay in the legacy JSON state file: the bot falls back to
+	// the old accessor methods so an upgrade never loses the feature.
+	set Settings
 	// gauth manages per-user Google Account profile cookies.
 	gauth *googleauth.Manager
 }
@@ -111,6 +115,11 @@ type Option func(*Bot)
 // WithPlaylists attaches the persistent playlist library.
 func WithPlaylists(pl Playlists) Option {
 	return func(b *Bot) { b.pl = pl }
+}
+
+// WithSettings attaches the persistent per-user settings store.
+func WithSettings(st Settings) Option {
+	return func(b *Bot) { b.set = st }
 }
 
 // WithGoogleAuth attaches the per-user Google Account profile manager.
@@ -278,9 +287,14 @@ func (b *Bot) handleEvent(ev engine.Event) {
 			b.notifySession(ev.Session, sessionCardText(acts), false)
 			b.st.Update(string(acts.ID), acts.State, acts.Error)
 			b.mu.Lock()
+			chat := b.sessionChats[string(acts.ID)]
 			delete(b.cards, string(acts.ID))
 			delete(b.sessionChats, string(acts.ID))
 			b.mu.Unlock()
+			// The session finished cleanly: its durable queue metadata is no
+			// longer needed (the history record keeps the final state), so
+			// remove it instead of leaving an "interrupted" ghost.
+			b.deletePersistedQueue(chat, string(acts.ID))
 		} else {
 			b.st.Update(string(ev.Session), "ended", "")
 		}
@@ -334,6 +348,41 @@ func (b *Bot) Snapshot() health.Snapshot {
 		DiskTotalGB: totalGB,
 	}
 	return snap
+}
+
+// queueOwnerChat returns the chat a session belongs to (private chats share
+// the user id). It prefers the live binding, then the history record.
+func (b *Bot) queueOwnerChat(id engine.SessionID) int64 {
+	b.mu.Lock()
+	chat := b.sessionChats[string(id)]
+	b.mu.Unlock()
+	if chat != 0 {
+		return chat
+	}
+	if rec := b.st.GetRecord(string(id)); rec != nil {
+		return rec.ChatID
+	}
+	return 0
+}
+
+// deletePersistedQueue removes a finished session's durable queue metadata.
+// The owner chat is resolved best-effort so cleanup still works after the
+// in-memory binding is gone.
+func (b *Bot) deletePersistedQueue(chat int64, sessionID string) {
+	if b.set == nil {
+		return
+	}
+	if chat == 0 {
+		chat = b.queueOwnerChat(engine.SessionID(sessionID))
+	}
+	if chat == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), settingsOpTimeout)
+	defer cancel()
+	if err := b.set.DeleteSessionQueue(ctx, chat, sessionID); err != nil {
+		b.log.Warnf("[PIPELINE:queue] delete persisted queue %s: %v", sessionID, err)
+	}
 }
 
 // BrowserProbe returns the visible browser name for cards (or error text).

@@ -59,7 +59,7 @@ For a **screen** (Xvfb) mode instead of headless, set `present_mode: "screen"`, 
 
 * **2-minute onboarding wizard** — `telemeetbot --wizard` (token, admins, Chromium detection, save, optional systemd/capture-test)
 * **Telegram dashboard** — home, sessions, settings, health, per-session control cards that refresh automatically
-* **Playback control** — pause/resume, mute/unmute, volume 0–100, speed 0.25–4×, seek ±10s/±30s/±60s (verified against the live player), loop, restart
+* **Playback control** — pause/resume, mute/unmute, volume 0–100, speed 0.25–4×, seek ±10s/±30s/±60s (verified against the live player), loop, restart, repeat (off / one / all) and shuffle for queued playback
 * **Any link** — YouTube (`watch`/`youtu.be`/`shorts`/`live`), direct media (`.mp4 .m4v .webm .mkv .mov .ogv .mp3 .m4a .aac .flac .wav .opus .oga`), and generic pages via a built-in player
 * **Smart source detection** — a live HTTP probe (Content-Type, redirects, HEAD→GET fallback) classifies links by what the server actually serves, not by extension: an `.mp3` URL serving HTML is a page; a bare CDN link serving `video/mp4` is direct media
 * **Telegram media** — forward an audio/video/document to the bot: it is downloaded through the Bot API, content-sniffed, and played as direct media (never routed through YouTube logic)
@@ -67,6 +67,8 @@ For a **screen** (Xvfb) mode instead of headless, set `present_mode: "screen"`, 
 * **Persistent Playlist Queue** — forward multiple audio/video files or paste batches of up to 50 URLs in one go. Control playlist playback with ⏮ Previous / ⏭ Next, jump directly to any queued track, view progress (e.g. `3/50`), and manage upcoming tracks.
 * **Resilient Google Meet Admission** — explicit, observable state machine (`QUEUED` → `STARTING` → `JOINING` → `WAITING_FOR_ADMISSION` → `ADMITTED` → `ACTIVE` → `LEAVING` → `COMPLETED` / `TIMED_OUT` / `CANCELLED`). Single-flight meeting room deduplication, debounced join clicks, native input synchronization, and jittered bounded backoff for host-restricted meetings.
 * **Session store** — `state.json` history (max 50 records), survives restarts (corrupt file → kept aside as `*.corrupt-*`, fresh store)
+* **Per-user settings (SQLite)** — audio language, media mode, start volume/speed, auto-advance and repeat are stored per Telegram user id in `users.db`; the ⚙️ Settings screen edits them live, values survive restarts, and legacy `state.json` preferences migrate automatically (backed up, idempotent)
+* **Queue screen** — per-item selection with pagination, progress (`3/20`) with position and duration, repeat/shuffle toggles, add-media and play-next flows, load-playlist in place of the upcoming items, clear with confirmation; queue metadata is durable in `users.db` and restart-interrupted sessions are reported honestly instead of pretending playback resumed
 * **Health surface** — `/healthz` (JSON with sessions/uptime/browser/disk/config) + `/livez`; **no** remote control endpoints
 * **Diagnostics** — `--check` (doctor) and `--check --capture-test` verifies real `getDisplayMedia` capture: frame changes + audio track
 * **Operations** — Dockerfile + compose (healthcheck, shm), unit file, one-command installer, cross-arch release archives (`release.sh`)
@@ -428,6 +430,10 @@ frames — i.e. the share is never restarted.
 * `meetings.db` (SQLite, WAL mode) holds saved meeting links per owner; every read and write is
   scoped by `owner_id`, so one user can never list, rename or delete another user's rows. It lives
   in the configured `data_dir` next to `state.json` and is backed up (`*.bak-<unix>`) at startup.
+* `users.db` (SQLite, WAL mode) holds per-user preferences and session-queue metadata with the
+  same owner-scoped reads and writes, schema-versioned idempotent migrations and a startup backup.
+  The one-shot `state.json` → SQLite preference migration rewrites the JSON file only after the
+  copy succeeds and never overwrites a newer value already saved in the database.
 
 ---
 

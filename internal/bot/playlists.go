@@ -950,13 +950,10 @@ func (b *Bot) launchPlaylist(chatID, userID, playlistID int64, meetURL string) {
 	if len(urls) < len(items) {
 		b.sendText(chatID, fmt.Sprintf("ℹ️ %d item(s) looked like expired local files and were skipped.", len(items)-len(urls)), nil)
 	}
-	userLang := b.st.GetUserAudioLang(userID)
-	req := engine.StartRequest{
+	req := b.startRequestFor(userID, meetURL, engine.StartRequest{
 		MeetLink:  meetURL,
 		MediaLink: urls[0],
-		AudioLang: userLang,
-		PlayMode:  b.st.GetUserMediaMode(userID),
-	}
+	})
 	if len(urls) > 1 {
 		req.Queue = urls[1:]
 	}
@@ -995,6 +992,7 @@ func (b *Bot) launchPlaylist(chatID, userID, playlistID int64, meetURL string) {
 	b.mu.Lock()
 	b.sessionChats[string(sess.ID)] = chatID
 	b.mu.Unlock()
+	b.persistQueue(sess)
 	b.saveCurrentMeet(userID, sess.MeetURL)
 	b.sendText(chatID, fmt.Sprintf("▶️ Launching <b>%s</b> with <b>%d</b> item(s).", esc(p.Name), len(urls)), nil)
 	b.sendSessionCard(chatID, sess)
@@ -1081,8 +1079,9 @@ func (b *Bot) enqueuePlaylistToSession(chatID, userID int64, msgID int, q *tgbot
 }
 
 // queueCommand implements /queue [session-id]. With no argument it opens the
-// queue of the first active session.
-func (b *Bot) queueCommand(chatID int64, arg string) {
+// queue of the first active session; without any live session it shows the
+// user's most recent interrupted queue, when one was persisted.
+func (b *Bot) queueCommand(chatID, userID int64, arg string) {
 	var s *engine.Session
 	arg = strings.TrimSpace(arg)
 	if arg != "" {
@@ -1090,13 +1089,51 @@ func (b *Bot) queueCommand(chatID int64, arg string) {
 	} else if list := b.eng.Active(); len(list) > 0 {
 		s = list[0]
 	}
-	if s == nil {
-		b.sendText(chatID, "No active session to show a queue for. Use /sessions.", mainMenuKB())
+	if s != nil {
+		st := s.Snapshot()
+		items, curIdx := s.QueueSnapshot()
+		page := 0
+		if curIdx > 0 {
+			page = curIdx / queuePageSize
+		}
+		b.sendText(chatID, queueViewText(st, items, curIdx, page), queueViewKB(st, items, curIdx, page))
 		return
 	}
-	st := s.Snapshot()
-	items, curIdx := s.QueueSnapshot()
-	b.sendText(chatID, queueViewText(st, items, curIdx), queueViewKB(st, items, curIdx))
+	// No live session: surface the interrupted queue metadata, if any.
+	if b.set != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), settingsOpTimeout)
+		snap, found, err := b.set.LatestInterruptedQueue(ctx, userID)
+		cancel()
+		if err == nil && found && len(snap.Items) > 0 {
+			var sb strings.Builder
+			sb.WriteString(fmt.Sprintf("⚠️ <b>Interrupted queue</b> (session <code>%s</code>)\n\n", esc(snap.SessionID)))
+			sb.WriteString("The bot restarted while this session was live; playback cannot be recovered, but this was the queue:\n\n")
+			pos := snap.Cursor + 1
+			if pos < 1 {
+				pos = 1
+			}
+			sb.WriteString(fmt.Sprintf("▶️ Was at position <b>%d/%d</b>\n\n", pos, len(snap.Items)))
+			start := snap.Cursor
+			if start < 0 {
+				start = 0
+			}
+			end := start + 10
+			if end > len(snap.Items) {
+				end = len(snap.Items)
+			}
+			for i := start; i < end; i++ {
+				it := snap.Items[i]
+				title := it.Title
+				if title == "" {
+					title = it.URL
+				}
+				sb.WriteString(fmt.Sprintf("%d. <code>%s</code>\n", i+1, esc(truncate(title, 50))))
+			}
+			b.sendText(chatID, sb.String(), mainMenuKB())
+			return
+		}
+	}
+	b.sendText(chatID, "No active session to show a queue for. Use /sessions.", mainMenuKB())
 }
 
 // saveQueueStart starts the "save queue as playlist" wizard for a session.
@@ -1129,9 +1166,9 @@ func playlistQueueToolsText(st engine.Status, items []engine.QueueItem, curIdx i
 		sb.WriteString("The queue is empty. Send a link to add media.")
 		return sb.String()
 	}
-	sb.WriteString("• <b>Shuffle</b> randomises only the upcoming tail.\n")
-	sb.WriteString("• <b>Sort</b> orders upcoming items by title.\n")
+	sb.WriteString("• <b>Repeat / Shuffle</b> change how playback continues.\n")
 	sb.WriteString("• <b>Reorder</b> moves one item up or down.\n")
+	sb.WriteString("• <b>Load playlist</b> replaces the upcoming items.\n")
 	sb.WriteString("• <b>Save</b> copies the whole queue into a persistent playlist.\n\n")
 	sb.WriteString("<i>Playback is not interrupted by reordering.</i>")
 	return sb.String()
@@ -1140,17 +1177,31 @@ func playlistQueueToolsText(st engine.Status, items []engine.QueueItem, curIdx i
 // playlistQueueToolsKB renders the tools keyboard.
 func playlistQueueToolsKB(st engine.Status) *tgbotapi.InlineKeyboardMarkup {
 	id := string(st.ID)
+	repeatLabel := "🔁 Repeat: off"
+	switch st.RepeatMode {
+	case engine.RepeatOne:
+		repeatLabel = "🔁 Repeat: one 🔂"
+	case engine.RepeatAll:
+		repeatLabel = "🔁 Repeat: all 🔁"
+	}
+	shuffleLabel := "🔀 Shuffle: off"
+	if st.Shuffle {
+		shuffleLabel = "🔀 Shuffle: on ✅"
+	}
 	rows := [][]tgbotapi.InlineKeyboardButton{
 		{
-			tgbotapi.NewInlineKeyboardButtonData("🔀 Shuffle upcoming", "q:shuffle:"+id),
-			tgbotapi.NewInlineKeyboardButtonData("🔤 Sort upcoming", "q:sort:"+id),
+			tgbotapi.NewInlineKeyboardButtonData(repeatLabel, "q:repeat:"+id),
+			tgbotapi.NewInlineKeyboardButtonData(shuffleLabel, "q:shuftoggle:"+id),
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData("↕️ Reorder items", "q:move_menu:"+id),
 			tgbotapi.NewInlineKeyboardButtonData("💾 Save as playlist", "q:save:"+id),
 		},
 		{
+			tgbotapi.NewInlineKeyboardButtonData("📚 Load playlist", "q:load:"+id),
 			tgbotapi.NewInlineKeyboardButtonData("🗑 Clear options", "q:clear_confirm:"+id),
+		},
+		{
 			tgbotapi.NewInlineKeyboardButtonData("📋 View queue", "act:"+id+":queue"),
 		},
 		{

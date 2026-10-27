@@ -400,6 +400,10 @@ func manageStorageKB() *tgbotapi.InlineKeyboardMarkup {
 			tgbotapi.NewInlineKeyboardButtonData("🧰 Maintenance", cbManage+":maint"),
 		},
 		{
+			tgbotapi.NewInlineKeyboardButtonData("⚙️ Server config", cbManage+":config"),
+			tgbotapi.NewInlineKeyboardButtonData("🩺 Diagnostics", cbManage+":diag"),
+		},
+		{
 			tgbotapi.NewInlineKeyboardButtonData("⬅️ Management", mgHome()),
 			tgbotapi.NewInlineKeyboardButtonData("🏠 Dashboard", cbHome),
 		},

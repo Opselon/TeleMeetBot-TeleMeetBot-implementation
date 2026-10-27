@@ -393,7 +393,7 @@ func TestMenuCallbacksRenderViews(t *testing.T) {
 	for data, want := range map[string]string{
 		cbHome:     "Active sessions",
 		cbHealth:   "Health",
-		cbSettings: "Settings",
+		cbSettings: "Your settings",
 		cbHelp:     "How TeleMeetBot works",
 		cbSessions: "Sessions",
 	} {

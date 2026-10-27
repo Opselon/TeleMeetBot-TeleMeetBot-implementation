@@ -705,6 +705,14 @@ func (c *Config) PlaylistsFile() string {
 	return filepath.Join(c.Paths.DataDir, "playlists.db")
 }
 
+// UsersFile returns the SQLite database path for per-user preferences and
+// session-queue metadata. It is separate from meetings.db and playlists.db
+// for the same reason: resetting user settings must never touch saved
+// meetings or playlist libraries.
+func (c *Config) UsersFile() string {
+	return filepath.Join(c.Paths.DataDir, "users.db")
+}
+
 // AddAdmin appends a Telegram user id to the admin allow-list. It returns
 // false when the id is invalid or already present.
 func (c *Config) AddAdmin(userID int64) bool {

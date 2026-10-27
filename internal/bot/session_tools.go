@@ -1,8 +1,10 @@
 package bot
 
 // Advanced session/queue tools. These are the buttons that make a running
-// playlist manageable without retyping links: reorder, shuffle, sort, save
-// the queue as a reusable playlist, and inspect the queue from /queue.
+// playlist manageable without retyping links: reorder, shuffle once, sort,
+// save the queue as a reusable playlist, and inspect the queue from /queue.
+// The transport controls (prev/next/pause), the repeat and shuffle toggles
+// and the per-item picker live in flows.go with the rest of the callbacks.
 
 import (
 	"fmt"
@@ -14,26 +16,12 @@ import (
 	"github.com/Opselon/TeleMeetBot/internal/store"
 )
 
-// persistQueue mirrors a session queue into the JSON history so a restart or
-// the management console can show what was playing.
-func (b *Bot) persistQueue(s *engine.Session) {
-	if s == nil {
-		return
-	}
-	items, curIdx := s.QueueSnapshot()
-	recs := make([]store.QueueItemRecord, 0, len(items))
-	for _, it := range items {
-		recs = append(recs, store.QueueItemRecord{ID: it.ID, URL: it.URL, Title: it.Title})
-	}
-	b.st.UpdateQueue(string(s.ID), recs, curIdx)
-}
-
 // handleQueueToolsCallback handles the q: verbs that are not part of the basic
 // queue view. It returns true when the callback was consumed.
 func (b *Bot) handleQueueToolsCallback(chatID, userID int64, msgID int, q *tgbotapi.CallbackQuery, sub, sid string, parts []string) bool {
 	s := b.eng.Get(engine.SessionID(sid))
 	if s == nil {
-		if sub == "shuffle" || sub == "sort" || sub == "move_menu" || sub == "save" || sub == "mvup" || sub == "mvdn" || sub == "noop" {
+		if sub == "move_menu" || sub == "save" || sub == "mvup" || sub == "mvdn" || sub == "noop" {
 			_ = b.api.AnswerCallback(q.ID, "session not found")
 			_ = b.api.Edit(chatID, msgID, "This session has ended.", mainMenuKB())
 			return true
@@ -43,30 +31,6 @@ func (b *Bot) handleQueueToolsCallback(chatID, userID int64, msgID int, q *tgbot
 	switch sub {
 	case "noop":
 		_ = b.api.AnswerCallback(q.ID, "")
-		return true
-	case "shuffle":
-		n := s.ShuffleUpcoming()
-		b.persistQueue(s)
-		if n == 0 {
-			_ = b.api.AnswerCallback(q.ID, "nothing upcoming to shuffle")
-		} else {
-			_ = b.api.AnswerCallback(q.ID, fmt.Sprintf("shuffled %d items", n))
-		}
-		st := s.Snapshot()
-		items, curIdx := s.QueueSnapshot()
-		_ = b.api.Edit(chatID, msgID, queueViewText(st, items, curIdx), queueViewKB(st, items, curIdx))
-		return true
-	case "sort":
-		n := s.SortUpcoming()
-		b.persistQueue(s)
-		if n == 0 {
-			_ = b.api.AnswerCallback(q.ID, "nothing upcoming to sort")
-		} else {
-			_ = b.api.AnswerCallback(q.ID, fmt.Sprintf("sorted %d items", n))
-		}
-		st := s.Snapshot()
-		items, curIdx := s.QueueSnapshot()
-		_ = b.api.Edit(chatID, msgID, queueViewText(st, items, curIdx), queueViewKB(st, items, curIdx))
 		return true
 	case "move_menu":
 		_ = b.api.AnswerCallback(q.ID, "")
@@ -84,9 +48,9 @@ func (b *Bot) handleQueueToolsCallback(chatID, userID int64, msgID int, q *tgbot
 		err := s.MoveQueueItem(parts[3], delta)
 		if err != nil {
 			_ = b.api.AnswerCallback(q.ID, truncate(err.Error(), 60))
-		} else {
-			_ = b.api.AnswerCallback(q.ID, "moved")
+			return true
 		}
+		_ = b.api.AnswerCallback(q.ID, "moved")
 		b.persistQueue(s)
 		b.renderQueueMoveMenu(chatID, msgID, s)
 		return true
