@@ -263,6 +263,17 @@ func run(cfg *config.Config, cfgPath string, log *slogLogger) error {
 	}
 
 	eng := engine.NewManager(bCfg, mCfg, meetCfg, log)
+	defer eng.ShutdownWarm()
+	// Optional warm-up: pre-launch one idle Chromium so the first session
+	// skips the cold start. Failures are non-fatal (sessions just launch
+	// cold). It respects limits.max_sessions: the warm slot is one process.
+	if bCfg.WarmUp && browserErr == nil {
+		go func() {
+			if err := eng.WarmUp(); err != nil {
+				log.Warnf("browser warm-up failed (sessions will start cold): %v", err)
+			}
+		}()
+	}
 	// Hard fence at the engine level: the dashboard also checks, but a session
 	// must never be able to start past limits.max_sessions.
 	eng.SetMaxSessions(cfg.Limits.MaxSessions)

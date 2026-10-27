@@ -28,6 +28,11 @@ type launchOptions struct {
 	// a GL context (see gpuMode): Meet needs WebGL to publish presentation
 	// video, and gpu:off otherwise shares a blank surface.
 	forMeet bool
+	// cacheDir points at a persistent HTTP cache directory reused across
+	// launches. Empty disables the persistent cache. Chromium serializes
+	// access to a cache directory with a lock file, and per-session profiles
+	// keep cookies/storage isolated, so the cache never carries meeting state.
+	cacheDir string
 }
 
 // detectProxy finds an explicit or ambient SOCKS5 proxy (e.g. Tor on 127.0.0.1:9050 or
@@ -206,6 +211,21 @@ func launchBrowser(opts launchOptions, log Logger) (*rod.Browser, func(), error)
 		}
 		l.UserDataDir(dir)
 	}
+
+	// Persistent HTTP cache: a dedicated directory inside the app data dir,
+	// separate from the throwaway per-session profile, so reusable static
+	// resources (fonts, JS bundles) survive profile teardown. Chromium takes
+	// an exclusive lock per cache dir, so concurrent processes never share
+	// one; each launch points at its own namespaced subdir.
+	if opts.cacheDir != "" {
+		if err := os.MkdirAll(opts.cacheDir, 0o700); err != nil {
+			return nil, nil, fmt.Errorf("create browser cache dir: %w", err)
+		}
+		l.Set("disk-cache-dir", opts.cacheDir)
+	}
+	// Bound the on-disk cache so a long-lived volume cannot fill up. 256 MiB
+	// is generous for Meet's static assets and well under typical VPS disk.
+	l.Set("disk-cache-size", "268435456")
 
 	url, err := l.Launch()
 	if err != nil {

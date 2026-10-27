@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"path/filepath"
 	"strings"
 
 	"github.com/Opselon/TeleMeetBot/internal/config"
@@ -30,6 +31,12 @@ func FromConfig(c *config.Config) (BrowserConfig, MediaOptions, MeetOptions) {
 		UserAgent:    c.Browser.UserAgent,
 		Proxy:        c.Browser.Proxy,
 		GPU:          c.Browser.GPU,
+		WarmUp:       c.Browser.WarmUp,
+	}
+	// Persistent cache root: <data_dir>/browser-cache. Explicit
+	// disk_cache:false disables it entirely.
+	if c.Browser.DiskCache == nil || *c.Browser.DiskCache {
+		b.CacheDir = filepath.Join(c.Paths.DataDir, "browser-cache")
 	}
 	m := MediaOptions{
 		DefaultVolume:      c.Media.DefaultVolume,

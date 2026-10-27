@@ -130,6 +130,14 @@ type BrowserConfig struct {
 	// software GL, the pre-1.2 default) or "auto" (let Chromium decide; use on
 	// hosts with a real GPU). Empty keeps the default.
 	GPU string `yaml:"gpu"`
+	// DiskCache enables a persistent Chromium HTTP cache under
+	// <data_dir>/browser-cache, so repeated sessions reuse static Meet/YouTube
+	// resources across restarts. Only HTTP cache data is stored — never
+	// cookies, sessions or meeting state. Default true.
+	DiskCache *bool `yaml:"disk_cache"`
+	// WarmUp pre-launches one idle Chromium at startup so the first session
+	// skips the cold browser start (saves ~1-3s). Default false.
+	WarmUp bool `yaml:"warm_up"`
 }
 
 // MediaConfig controls playback inside the shared tab.

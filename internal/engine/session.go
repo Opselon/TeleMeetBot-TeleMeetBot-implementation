@@ -290,15 +290,26 @@ func (s *Session) run() {
 	s.setState(StateStarting, "[1/6] Launching Chromium")
 	s.log.Infof("[PIPELINE:session] [STEP 1/6] session %s: starting Chromium browser...", s.ID)
 
-	b, release, err := s.mgr.acquireBrowser()
-	if err != nil {
-		s.setError(fmt.Errorf("start chromium: %w", err))
-		return
+	// Prefer a pre-warmed browser (WarmUp enabled): same isolation guarantees
+	// (fresh profile dir), skips the cold process start. On any warm-path
+	// failure fall back to a cold launch.
+	if b, release, ok := s.mgr.acquireWarmBrowser(); ok {
+		s.log.Infof("[PIPELINE:session] [STEP 1/6] session %s: using warm Chromium (cache warm)", s.ID)
+		defer release()
+		s.mu.Lock()
+		s.browser = b
+		s.mu.Unlock()
+	} else {
+		b, release, err := s.mgr.acquireBrowser()
+		if err != nil {
+			s.setError(fmt.Errorf("start chromium: %w", err))
+			return
+		}
+		defer release()
+		s.mu.Lock()
+		s.browser = b
+		s.mu.Unlock()
 	}
-	defer release()
-	s.mu.Lock()
-	s.browser = b
-	s.mu.Unlock()
 
 	s.log.Infof("[PIPELINE:session] [STEP 1/6] session %s: Chromium ready", s.ID)
 
