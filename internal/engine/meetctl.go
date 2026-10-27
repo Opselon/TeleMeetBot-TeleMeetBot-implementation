@@ -262,7 +262,7 @@ func (s *Session) clickPresentButton() (bool, string) {
 	if meet == nil {
 		return false, ""
 	}
-	res, err := meet.Timeout(4 * time.Second).Eval(`() => {
+	res, err := meet.Timeout(8 * time.Second).Eval(`() => {
   const norm = x => (x || "").replace(/\s+/g, " ").trim().toLowerCase();
 
   // Dismiss any modal dialog or popup that may be blocking the toolbar
@@ -284,7 +284,7 @@ func (s *Session) clickPresentButton() (bool, string) {
   } catch (e) {}
 
   // 1. Check if a popup menu is already open and contains a visible present/share menu item:
-  const menuItems = Array.from(document.querySelectorAll('[role="menuitem"], [role="menu"] [role="button"], [role="menu"] li, [role="listbox"] [role="option"]'));
+  const menuItems = Array.from(document.querySelectorAll('[role="menuitem"], [role="menu"] [role="button"], [role="menu"] li, [role="listbox"] [role="option"], [role="menu"] li > div, [role="menu"] span'));
   for (const item of menuItems) {
     const r = item.getBoundingClientRect();
     if (r.width < 1 || r.height < 1) continue;
@@ -300,6 +300,29 @@ func (s *Session) clickPresentButton() (bool, string) {
       try { item.scrollIntoView({block: 'center'}); } catch (e) {}
       item.click();
       return (itemAria || itemText || "present menuitem").slice(0, 40);
+    }
+  }
+
+  // 1b. Material-Web popup surfaces: Google Meet builds its menus in a
+  // [md-menu] / [popover=auto] overlay whose items may not carry role=menuitem.
+  const popItems = Array.from(document.querySelectorAll('[popover][open], md-menu[surface-open], [data-open="true"], [class*="popup"], [class*="popupBackground"], [class*="menuSurface"], [class*="overlay-menu"]'));
+  for (const pop of popItems) {
+    const pr = pop.getBoundingClientRect();
+    if (pr.width < 10 || pr.height < 10) continue;
+    const cand = pop.matches('button, [role=button], li, div[tabindex], span[role]') ? [pop] : Array.from(pop.querySelectorAll('button, [role=button], li, div[tabindex], span[role]'));
+    for (const item of cand) {
+      const ir = item.getBoundingClientRect();
+      if (ir.width < 1 || ir.height < 1) continue;
+      const itemAria = norm(item.getAttribute('aria-label') || "");
+      const itemTooltip = norm(item.getAttribute('data-tooltip') || "");
+      const itemText = norm(item.innerText || item.textContent || "");
+      if (itemAria.includes("stop") || itemTooltip.includes("stop") || itemText.includes("stop")) continue;
+      if (itemText.includes("present") || itemText.includes("share screen") ||
+          itemAria.includes("present") || itemAria.includes("share screen")) {
+        try { item.scrollIntoView({block: 'center'}); } catch (e) {}
+        item.click();
+        return (itemAria || itemText || "present popup item").slice(0, 40);
+      }
     }
   }
 
@@ -359,27 +382,55 @@ func (s *Session) clickPresentButton() (bool, string) {
     return (label || "present").slice(0, 40);
   }
 
-  // 3. Fallback: If no direct present button is visible on toolbar, find and click "More options"
-  // so the menu opens and reveals "Share screen" / "Present now".
+  // 3. Fallback: no present button on the toolbar — it is nested inside the
+  // "More options" popup. Click the toggle only; the caller then uses
+  // clickMoreOptionsShareItem to pick the share item. Repeated calls to this
+  // function must not re-click the toggle (it would close the menu).
   const moreBtn = els.find(el => {
     if (el.querySelector('button, [role=button]')) return false;
     const aria = norm(el.getAttribute('aria-label') || "");
     const tooltip = norm(el.getAttribute('data-tooltip') || "");
-    const txt = norm(el.innerText || el.textContent || "");
     const r = el.getBoundingClientRect();
     if (r.width < 1 || r.height < 1) return false;
-    // Don't match participant menu (e.g. "More options for Mehrad InanLu")
-    if (aria.includes("for") || tooltip.includes("for")) return false;
-    return aria === "more options" || tooltip === "more options" || txt === "more_vert" ||
-           aria.includes("more options") || tooltip.includes("more options");
+    // Don't match participant menus ("More options for <name>")
+    if (aria.includes("for ") || tooltip.includes("for ")) return false;
+    return aria === "more options" || tooltip === "more options" ||
+           (aria.includes("more options") && !aria.includes("for")) ||
+           (tooltip.includes("more options") && !tooltip.includes("for"));
   });
+  if (!moreBtn) return "";
+  try { moreBtn.scrollIntoView({block: 'center'}); } catch (e) {}
+  moreBtn.click();
+  return "opened more options";
+}`)
+	if err != nil {
+		return false, ""
+	}
+	label := strings.TrimSpace(res.Value.Str())
+	return label != "", label
+}
 
-  if (moreBtn) {
-    try { moreBtn.scrollIntoView({block: 'center'}); } catch (e) {}
-    moreBtn.click();
-    return "opened more options";
+// clickMoreOptionsShareItem picks "Share screen" / "Present now" from the
+// open "More options" popup (including Material Web md-menu surfaces whose
+// items render in light DOM without role=menuitem).
+func (s *Session) clickMoreOptionsShareItem() (bool, string) {
+	meet := s.meetTab()
+	if meet == nil {
+		return false, ""
+	}
+	res, err := meet.Timeout(4 * time.Second).Eval(`() => {
+  const norm = x => (x || "").replace(/\s+/g, " ").trim().toLowerCase();
+  const vis = el => { const r = el.getBoundingClientRect(); return r.width >= 1 && r.height >= 1; };
+  const els = document.querySelectorAll('[role="menuitem"], [role="menu"] li, [role="menu"] [role="button"], md-menu [role="menuitem"], md-list-item, [popover][open] li, [popover][open] [role="menuitem"], [class*="popupBackground"] li, [class*="popupBackground"] [role="menuitem"], [class*="popupBackground"] button, [class*="popupBackground"] div[tabindex]');
+  for (const item of els) {
+    if (!vis(item)) continue;
+    const t = norm((item.getAttribute('aria-label') || "") + " " + (item.innerText || item.textContent || ""));
+    if (t.includes("stop") || t.includes("starting")) continue;
+    if (t.includes("present") || t.includes("share screen") || t.includes("share your screen")) {
+      item.click();
+      return (t || "present menu item").slice(0, 40);
+    }
   }
-
   return "";
 }`)
 	if err != nil {
@@ -571,16 +622,26 @@ func (s *Session) dumpPresentMenu() {
 	res, err := meet.Timeout(4 * time.Second).Eval(`() => {
   const norm = x => (x || "").replace(/\s+/g, " ").trim();
   const out = [];
-  const sel = '[role=menuitem], [role=menuitemradio], [role=button], button, li, [aria-label]';
+  const seen = new Set();
+  const sel = '[role=menuitem], [role=menuitemradio], [role=button], button, li, [aria-label], md-list-item, [popover] *, [class*="popupBackground"] *';
   for (const el of document.querySelectorAll(sel)) {
     const r = el.getBoundingClientRect();
     if (r.width < 2 || r.height < 2) continue;
     const aria = norm(el.getAttribute('aria-label') || "");
-    if (!aria && !el.innerText) continue;
     const t = norm(el.innerText || el.textContent || "");
+    if (!aria && !t) continue;
     if (t.length > 80) continue;
+    const key = el.tagName + "[" + (el.getAttribute('role') || "") + "] " + aria + " " + t;
+    if (seen.has(key)) continue;
+    seen.add(key);
     out.push((el.tagName + "[" + (el.getAttribute('role') || "") + "]") +
       " aria=" + JSON.stringify(aria) + " text=" + JSON.stringify(t));
+  }
+  // Also dump light-DOM children of custom elements (md-menu, md-list-item)
+  // whose items live in shadow roots and are invisible to text queries.
+  for (const host of document.querySelectorAll('md-menu, md-list-item, [class*="popupBackground"]')) {
+    const kids = host.textContent || "";
+    if (kids.trim()) out.push("LIGHTDOM " + host.tagName + " text=" + JSON.stringify(norm(kids).slice(0, 200)));
   }
   return out.slice(0, 60).join("\n");
 }`)

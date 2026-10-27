@@ -1044,8 +1044,14 @@ func (s *Session) startPresenting() error {
 					if ok, _ := s.presenting(); ok {
 						return nil
 					}
-					if nextOpened, nextLabel := s.clickPresentButton(); nextOpened && nextLabel != "opened more options" {
-						label = nextLabel
+					// Pick the share item from the now-open More options menu.
+					if itemPicked, itemLabel := s.clickMoreOptionsShareItem(); itemPicked {
+						label = itemLabel
+						s.log.Infof("[PIPELINE:present] session %s: picked share item from more-options menu (%s)", s.ID, itemLabel)
+					} else {
+						s.log.Warnf("[PIPELINE:present] session %s: more-options menu did not reveal a share item; dumping menu DOM", s.ID)
+						s.dumpPresentMenu()
+						continue
 					}
 				}
 				lastState = label
