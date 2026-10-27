@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,5 +181,69 @@ func TestHumanBytesLocal(t *testing.T) {
 		if got := humanBytesLocal(n); !strings.HasPrefix(got, strings.Split(want, " ")[0]) {
 			t.Logf("humanBytesLocal(%d) = %s (want ~%s)", n, got, want)
 		}
+	}
+}
+
+type mockLocalAPI struct {
+	file *tgbotapi.File
+}
+
+func (m *mockLocalAPI) File(fileID string) (*tgbotapi.File, error) {
+	return m.file, nil
+}
+
+func (m *mockLocalAPI) FileDirectURL(filePath string) string {
+	return "http://127.0.0.1:8081/file/botTEST/" + filePath
+}
+
+func (m *mockLocalAPI) Send(chatID int64, text string, kb *tgbotapi.InlineKeyboardMarkup) (int, error) {
+	return 1, nil
+}
+
+func (m *mockLocalAPI) Edit(chatID int64, msgID int, text string, kb *tgbotapi.InlineKeyboardMarkup) error {
+	return nil
+}
+
+func (m *mockLocalAPI) AnswerCallback(id, text string) error {
+	return nil
+}
+
+func (m *mockLocalAPI) BotUsername() string {
+	return "mockbot"
+}
+
+func (m *mockLocalAPI) Updates(timeoutSeconds int) tgbotapi.UpdatesChannel {
+	return nil
+}
+
+func TestCopyTgFileLocalFastPath(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcPath := filepath.Join(tmpDir, "local_video.mp4")
+	destPath := filepath.Join(tmpDir, "copied_video.mp4")
+
+	content := []byte("dummy video content for local bot api test")
+	if err := os.WriteFile(srcPath, content, 0o644); err != nil {
+		t.Fatalf("write src file: %v", err)
+	}
+
+	api := &mockLocalAPI{
+		file: &tgbotapi.File{
+			FileID:   "local_file_123",
+			FilePath: srcPath,
+			FileSize: len(content),
+		},
+	}
+
+	ctx := context.Background()
+	if err := copyTgFile(ctx, api, "local_file_123", destPath, int64(len(content)), 2000*1024*1024); err != nil {
+		t.Fatalf("copyTgFile failed: %v", err)
+	}
+
+	copied, err := os.ReadFile(destPath)
+	if err != nil {
+		t.Fatalf("read dest file: %v", err)
+	}
+	if string(copied) != string(content) {
+		t.Errorf("expected content %q, got %q", content, copied)
 	}
 }

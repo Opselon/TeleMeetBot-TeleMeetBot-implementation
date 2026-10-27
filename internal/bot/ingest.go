@@ -107,7 +107,7 @@ func (b *Bot) ingestTelegramFile(ctx context.Context, userID int64, m *tgbotapi.
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return "", "", fmt.Errorf("create download dir: %w", err)
 	}
-	if err := copyTgFile(ctx, b.api, fileID, dest, size); err != nil {
+	if err := copyTgFile(ctx, b.api, fileID, dest, size, limit); err != nil {
 		_ = os.Remove(dest)
 		return "", "", err
 	}
@@ -215,28 +215,55 @@ func isSafeExt(ext string) bool {
 	return false
 }
 
-// tgFileURL resolves a file_id to its download URL through getFile. The
-// returned link is signed and short-lived: it is used immediately and never
-// written to the log.
-func tgFileURL(ctx context.Context, api API, fileID string) (string, error) {
-	file, err := api.File(fileID)
-	if err != nil {
-		return "", err
-	}
-	if file == nil || file.FilePath == "" {
-		return "", fmt.Errorf("telegram getFile returned no file path: the file may be larger than the 20 MB Bot API ceiling")
-	}
-	return api.FileDirectURL(file.FilePath), nil
-}
-
 // copyTgFile streams the Telegram file to dest, enforcing the announced size
-// and refusing to write past it. The body is never buffered in full: a 20 MB
-// video streams straight to disk.
-func copyTgFile(ctx context.Context, api API, fileID, dest string, size int64) error {
-	url, err := tgFileURL(ctx, api, fileID)
+// and refusing to write past it. It supports both local filesystem fast-copy
+// (when running against a local Bot API server in --local mode) and HTTP streaming.
+func copyTgFile(ctx context.Context, api API, fileID, dest string, size, maxBytes int64) error {
+	file, err := api.File(fileID)
 	if err != nil {
 		return err
 	}
+	if file == nil || file.FilePath == "" {
+		return fmt.Errorf("telegram getFile returned no file path: the file may exceed the Bot API size limit")
+	}
+
+	limit := size
+	if limit <= 0 {
+		limit = maxBytes
+	}
+	if limit <= 0 {
+		limit = tgDefaultCloudMaxBytes
+	}
+
+	// 1. If running against a local Bot API server (--local), the file may already exist
+	// directly on the local filesystem. Check if file.FilePath is an accessible local file.
+	if filepath.IsAbs(file.FilePath) {
+		if st, err := os.Stat(file.FilePath); err == nil && !st.IsDir() {
+			src, err := os.Open(file.FilePath)
+			if err != nil {
+				return fmt.Errorf("open local telegram file: %w", err)
+			}
+			defer src.Close()
+
+			f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+			if err != nil {
+				return fmt.Errorf("create %s: %w", dest, err)
+			}
+			defer f.Close()
+
+			n, err := io.Copy(f, io.LimitReader(src, limit))
+			if err != nil {
+				return fmt.Errorf("copy local telegram file: %w", err)
+			}
+			if n == 0 {
+				return fmt.Errorf("local telegram file is empty")
+			}
+			return nil
+		}
+	}
+
+	// 2. HTTP download fallback (standard cloud API or remote/container HTTP server)
+	url := api.FileDirectURL(file.FilePath)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return fmt.Errorf("build download request: %w", err)
@@ -255,20 +282,11 @@ func copyTgFile(ctx context.Context, api API, fileID, dest string, size int64) e
 	if err != nil {
 		return fmt.Errorf("create %s: %w", dest, err)
 	}
-	// Cap the copy at the larger of the announced size and the Bot API
-	// ceiling, so a server that lies about Content-Length cannot fill the
-	// disk: the limit is enforced byte-by-byte, not trusted.
-	limit := size
-	if limit <= 0 {
-		limit = tgDefaultCloudMaxBytes
-	}
+	defer f.Close()
+
 	n, err := io.Copy(f, io.LimitReader(resp.Body, limit))
 	if err != nil {
-		_ = f.Close()
 		return fmt.Errorf("copy body: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close %s: %w", dest, err)
 	}
 	if n == 0 {
 		return fmt.Errorf("downloaded file is empty")

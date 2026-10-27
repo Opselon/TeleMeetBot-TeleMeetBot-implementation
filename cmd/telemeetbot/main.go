@@ -19,6 +19,7 @@ import (
 	"github.com/Opselon/TeleMeetBot/internal/engine"
 	"github.com/Opselon/TeleMeetBot/internal/googleauth"
 	"github.com/Opselon/TeleMeetBot/internal/health"
+	"github.com/Opselon/TeleMeetBot/internal/localbotapi"
 	"github.com/Opselon/TeleMeetBot/internal/setup"
 	"github.com/Opselon/TeleMeetBot/internal/store"
 	"github.com/Opselon/TeleMeetBot/internal/web"
@@ -310,6 +311,18 @@ func run(cfg *config.Config, cfgPath string, log *slogLogger) error {
 	// An explicit operator setting always wins.
 	if os.Getenv("GOMEMLIMIT") == "" {
 		debug.SetMemoryLimit(256 << 20)
+	}
+
+	var tbapiMgr *localbotapi.Manager
+	if cfg.Telegram.LocalBotAPI.Enabled {
+		tbapiMgr = localbotapi.New(cfg.Telegram.LocalBotAPI, log)
+		if err := tbapiMgr.Start(ctx); err != nil {
+			return fmt.Errorf("start local telegram-bot-api server: %w", err)
+		}
+		defer tbapiMgr.Stop()
+		if cfg.Telegram.APIEndpoint == "" {
+			cfg.Telegram.APIEndpoint = tbapiMgr.Endpoint()
+		}
 	}
 
 	api, err := bot.NewTelegramAPIWithEndpoint(cfg.Telegram.Token, cfg.Telegram.APIEndpoint)

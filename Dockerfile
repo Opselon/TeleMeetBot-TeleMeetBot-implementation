@@ -50,6 +50,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && fc-cache -f >/dev/null 2>&1 || true
 
+# Embedded local Telegram Bot API server for handling media up to 2000 MiB (2.0 GiB)
+COPY --from=aiogram/telegram-bot-api:latest /usr/local/bin/telegram-bot-api /usr/local/bin/telegram-bot-api
+COPY --from=aiogram/telegram-bot-api:latest /lib/ld-musl-* /lib/libc.musl-* /usr/lib/
+COPY --from=aiogram/telegram-bot-api:latest /usr/lib/libssl.so.3 /usr/lib/
+COPY --from=aiogram/telegram-bot-api:latest /usr/lib/libcrypto.so.3 /usr/lib/
+COPY --from=aiogram/telegram-bot-api:latest /usr/lib/libz.so.1 /usr/lib/
+COPY --from=aiogram/telegram-bot-api:latest /usr/lib/libstdc++.so.6 /usr/lib/
+COPY --from=aiogram/telegram-bot-api:latest /usr/lib/libgcc_s.so.1 /usr/lib/
+
 COPY --from=build /out/telemeetbot /usr/local/bin/telemeetbot
 
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin telemeet \
