@@ -17,6 +17,9 @@ type ytdlpResult struct {
 	Bytes       int64
 	Transcoded  bool
 	Note        string
+	// Selected is the format yt-dlp reports it chose, parsed from the run's
+	// own --print output. Zero value = not reported.
+	Selected SelectedFormat
 }
 
 // maxExecRetries bounds retries on a transient yt-dlp failure.
@@ -27,7 +30,7 @@ const maxExecRetries = 2
 // Security: yt-dlp receives exactly two vetted arguments — the output template
 // (built from a server-generated id, never user text) and the validated URL.
 // There is no shell anywhere in the chain, so no command injection surface.
-func (m *Manager) fetchYTDLP(ctx context.Context, u, id string) (*ytdlpResult, error) {
+func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality string) (*ytdlpResult, error) {
 	bin, ok := m.YTDLP()
 	if !ok {
 		return nil, &ErrMissingTool{
@@ -71,8 +74,11 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id string) (*ytdlpResult, e
 	if p := strings.TrimSpace(m.opts.Proxy); p != "" {
 		args = append(args, "--proxy", p)
 	}
+	// ffmpeg decides whether the merge ladder is usable at all: asking
+	// yt-dlp for bv*+ba without it just fails the download.
+	selector := FormatSelectorFor(quality, m.FFmpegOK())
 	args = append(args,
-		"-f", m.formatSelector(), // merged mp4, else any video+audio
+		"-f", selector, // policy ladder: best format at or below the cap
 		"--merge-output-format", "mp4", // pin the container ffmpeg produces
 		"-o", m.opts.Dir+string(os.PathSeparator)+id+".%(ext)s",
 		// NEVER add --print-json: it implies --simulate, so yt-dlp prints
@@ -80,6 +86,12 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id string) (*ytdlpResult, e
 		// Download & Stream session die at ~3s with "no output file with the
 		// expected name" and an empty stderr.
 		"--no-simulate",
+		// Report what was actually selected. With --no-simulate, --print
+		// WHEN:TEMPLATE prints during the real download; after_move runs
+		// once per output file. The comma-separated fields are parsed in
+		// collectYTDLP and end up on the session's quality info. Commas (not
+		// pipes) keep the argv free of shell metacharacters.
+		"--print", "after_move:%(format_id)s,%(width)s,%(height)s,%(fps)s,%(vcodec)s,%(acodec)s,%(ext)s,%(tbr)s",
 		u,
 	)
 	if m.opts.MaxBytes > 0 {
@@ -138,32 +150,11 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id string) (*ytdlpResult, e
 // ytDLPJoinOK is the nil sentinel the output-path check compares against.
 var ytDLPJoinOK error
 
-// formatSelector asks yt-dlp for the best stream combination Chromium can play.
-//
-// Modern YouTube uploads are DASH-only: there is no progressive (muxed) format
-// at all, so any selector that requires `acodec!=none` on a single stream fails
-// with "Requested format is not available". The ladder therefore merges a
-// video-only stream with an audio-only one first, and only then falls back to a
-// progressive file for sources that still ship one:
-//
-//  1. h264 mp4 video + m4a audio — cheap to decode on a 2-vCPU host, where
-//     AV1/VP9 1080p software decode would compete with Meet's encoder;
-//  2. any mp4 video + m4a audio;
-//  3. progressive mp4 with audio (older uploads, live captures);
-//  4. any video + audio, letting ffmpeg merge whatever containers exist.
-func (m *Manager) formatSelector() string {
-	return strings.Join([]string{
-		// 720p cap: software H.264 decode plus the MP4 merge has to share 2
-		// vCPUs with Meet's encoder, and it keeps the fetch well under the
-		// size ceiling.
-		"bv*[ext=mp4][vcodec^=avc1][height<=720]+ba[ext=m4a]",
-		"bv*[height<=720]+ba",
-		"bv*[ext=mp4][vcodec^=avc1]+ba[ext=m4a]",
-		"bv*[ext=mp4]+ba[ext=m4a]",
-		"b[ext=mp4][acodec!=none]",
-		"bv*+ba/b",
-		"bv*/ba/b*",
-	}, "/")
+// FFmpegOK reports whether a usable ffmpeg binary is configured: the merge
+// ladders are only valid when a merge can actually happen.
+func (m *Manager) FFmpegOK() bool {
+	_, ok := m.FFmpeg()
+	return ok
 }
 
 // collectYTDLP finds the file yt-dlp wrote (its name carries the real
@@ -191,6 +182,7 @@ func (m *Manager) collectYTDLP(ctx context.Context, id string, stdout, stderr []
 		return nil, fmt.Errorf("%w: yt-dlp wrote %s", errSizeLimit, humanBytes(st.Size()))
 	}
 	res := &ytdlpResult{Path: path, Bytes: st.Size(), ContentType: contentTypeForExt(path)}
+	res.Selected = parseSelectedFromPrint(stdout)
 	// Containers Chromium cannot decode (mkv/avi/ogv) get remuxed to mp4 when
 	// ffmpeg is present; without ffmpeg the file is rejected with an
 	// actionable error rather than played as a black frame.

@@ -40,6 +40,28 @@ const (
 	RepeatAll = "all"
 )
 
+// Quality policies (canonical strings, mirroring the engine/media values).
+const (
+	QualityAuto     = "auto"
+	QualitySaver    = "saver"
+	QualityBalanced = "balanced"
+	QualityHD720    = "hd720"
+	QualityFHD1080  = "fhd1080"
+	QualityBest     = "best"
+)
+
+// NormalizeQualityPolicy validates a quality policy, falling back to auto.
+// hd720 stays a distinct label (it and balanced select the same ladder
+// downstream); unknown values degrade to auto.
+func NormalizeQualityPolicy(s string) string {
+	switch p := strings.ToLower(strings.TrimSpace(s)); p {
+	case QualitySaver, QualityBalanced, QualityHD720, QualityFHD1080, QualityBest:
+		return p
+	default:
+		return QualityAuto
+	}
+}
+
 // NormalizeRepeatMode validates a repeat-mode string, falling back to off.
 func NormalizeRepeatMode(s string) string {
 	switch strings.ToLower(strings.TrimSpace(s)) {
@@ -64,6 +86,8 @@ type UserSettings struct {
 	// GuestName overrides the Meet display name when non-empty. Empty means
 	// "use the verified Google identity or the configured default".
 	GuestName string `json:"guest_name,omitempty"`
+	// QualityPolicy is the saved video-quality policy (auto default).
+	QualityPolicy string `json:"quality_policy,omitempty"`
 }
 
 // MaxGuestNameRunes bounds the user-supplied Meet display name.
@@ -113,6 +137,7 @@ func (u UserSettings) normalize() UserSettings {
 	} else {
 		u.GuestName = sanitized
 	}
+	u.QualityPolicy = NormalizeQualityPolicy(u.QualityPolicy)
 	if u.Volume < 0 || u.Volume > 100 {
 		u.Volume = 0
 	}
@@ -155,13 +180,13 @@ const (
 
 // userSchemaVersion is the latest schema version recorded in
 // schema_migrations. Bump it together with a new step in userMigrations.
-const userSchemaVersion = 2
+const userSchemaVersion = 3
 
 // userMigrations maps a version to its DDL. Version 1 is idempotent
-// (CREATE ... IF NOT EXISTS). Version 2 adds the guest-name preference and
-// the workflow-draft table; its ALTER TABLE is column-guarded so a crash
-// between the ALTER and the version insert cannot make the migration
-// un-runnable. Steps are applied strictly in order, once per version.
+// (CREATE ... IF NOT EXISTS). Versions 2+ add columns/tables with
+// column-guarded ALTERs so a crash between the DDL and the version insert
+// cannot make the migration un-runnable. Steps are applied strictly in
+// order, once per version.
 var userMigrations = map[int]string{
 	1: `CREATE TABLE IF NOT EXISTS user_preferences (
 		user_id     INTEGER PRIMARY KEY,
@@ -208,6 +233,7 @@ var userMigrations = map[int]string{
 		extra_queue TEXT   NOT NULL DEFAULT '[]',
 		updated_at INTEGER NOT NULL
 	);`,
+	3: `ALTER TABLE user_preferences ADD COLUMN quality_policy TEXT NOT NULL DEFAULT 'auto';`,
 }
 
 // ErrUserInvalid wraps invalid user-scoped input.
@@ -317,6 +343,13 @@ func (us *UserStore) migrate(ctx context.Context) error {
 				)`); err != nil {
 				return fmt.Errorf("apply user migration 2 (table): %w", err)
 			}
+		case 3:
+			// Same column guard: a half-applied v3 must not wedge the
+			// upgrade either.
+			if err := us.ensureColumnLocked(ctx, "user_preferences", "quality_policy",
+				"ALTER TABLE user_preferences ADD COLUMN quality_policy TEXT NOT NULL DEFAULT 'auto'"); err != nil {
+				return err
+			}
 		default:
 			if _, err := us.db.ExecContext(ctx, userMigrations[v]); err != nil {
 				return fmt.Errorf("apply user migration %d: %w", v, err)
@@ -331,11 +364,30 @@ func (us *UserStore) migrate(ctx context.Context) error {
 	return nil
 }
 
+// ensureColumnLocked applies an ADD COLUMN migration only when the column is
+// missing, so a crash between the DDL and its version bookkeeping cannot make
+// the migration un-runnable. Callers hold the store mutex (migrate does).
+func (us *UserStore) ensureColumnLocked(ctx context.Context, table, column, ddl string) error {
+	var have int
+	if err := us.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name = '%s'`, table, column)).
+		Scan(&have); err != nil {
+		return fmt.Errorf("inspect %s columns: %w", table, err)
+	}
+	if have > 0 {
+		return nil
+	}
+	if _, err := us.db.ExecContext(ctx, ddl); err != nil {
+		return fmt.Errorf("apply %s.%s migration: %w", table, column, err)
+	}
+	return nil
+}
+
 // ---- user preferences ------------------------------------------------------
 
 // userPrefDataColumns lists the value columns (no user_id): the single-row
 // readers filter by user_id and scan only these.
-const userPrefDataColumns = `audio_lang, media_mode, volume, speed, autoplay, repeat_mode, guest_name`
+const userPrefDataColumns = `audio_lang, media_mode, volume, speed, autoplay, repeat_mode, guest_name, quality_policy`
 
 // userPrefColumns adds user_id for the map-shaped listing query.
 const userPrefColumns = `user_id, ` + userPrefDataColumns
@@ -343,7 +395,7 @@ const userPrefColumns = `user_id, ` + userPrefDataColumns
 func scanUserSettings(row *sql.Row) (UserSettings, error) {
 	var u UserSettings
 	var autoplay int
-	err := row.Scan(&u.AudioLang, &u.MediaMode, &u.Volume, &u.Speed, &autoplay, &u.RepeatMode, &u.GuestName)
+	err := row.Scan(&u.AudioLang, &u.MediaMode, &u.Volume, &u.Speed, &autoplay, &u.RepeatMode, &u.GuestName, &u.QualityPolicy)
 	if err != nil {
 		return UserSettings{}, err
 	}
@@ -431,9 +483,9 @@ func (us *UserStore) upsertSettings(ctx context.Context, userID int64, apply fun
 		autoplay = 1
 	}
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE user_preferences SET audio_lang = ?, media_mode = ?, volume = ?, speed = ?, autoplay = ?, repeat_mode = ?, guest_name = ?, updated_at = ?
+		`UPDATE user_preferences SET audio_lang = ?, media_mode = ?, volume = ?, speed = ?, autoplay = ?, repeat_mode = ?, guest_name = ?, quality_policy = ?, updated_at = ?
 		 WHERE user_id = ?`,
-		u.AudioLang, u.MediaMode, u.Volume, u.Speed, autoplay, u.RepeatMode, u.GuestName, time.Now().Unix(), userID); err != nil {
+		u.AudioLang, u.MediaMode, u.Volume, u.Speed, autoplay, u.RepeatMode, u.GuestName, u.QualityPolicy, time.Now().Unix(), userID); err != nil {
 		return UserSettings{}, fmt.Errorf("update preferences: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -477,6 +529,11 @@ func (us *UserStore) SetAutoplay(ctx context.Context, userID int64, on bool) (Us
 // SetRepeatMode persists the repeat preference.
 func (us *UserStore) SetRepeatMode(ctx context.Context, userID int64, mode string) (UserSettings, error) {
 	return us.upsertSettings(ctx, userID, func(u *UserSettings) { u.RepeatMode = NormalizeRepeatMode(mode) })
+}
+
+// SetQualityPolicy persists the video-quality policy.
+func (us *UserStore) SetQualityPolicy(ctx context.Context, userID int64, policy string) (UserSettings, error) {
+	return us.upsertSettings(ctx, userID, func(u *UserSettings) { u.QualityPolicy = NormalizeQualityPolicy(policy) })
 }
 
 // SetGuestName persists the Meet display-name override. Empty input clears
@@ -538,7 +595,7 @@ func (us *UserStore) Preferences(ctx context.Context) (map[int64]UserSettings, e
 		var id int64
 		var u UserSettings
 		var autoplay int
-		if err := rows.Scan(&id, &u.AudioLang, &u.MediaMode, &u.Volume, &u.Speed, &autoplay, &u.RepeatMode, &u.GuestName); err != nil {
+		if err := rows.Scan(&id, &u.AudioLang, &u.MediaMode, &u.Volume, &u.Speed, &autoplay, &u.RepeatMode, &u.GuestName, &u.QualityPolicy); err != nil {
 			return nil, fmt.Errorf("scan preference: %w", err)
 		}
 		u.Autoplay = autoplay != 0

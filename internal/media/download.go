@@ -15,6 +15,9 @@ type DownloadRequest struct {
 	URL  string
 	Kind string // "direct" | "youtube"
 	ID   string
+	// Quality is the requested quality policy (NormalizeQualityPolicy
+	// validates it). Empty means auto.
+	Quality string
 }
 
 // Download resolves req into a playable local file.
@@ -96,6 +99,7 @@ func (m *Manager) Download(ctx context.Context, req DownloadRequest) (*Result, e
 		path, ct, via string
 		bytes         int64
 		transcoded    bool
+		selected      SelectedFormat
 	)
 	switch kind {
 	case "direct":
@@ -107,7 +111,7 @@ func (m *Manager) Download(ctx context.Context, req DownloadRequest) (*Result, e
 		path, ct, bytes, via = res.Path, res.ContentType, res.Bytes, "http"
 		transcoded = res.Transcoded
 	case "youtube":
-		res, err := m.fetchYTDLP(ctx, u.String(), id)
+		res, err := m.fetchYTDLP(ctx, u.String(), id, NormalizeQualityPolicy(req.Quality))
 		if err != nil {
 			m.sweepIDFiles(id)
 			return nil, err
@@ -118,6 +122,7 @@ func (m *Manager) Download(ctx context.Context, req DownloadRequest) (*Result, e
 			via = "yt-dlp+ffmpeg"
 		}
 		transcoded = res.Transcoded
+		selected = res.Selected
 	default:
 		return nil, fmt.Errorf("%w: %q", ErrUnsupported, kind)
 	}
@@ -155,6 +160,7 @@ func (m *Manager) Download(ctx context.Context, req DownloadRequest) (*Result, e
 		ID:          id,
 		FetchedVia:  via,
 		Transcoded:  transcoded,
+		Selected:    selected,
 	}, nil
 }
 

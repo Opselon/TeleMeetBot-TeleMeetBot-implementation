@@ -211,7 +211,8 @@ func (b *Bot) workflowScreenText(userID int64, f *flow) string {
 	if f.step == stepNone {
 		userLang := b.st.GetUserAudioLang(userID)
 		guestName, _ := b.effectiveGuestName(userID)
-		return confirmText(f.meet, f.media, engineKindOf(f.mediaKind), userLang, b.st.GetUserMediaMode(userID), guestName, b.hasGoogleAccount(userID))
+		u := b.userSettings(userID)
+		return confirmText(f.meet, f.media, engineKindOf(f.mediaKind), userLang, u.MediaMode, u.QualityPolicy, guestName, b.hasGoogleAccount(userID))
 	}
 	return flowText(f.step, f.meet)
 }
@@ -220,7 +221,7 @@ func (b *Bot) workflowScreenText(userID int64, f *flow) string {
 func (b *Bot) workflowScreenKB(userID int64, f *flow) *tgbotapi.InlineKeyboardMarkup {
 	if f.step == stepNone {
 		u := b.userSettings(userID)
-		return confirmKB(u.AudioLang, u.MediaMode, b.hasGoogleAccount(userID))
+		return confirmKB(u.AudioLang, u.MediaMode, u.QualityPolicy, b.hasGoogleAccount(userID))
 	}
 	return cancelKB()
 }

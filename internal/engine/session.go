@@ -126,6 +126,13 @@ type Session struct {
 	nextQueueID int
 	// repeatMode is what happens when the current media ends ("off" default).
 	repeatMode string
+	// qualityPolicy is the active quality policy; defaultQuality is the
+	// session-level one that per-item overrides temporarily replace.
+	qualityPolicy  string
+	defaultQuality string
+	// observedQ is the player-reported resolution/quality telemetry, sampled
+	// by the watch loop.
+	observedQ observedQuality
 	// shuffle picks a random upcoming item when playback auto-advances.
 	shuffle bool
 	// autoAdvance plays the next queue item when the current media ends.
@@ -167,6 +174,15 @@ type Status struct {
 	HasPrevious bool
 	// RepeatMode is the end-of-media behaviour ("off", "one", "all").
 	RepeatMode string
+	// QualityPolicy is the active requested policy.
+	QualityPolicy string
+	// Observed is what the live player reports (videoWidth/Height and
+	// YouTube's own quality label when present). Zero values mean the
+	// player has not reported a resolution.
+	Observed observedQuality
+	// SelectedFormat describes what the extraction pipeline chose for the
+	// currently loaded file (download mode only; browser mode has no ladder).
+	SelectedFormat string
 	// Shuffle reports whether auto-advance picks random upcoming items.
 	Shuffle bool
 	// AutoAdvance reports whether the queue advances when media ends.
@@ -222,8 +238,15 @@ func (s *Session) Snapshot() Status {
 	st.QueueLength = len(s.queue)
 	st.QueueIndex = s.queueIdx
 	st.RepeatMode = NormalizeRepeatMode(s.repeatMode)
+	st.QualityPolicy = NormalizeQualityPolicy(s.qualityPolicy)
 	st.Shuffle = s.shuffle
 	st.AutoAdvance = s.autoAdvance
+	st.Observed = s.observedQ
+	s.mu.RLock()
+	if s.localFile != nil {
+		st.SelectedFormat = s.localFile.selected.Describe()
+	}
+	s.mu.RUnlock()
 	s.queueMu.RUnlock()
 	st.HasNext = st.QueueIndex >= 0 && st.QueueIndex+1 < st.QueueLength
 	st.HasPrevious = st.QueueIndex > 0
@@ -575,6 +598,7 @@ func (s *Session) watch() {
 				s.title = st.Title
 			}
 			s.mediaErr = st.Error
+			s.observedQ = observedQuality{Width: st.VideoWidth, Height: st.VideoHeight, YtQuality: st.YtQuality}
 			s.mu.Unlock()
 			if st.Error != "" {
 				s.setDetail("player error: " + st.Error)
@@ -1427,6 +1451,9 @@ type localMedia struct {
 	expiresAt time.Time
 	via       string
 	bytes     int64
+	// selected is the format the extractor chose (yt-dlp sources); zero
+	// when not reported (direct fetches, Telegram ingest).
+	selected mediateam.SelectedFormat
 }
 
 // localFileStatus is the card-friendly view of a downloaded file.

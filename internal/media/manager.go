@@ -37,6 +37,9 @@ type Result struct {
 	FetchedVia string
 	// Transcoded reports whether ffmpeg produced the final file.
 	Transcoded bool
+	// Selected is what the extractor actually chose (yt-dlp sources).
+	// Zero value = not reported: direct HTTP fetches have no format ladder.
+	Selected SelectedFormat
 }
 
 // ErrDisabled means the feature is off; callers must keep Browser mode.
@@ -96,6 +99,10 @@ type Manager struct {
 	ffmpegFn func(ctx context.Context, args []string) ([]byte, []byte, error)
 	// retryDelay overrides the sleep between yt-dlp attempts (tests).
 	retryDelay func(attempt int) time.Duration
+	// inspect cache: derived format metadata with explicit expiry. It holds
+	// heights/codec names, never signed URLs or media bytes.
+	inspectMu    sync.Mutex
+	inspectCache map[string]inspectCacheEntry
 
 	// janitorOnce guards janitor startup; stopMu guards the stop channel
 	// itself: Start's goroutine reads stopJanitor while Stop closes it, and
@@ -404,6 +411,12 @@ func (m *Manager) YTDLP() (string, bool) {
 	}
 	path, err := exec.LookPath("yt-dlp")
 	return path, err == nil
+}
+
+// SetYTDLPFnForTest overrides the yt-dlp subprocess for tests outside this
+// package (bot-level fixtures). Passing fn == nil restores the real runner.
+func (m *Manager) SetYTDLPFnForTest(fn func(ctx context.Context, args []string) ([]byte, []byte, error)) {
+	m.ytdlpFn = fn
 }
 
 // FFmpeg returns the effective ffmpeg path (explicit config, then PATH).

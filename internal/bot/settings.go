@@ -33,6 +33,7 @@ type Settings interface {
 	SetSpeed(ctx context.Context, userID int64, speed float64) (store.UserSettings, error)
 	SetAutoplay(ctx context.Context, userID int64, on bool) (store.UserSettings, error)
 	SetRepeatMode(ctx context.Context, userID int64, mode string) (store.UserSettings, error)
+	SetQualityPolicy(ctx context.Context, userID int64, policy string) (store.UserSettings, error)
 	SetGuestName(ctx context.Context, userID int64, name string) (store.UserSettings, error)
 	SaveWorkflowDraft(ctx context.Context, snap store.WorkflowDraft) error
 	LoadWorkflowDraft(ctx context.Context, userID int64, maxAge time.Duration) (store.WorkflowDraft, bool, error)
@@ -121,6 +122,7 @@ func settingsScreenText(u store.UserSettings) string {
 	} else {
 		sb.WriteString("👤 Guest name: <i>auto</i> (verified Google identity or server default)\n")
 	}
+	sb.WriteString(fmt.Sprintf("🎞️ Video quality: <b>%s</b>\n", esc(engine.QualityPolicyDisplay(u.QualityPolicy))))
 	sb.WriteString("\n<i>Pick a row below to change it. Changes survive bot restarts.</i>")
 	return sb.String()
 }
@@ -160,6 +162,9 @@ func userSettingsKB(u store.UserSettings) *tgbotapi.InlineKeyboardMarkup {
 		{
 			tgbotapi.NewInlineKeyboardButtonData(autoplayLabel, "set:autoplay"),
 			tgbotapi.NewInlineKeyboardButtonData("🔁 Repeat: "+repeatDisplay(u.RepeatMode), "set:repeat"),
+		},
+		{
+			tgbotapi.NewInlineKeyboardButtonData("🎞️ Video quality: "+engine.QualityPolicyDisplay(u.QualityPolicy), "set:quality"),
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData(guestLabel, "set:guestname"),
@@ -228,6 +233,25 @@ func (b *Bot) handleSettingsCallback(chatID, userID int64, msgID int, q *tgbotap
 		if toast == "" {
 			toast = "repeat: " + repeatDisplay(next)
 		}
+	case "quality":
+		_ = b.api.AnswerCallback(q.ID, "")
+		u := b.userSettings(userID)
+		_ = b.api.Edit(chatID, msgID, qualitySettingsText(u), qualitySettingsKB(u))
+		return
+	case "q":
+		if len(parts) < 2 {
+			_ = b.api.AnswerCallback(q.ID, "bad policy")
+			return
+		}
+		u, toast = b.applyUserSetting(userID, func(ctx context.Context) (store.UserSettings, error) {
+			return b.set.SetQualityPolicy(ctx, userID, parts[1])
+		})
+		if toast == "" {
+			toast = "quality: " + engine.QualityPolicyDisplay(u.QualityPolicy)
+		}
+		_ = b.api.AnswerCallback(q.ID, toast)
+		_ = b.api.Edit(chatID, msgID, qualitySettingsText(u), qualitySettingsKB(u))
+		return
 	case "guestname":
 		_ = b.api.AnswerCallback(q.ID, "send the new name")
 		b.setFlow(userID, &flow{step: stepGuestName, parent: "settings"})
@@ -342,6 +366,37 @@ func (b *Bot) trySettingsInput(chatID, userID int64, f *flow, text string) bool 
 	}
 	b.showUserSettings(chatID, 0, userID)
 	return true
+}
+
+// qualitySettingsText renders the per-user video-quality picker.
+func qualitySettingsText(u store.UserSettings) string {
+	return fmt.Sprintf("🎞️ <b>Video quality policy</b>\n\nCurrent: <b>%s</b>\n\n"+
+		"The policy steers the Download &amp; Stream extraction ladder (best format at or below the cap) and is recorded as the requested policy for direct playback, where YouTube's own player stays in control of adaptive quality.\n\n<i>New sessions start with this policy; running sessions are not interrupted.</i>",
+		esc(engine.QualityPolicyDisplay(u.QualityPolicy)))
+}
+
+// qualitySettingsKB renders the policy buttons.
+func qualitySettingsKB(u store.UserSettings) *tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+	row := make([]tgbotapi.InlineKeyboardButton, 0, 2)
+	for _, p := range qualityPolicies {
+		label := engine.QualityPolicyDisplay(p)
+		if engine.NormalizeQualityPolicy(u.QualityPolicy) == engine.NormalizeQualityPolicy(p) {
+			label = "✅ " + label
+		}
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(label, "set:q:"+p))
+		if len(row) == 2 {
+			rows = append(rows, row)
+			row = make([]tgbotapi.InlineKeyboardButton, 0, 2)
+		}
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+	rows = append(rows, []tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardButtonData("⬅️ Settings", "set:back"),
+	})
+	return &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
 // volumeChoices are the start-volume presets. 0 means "server default".

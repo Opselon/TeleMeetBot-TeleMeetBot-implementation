@@ -26,6 +26,13 @@ type mediaStatus struct {
 	// Seekable is the number of ranges in media.seekable. A live stream has
 	// zero; treating its seek button as a success would be a lie.
 	Seekable int `json:"seekable,omitempty"`
+	// VideoWidth/VideoHeight are the media element's intrinsic size — real
+	// player telemetry for the observed-quality view (0 when not reported).
+	VideoWidth  int `json:"videoWidth,omitempty"`
+	VideoHeight int `json:"videoHeight,omitempty"`
+	// YtQuality is YouTube's own playback-quality label (read-only probe of
+	// movie_player.getPlaybackQuality()); empty outside YouTube.
+	YtQuality string `json:"ytQuality,omitempty"`
 }
 
 // mediaControlJS builds a self-contained script that finds the best media
@@ -37,7 +44,8 @@ func mediaControlJS(action string, arg float64) string {
 	argJS := strconv.FormatFloat(arg, 'f', -1, 64)
 	return fmt.Sprintf(`() => {
   const out = {ok: false, error: "", count: 0, paused: true, muted: false, volume: 1,
-               playbackRate: 1, currentTime: 0, duration: 0, title: "", src: ""};
+               playbackRate: 1, currentTime: 0, duration: 0, title: "", src: "",
+               videoWidth: 0, videoHeight: 0, ytQuality: ""};
   const items = [];
   const walk = (doc, depth) => {
     if (!doc || depth > 6) return;
@@ -157,6 +165,15 @@ func mediaControlJS(action string, arg float64) string {
     }
   } catch (e) {}
   try { out.seekable = (m.seekable && m.seekable.length) ? m.seekable.length : 0; } catch (e) { out.seekable = 0; }
+  try { out.videoWidth = m.videoWidth || 0; } catch (e) {}
+  try { out.videoHeight = m.videoHeight || 0; } catch (e) {}
+  try {
+    const mp = document.querySelector('#movie_player');
+    if (mp && mp.getPlaybackQuality) {
+      const q = mp.getPlaybackQuality();
+      if (q) out.ytQuality = String(q);
+    }
+  } catch (e) {}
   out.src = String(m.currentSrc || m.src || "").slice(0, 300);
   let real = "";
   try {

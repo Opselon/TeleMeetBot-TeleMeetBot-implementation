@@ -31,6 +31,16 @@ func testManager(t *testing.T, ttl time.Duration) (*Manager, string) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
+	// Pin DNS so the suite is deterministic on networks that resolve public
+	// hosts to private addresses (captive networks intercept domain lookups,
+	// which would trip the SSRF gate for reasons unrelated to the test).
+	// Tests that exercise DNS behaviour override this seam themselves.
+	m.lookupFn = func(host string) ([]net.IP, error) {
+		if host == "internal.example.com" || host == "private.example.com" {
+			return []net.IP{net.ParseIP("169.254.169.254")}, nil
+		}
+		return []net.IP{net.ParseIP("93.184.216.34")}, nil
+	}
 	t.Cleanup(func() { m.Close() })
 	return m, dir
 }
@@ -822,6 +832,11 @@ func TestYTDLPCommandIsShellFree(t *testing.T) {
 	// record the exact argv handed to the would-be subprocess.
 	var got []string
 	m.opts.YTDLPPath = "yt-dlp-probe"
+	// Pin DNS like testManager: the fetch must reach yt-dlp regardless of
+	// the network's domain interception.
+	m.lookupFn = func(host string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("93.184.216.34")}, nil
+	}
 	m.retryDelay = func(int) time.Duration { return 0 }
 	m.ytdlpFn = func(ctx context.Context, args []string) ([]byte, []byte, error) {
 		got = args

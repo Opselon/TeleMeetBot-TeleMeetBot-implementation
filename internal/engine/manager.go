@@ -201,6 +201,11 @@ type StartRequest struct {
 	// AutoPlay makes the queue advance when the current media ends. nil keeps
 	// the engine default (auto-advance on).
 	AutoPlay *bool
+	// Quality is the requested quality policy ("" = auto). It steers the
+	// extraction ladder in download mode and is reported as the requested
+	// policy everywhere; direct browser playback stays under YouTube's own
+	// adaptive control.
+	Quality string
 }
 
 // Manager owns browsers and sessions.
@@ -502,6 +507,8 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (*Session, error)
 			Speed:    speed,
 		},
 		repeatMode:        NormalizeRepeatMode(req.RepeatMode),
+		qualityPolicy:     NormalizeQualityPolicy(req.Quality),
+		defaultQuality:    NormalizeQualityPolicy(req.Quality),
 		shuffle:           req.Shuffle,
 		autoAdvance:       autoAdvance,
 		rng:               mathrand.New(mathrand.NewSource(time.Now().UnixNano())),

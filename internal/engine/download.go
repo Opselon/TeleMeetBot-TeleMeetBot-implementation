@@ -27,6 +27,8 @@ type downloadResult struct {
 	Bytes       int64
 	ExpiresAt   time.Time
 	Via         string
+	// Selected is the format the extractor actually chose (yt-dlp sources).
+	Selected mediateam.SelectedFormat
 }
 
 // leaseMedia pins the downloaded file behind res to this session so the
@@ -154,6 +156,7 @@ func (s *Session) prepareLocalMedia() error {
 		expiresAt: res.ExpiresAt,
 		via:       res.Via,
 		bytes:     res.Bytes,
+		selected:  res.Selected,
 	}
 	playMode := s.playMode
 	s.mu.Unlock()
@@ -173,12 +176,14 @@ func (s *Session) runDownloadWithID(ctx context.Context, mgr *mediateam.Manager,
 	if strings.TrimSpace(id) == "" {
 		id = s.downloadID()
 	}
-	// The manager owns dedupe, concurrency gating, size/time limits and the
-	// expiry bookkeeping. The URL was already classified by the caller.
+	// The manager owns dedupe, concurrency gating, size/time limits, the
+	// disk-space fence and the expiry bookkeeping. The URL was already
+	// classified by the caller; the quality policy steers extraction.
 	res, err := mgr.Download(ctx, mediateam.DownloadRequest{
-		URL:  target.URL,
-		Kind: string(target.Kind),
-		ID:   id,
+		URL:     target.URL,
+		Kind:    string(target.Kind),
+		ID:      id,
+		Quality: s.QualityPolicy(),
 	})
 	if err != nil {
 		return nil, err
@@ -191,6 +196,7 @@ func (s *Session) runDownloadWithID(ctx context.Context, mgr *mediateam.Manager,
 		Bytes:       res.Bytes,
 		ExpiresAt:   res.ExpiresAt,
 		Via:         res.FetchedVia,
+		Selected:    res.Selected,
 	}, nil
 }
 

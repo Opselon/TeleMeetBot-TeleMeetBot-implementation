@@ -329,6 +329,10 @@ func sessionCardKB(st engine.Status) *tgbotapi.InlineKeyboardMarkup {
 			tgbotapi.NewInlineKeyboardButtonData("⚡️ Speed", "act:"+id+":speed"),
 		},
 		{
+			tgbotapi.NewInlineKeyboardButtonData("🎞️ Video quality", "act:"+id+":quality"),
+			tgbotapi.NewInlineKeyboardButtonData("📊 Quality info", "act:"+id+":qinfo"),
+		},
+		{
 			tgbotapi.NewInlineKeyboardButtonData("🔀 Switch media", "act:"+id+":switchurl"),
 			tgbotapi.NewInlineKeyboardButtonData("🎛 Tools", "act:"+id+":tools"),
 		},
@@ -553,8 +557,9 @@ func switchMediaText(st engine.Status) string {
 }
 
 // confirmText summarises the pending stream. guestName is the effective
-// Meet display name (empty = the server default applies).
-func confirmText(meetLink, mediaLink string, kind engine.MediaKind, userAudioLang, userMediaMode, guestName string, hasGoogleAccount bool) string {
+// Meet display name (empty = the server default applies); userQuality is the
+// requested video-quality policy.
+func confirmText(meetLink, mediaLink string, kind engine.MediaKind, userAudioLang, userMediaMode, userQuality, guestName string, hasGoogleAccount bool) string {
 	kindLabel := "web page"
 	switch kind {
 	case engine.MediaYouTube:
@@ -572,6 +577,7 @@ func confirmText(meetLink, mediaLink string, kind engine.MediaKind, userAudioLan
 	}
 	mode := engine.NormalizePlaybackMode(userMediaMode)
 	sb.WriteString(fmt.Sprintf("\n%s Media mode: <b>%s</b>\n", engine.PlaybackModeEmoji(mode), esc(engine.PlaybackModeDisplay(mode))))
+	sb.WriteString(fmt.Sprintf("🎞️ Video quality: <b>%s</b>\n", esc(engine.QualityPolicyDisplay(userQuality))))
 	if (kind == engine.MediaYouTube || kind == engine.MediaDirect) && mode != engine.MediaModeBrowser {
 		sb.WriteString("<i>The media is downloaded before playback; file is freed when the session ends or switches.</i>\n")
 	}
@@ -591,7 +597,7 @@ func confirmText(meetLink, mediaLink string, kind engine.MediaKind, userAudioLan
 // confirmKB offers launch, per-field editing and cancel for a pending
 // stream. The two edit buttons preserve the validated value of the other
 // field; "Change links" stays as the full-restart escape hatch.
-func confirmKB(userAudioLang, userMediaMode string, hasGoogleAccount bool) *tgbotapi.InlineKeyboardMarkup {
+func confirmKB(userAudioLang, userMediaMode, userQuality string, hasGoogleAccount bool) *tgbotapi.InlineKeyboardMarkup {
 	norm := engine.NormalizeAudioLang(userAudioLang)
 	mode := engine.NormalizePlaybackMode(userMediaMode)
 	profileLabel := "👤 Profile: Guest 🚪"
@@ -607,6 +613,9 @@ func confirmKB(userAudioLang, userMediaMode string, hasGoogleAccount bool) *tgbo
 		{
 			tgbotapi.NewInlineKeyboardButtonData("🎵 Audio: "+engine.AudioLangDisplayName(norm), cbAudioLang),
 			tgbotapi.NewInlineKeyboardButtonData(engine.PlaybackModeEmoji(mode)+" Mode: "+engine.PlaybackModeDisplay(mode), cbMediaMode),
+		},
+		{
+			tgbotapi.NewInlineKeyboardButtonData("🎞️ Quality: "+engine.QualityPolicyDisplay(userQuality), "set:quality"),
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData(profileLabel, cbAccount),
