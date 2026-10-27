@@ -34,6 +34,8 @@ type Settings interface {
 	SetAutoplay(ctx context.Context, userID int64, on bool) (store.UserSettings, error)
 	SetRepeatMode(ctx context.Context, userID int64, mode string) (store.UserSettings, error)
 	SetQualityPolicy(ctx context.Context, userID int64, policy string) (store.UserSettings, error)
+	SetCaptionPolicy(ctx context.Context, userID int64, policy string) (store.UserSettings, error)
+	SetCaptionLang(ctx context.Context, userID int64, lang string) (store.UserSettings, error)
 	SetGuestName(ctx context.Context, userID int64, name string) (store.UserSettings, error)
 	SaveWorkflowDraft(ctx context.Context, snap store.WorkflowDraft) error
 	LoadWorkflowDraft(ctx context.Context, userID int64, maxAge time.Duration) (store.WorkflowDraft, bool, error)
@@ -123,6 +125,11 @@ func settingsScreenText(u store.UserSettings) string {
 		sb.WriteString("👤 Guest name: <i>auto</i> (verified Google identity or server default)\n")
 	}
 	sb.WriteString(fmt.Sprintf("🎞️ Video quality: <b>%s</b>\n", esc(engine.QualityPolicyDisplay(u.QualityPolicy))))
+	sb.WriteString(fmt.Sprintf("💬 Captions: <b>%s</b>", esc(engine.CaptionPolicyDisplay(u.CaptionPolicy))))
+	if u.CaptionLang != "" {
+		sb.WriteString(fmt.Sprintf(" \u00b7 <b>%s</b>", esc(u.CaptionLang)))
+	}
+	sb.WriteString("\n")
 	sb.WriteString("\n<i>Pick a row below to change it. Changes survive bot restarts.</i>")
 	return sb.String()
 }
@@ -165,6 +172,9 @@ func userSettingsKB(u store.UserSettings) *tgbotapi.InlineKeyboardMarkup {
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData("🎞️ Video quality: "+engine.QualityPolicyDisplay(u.QualityPolicy), "set:quality"),
+		},
+		{
+			tgbotapi.NewInlineKeyboardButtonData("💬 Captions: "+engine.CaptionPolicyDisplay(u.CaptionPolicy), "set:captions"),
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData(guestLabel, "set:guestname"),
@@ -251,6 +261,51 @@ func (b *Bot) handleSettingsCallback(chatID, userID int64, msgID int, q *tgbotap
 		}
 		_ = b.api.AnswerCallback(q.ID, toast)
 		_ = b.api.Edit(chatID, msgID, qualitySettingsText(u), qualitySettingsKB(u))
+		return
+	case "captions":
+		_ = b.api.AnswerCallback(q.ID, "")
+		u := b.userSettings(userID)
+		_ = b.api.Edit(chatID, msgID, captionSettingsText(u), captionSettingsKB(u))
+		return
+	case "cap":
+		if len(parts) < 3 {
+			_ = b.api.AnswerCallback(q.ID, "bad request")
+			return
+		}
+		var u store.UserSettings
+		switch parts[1] {
+		case "pol":
+			u, toast = b.applyUserSetting(userID, func(ctx context.Context) (store.UserSettings, error) {
+				return b.set.SetCaptionPolicy(ctx, userID, parts[2])
+			})
+			if toast == "" {
+				toast = "captions: " + engine.CaptionPolicyDisplay(u.CaptionPolicy)
+			}
+		case "lang":
+			lang := engine.NormalizeCaptionLang(parts[2])
+			if lang == "" && parts[2] != "none" {
+				_ = b.api.AnswerCallback(q.ID, "bad language tag")
+				return
+			}
+			if parts[2] == "none" {
+				lang = ""
+			}
+			u, toast = b.applyUserSetting(userID, func(ctx context.Context) (store.UserSettings, error) {
+				return b.set.SetCaptionLang(ctx, userID, lang)
+			})
+			if toast == "" {
+				if lang == "" {
+					toast = "subtitle language cleared"
+				} else {
+					toast = "subtitle language: " + lang
+				}
+			}
+		default:
+			_ = b.api.AnswerCallback(q.ID, "unknown caption setting")
+			return
+		}
+		_ = b.api.AnswerCallback(q.ID, toast)
+		_ = b.api.Edit(chatID, msgID, captionSettingsText(u), captionSettingsKB(u))
 		return
 	case "guestname":
 		_ = b.api.AnswerCallback(q.ID, "send the new name")
@@ -368,7 +423,57 @@ func (b *Bot) trySettingsInput(chatID, userID int64, f *flow, text string) bool 
 	return true
 }
 
-// qualitySettingsText renders the per-user video-quality picker.
+// captionSettingsText renders the per-user captions picker.
+func captionSettingsText(u store.UserSettings) string {
+	lang := "no preference"
+	if u.CaptionLang != "" {
+		lang = u.CaptionLang
+	}
+	return fmt.Sprintf("💬 <b>Subtitles &amp; captions</b>\n\nPolicy: <b>%s</b>\nLanguage: <b>%s</b>\n\n"+
+		"The policy applies to sessions you launch: Auto enables captions in your language when the source offers a track, Preferred requests your saved language explicitly, Original picks the source's own track when identifiable, Off disables captions.\n\n<i>The subtitle language is independent of your audio language. In Download &amp; Stream the track is fetched, converted to WebVTT and attached to the player; on direct YouTube the captions module is used best-effort.</i>",
+		esc(engine.CaptionPolicyDisplay(u.CaptionPolicy)), esc(lang))
+}
+
+// captionSettingsKB renders the policy + language buttons.
+func captionSettingsKB(u store.UserSettings) *tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+	row := make([]tgbotapi.InlineKeyboardButton, 0, 2)
+	for _, p := range captionPolicies {
+		label := engine.CaptionPolicyDisplay(p)
+		if engine.NormalizeCaptionPolicy(u.CaptionPolicy) == engine.NormalizeCaptionPolicy(p) {
+			label = "✅ " + label
+		}
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(label, "set:cap:pol:"+p))
+		if len(row) == 2 {
+			rows = append(rows, row)
+			row = make([]tgbotapi.InlineKeyboardButton, 0, 2)
+		}
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+	lrow := make([]tgbotapi.InlineKeyboardButton, 0, 3)
+	for _, lang := range commonCaptionLangs {
+		label := lang
+		if u.CaptionLang == lang {
+			label = "✅ " + label
+		}
+		lrow = append(lrow, tgbotapi.NewInlineKeyboardButtonData(label, "set:cap:lang:"+lang))
+		if len(lrow) == 3 {
+			rows = append(rows, lrow)
+			lrow = make([]tgbotapi.InlineKeyboardButton, 0, 3)
+		}
+	}
+	if len(lrow) > 0 {
+		rows = append(rows, lrow)
+	}
+	rows = append(rows, []tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardButtonData("🌐 Clear language", "set:cap:lang:none"),
+		tgbotapi.NewInlineKeyboardButtonData("⬅️ Settings", "set:back"),
+	})
+	return &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
 func qualitySettingsText(u store.UserSettings) string {
 	return fmt.Sprintf("🎞️ <b>Video quality policy</b>\n\nCurrent: <b>%s</b>\n\n"+
 		"The policy steers the Download &amp; Stream extraction ladder (best format at or below the cap) and is recorded as the requested policy for direct playback, where YouTube's own player stays in control of adaptive quality.\n\n<i>New sessions start with this policy; running sessions are not interrupted.</i>",

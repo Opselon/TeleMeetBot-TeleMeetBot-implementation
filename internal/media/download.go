@@ -18,6 +18,9 @@ type DownloadRequest struct {
 	// Quality is the requested quality policy (NormalizeQualityPolicy
 	// validates it). Empty means auto.
 	Quality string
+	// SubLang requests a caption track alongside the media ("", "off" or a
+	// language code). Best effort: a subtitle failure never fails the video.
+	SubLang string
 }
 
 // Download resolves req into a playable local file.
@@ -111,7 +114,7 @@ func (m *Manager) Download(ctx context.Context, req DownloadRequest) (*Result, e
 		path, ct, bytes, via = res.Path, res.ContentType, res.Bytes, "http"
 		transcoded = res.Transcoded
 	case "youtube":
-		res, err := m.fetchYTDLP(ctx, u.String(), id, NormalizeQualityPolicy(req.Quality))
+		res, err := m.fetchYTDLP(ctx, u.String(), id, NormalizeQualityPolicy(req.Quality), req.SubLang)
 		if err != nil {
 			m.sweepIDFiles(id)
 			return nil, err
@@ -151,7 +154,7 @@ func (m *Manager) Download(ctx context.Context, req DownloadRequest) (*Result, e
 	}
 	m.reportProgress(Progress{URL: u.String(), ID: id, Bytes: bytes, Total: bytes, Done: true})
 	m.log.Infof("[PIPELINE:download] %s: ready via %s (%s, expires in %s)", id, via, humanBytes(bytes), m.opts.TTL)
-	return &Result{
+	result := &Result{
 		URL:         m.localURL(entry),
 		Path:        path,
 		ContentType: ct,
@@ -161,7 +164,17 @@ func (m *Manager) Download(ctx context.Context, req DownloadRequest) (*Result, e
 		FetchedVia:  via,
 		Transcoded:  transcoded,
 		Selected:    selected,
-	}, nil
+	}
+	// Best-effort subtitle: failure is logged and skipped, never fatal to
+	// the video the user asked for.
+	if lang := strings.ToLower(strings.TrimSpace(req.SubLang)); lang != "" && lang != "off" {
+		if sub, err := m.prepareSubtitle(id, entry.ExpiresAt); err != nil {
+			m.log.Infof("[PIPELINE:download] %s: subtitle %q unavailable: %v", id, lang, err)
+		} else {
+			result.Subtitle = sub
+		}
+	}
+	return result, nil
 }
 
 // localURL builds the loopback URL the media tab loads. Chromium must not load

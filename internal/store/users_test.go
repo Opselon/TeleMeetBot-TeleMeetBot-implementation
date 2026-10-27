@@ -695,3 +695,96 @@ func TestUserStoreMigrationV2PreservesV1Data(t *testing.T) {
 		t.Fatalf("draft on migrated db: %v", err)
 	}
 }
+
+// ---- caption preferences (schema v4) ----------------------------------------
+
+func TestCaptionPreferencePersistence(t *testing.T) {
+	ctx := context.Background()
+	us := newTestUserStore(t)
+
+	if _, err := us.SetCaptionPolicy(ctx, 42, "preferred"); err != nil {
+		t.Fatalf("set policy: %v", err)
+	}
+	if _, err := us.SetCaptionLang(ctx, 42, "FA"); err != nil {
+		t.Fatalf("set lang: %v", err)
+	}
+	u, err := us.Get(ctx, 42)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if u.CaptionPolicy != CaptionPreferred || u.CaptionLang != "fa" {
+		t.Fatalf("saved = %+v", u)
+	}
+
+	// Isolation: another user keeps defaults.
+	u2, _ := us.Get(ctx, 43)
+	if u2.CaptionPolicy != CaptionOff || u2.CaptionLang != "" {
+		t.Fatalf("cross-user leak: %+v", u2)
+	}
+
+	// Fences: unknown policies degrade to off; bad tags are dropped.
+	if _, err := us.SetCaptionPolicy(ctx, 42, "karaoke"); err != nil {
+		t.Fatalf("bogus policy rejected as error: %v", err)
+	}
+	if u, _ := us.Get(ctx, 42); u.CaptionPolicy != CaptionOff {
+		t.Fatalf("bogus policy leaked: %q", u.CaptionPolicy)
+	}
+	if _, err := us.SetCaptionLang(ctx, 42, "bad lang!!"); err == nil {
+		t.Fatal("bad lang accepted without error")
+	}
+	if u, _ := us.Get(ctx, 42); u.CaptionLang != "fa" {
+		t.Fatalf("bad lang overwrote a good value: %q", u.CaptionLang)
+	}
+
+	// A corrupt persisted value is normalized on read.
+	if _, err := us.db.Exec(`UPDATE user_preferences SET caption_policy = 'burn-in', caption_lang = 'NOT--A--LANG--X' WHERE user_id = 42`); err != nil {
+		t.Fatalf("corrupt: %v", err)
+	}
+	if u, _ := us.Get(ctx, 42); u.CaptionPolicy != CaptionOff || u.CaptionLang != "" {
+		t.Fatalf("corrupt values not normalized: %+v", u)
+	}
+}
+
+// TestUserStoreMigrationV4PreservesV3Data reopens a v3 database: the caption
+// columns appear with safe defaults and existing values survive.
+func TestUserStoreMigrationV4PreservesV3Data(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "users.db")
+
+	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)")
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	for v := 1; v <= 3; v++ {
+		if _, err := db.Exec(userMigrations[v]); err != nil {
+			t.Fatalf("apply v%d: %v", v, err)
+		}
+	}
+	now := time.Now().Unix()
+	if _, err := db.Exec(`INSERT INTO user_preferences (user_id, audio_lang, media_mode, volume, speed, autoplay, repeat_mode, guest_name, quality_policy, created_at, updated_at)
+		VALUES (9, 'en', 'download', 60, 1.5, 1, 'one', 'Grace', 'saver', ?, ?)`, now, now); err != nil {
+		t.Fatalf("seed v3 row: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	us, err := NewUserStore(context.Background(), path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer us.Close()
+	u, err := us.Get(context.Background(), 9)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if u.AudioLang != "en" || u.QualityPolicy != QualitySaver || u.GuestName != "Grace" {
+		t.Fatalf("v3 data lost: %+v", u)
+	}
+	if u.CaptionPolicy != CaptionOff || u.CaptionLang != "" {
+		t.Fatalf("caption defaults not safe: %+v", u)
+	}
+	if _, err := us.SetCaptionPolicy(context.Background(), 9, "auto"); err != nil {
+		t.Fatalf("caption on migrated row: %v", err)
+	}
+}

@@ -42,6 +42,24 @@
   el.playbackRate = Math.min(4, Math.max(0.25, cfg.speed || 1));
   el.playsInline = true;
   el.setAttribute('controls', '');
+  // Optional caption track (Download & Stream path): attached as a native
+  // <track> so the browser renders it inside the shared tab. Enabled only
+  // once the element has loaded its metadata and the track exists.
+  if (cfg.subtitleURL) {
+    const tr = document.createElement('track');
+    tr.kind = 'captions';
+    tr.label = cfg.subtitleLang || 'captions';
+    tr.srclang = cfg.subtitleLang || '';
+    tr.src = cfg.subtitleURL;
+    tr.default = true;
+    el.appendChild(tr);
+    el.addEventListener('loadedmetadata', () => {
+      try {
+        const tt = el.textTracks && el.textTracks[0];
+        if (tt) { tt.mode = 'showing'; }
+      } catch (e) {}
+    });
+  }
   wrap.appendChild(el);
 
   // The tab title is what Chromium's auto-select-capture-source matches when
@@ -67,6 +85,28 @@
     const p = el.play();
     if (p && p.catch) p.catch(() => { hint.textContent = 'Waiting for playback permission…'; });
   }
+  // Caption helpers used by the engine's CDP probe. Local tracks only:
+  // YouTube pages control their own caption module.
+  window.__tmCaption = (on) => {
+    try {
+      const tt = el.textTracks && el.textTracks[0];
+      if (!tt) return { ok: false, error: 'no caption track' };
+      tt.mode = on ? 'showing' : 'hidden';
+      return { ok: true, enabled: tt.mode === 'showing' };
+    } catch (e) { return { ok: false, error: String(e) }; }
+  };
+  window.__tmCaptionState = () => {
+    try {
+      const tt = el.textTracks && el.textTracks[0];
+      if (!tt) return { count: 0, enabled: false, loaded: false, lang: '' };
+      return {
+        count: el.textTracks.length,
+        enabled: tt.mode === 'showing',
+        loaded: tt.readyState === 2, // LOADED
+        lang: tt.language || ''
+      };
+    } catch (e) { return { count: 0, enabled: false, loaded: false, lang: '' }; }
+  };
   window.__tmPlayer = el;
 })();
 </script>

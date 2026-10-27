@@ -521,6 +521,8 @@ func (b *Bot) startRequestFor(userID int64, meetURL string, req engine.StartRequ
 	req.Speed = u.Speed
 	req.RepeatMode = u.RepeatMode
 	req.Quality = u.QualityPolicy
+	req.CaptionPolicy = u.CaptionPolicy
+	req.CaptionLang = u.CaptionLang
 	req.Shuffle = false // no per-user shuffle default yet; toggle lives on the session
 	autoplay := u.Autoplay
 	req.AutoPlay = &autoplay
@@ -824,9 +826,16 @@ func (b *Bot) handleAction(chatID int64, msgID int, q *tgbotapi.CallbackQuery, d
 	case "quality", "qinfo", "qformats", "qapply", "qmode":
 		b.handleQualityCallback(chatID, q.From.ID, msgID, q, data)
 		return
+	case "captions", "cappol", "caplang", "capon", "capoff", "capdetect", "capapply", "capinfo", "caplangs":
+		b.handleCaptionsCallback(chatID, q.From.ID, msgID, q, data)
+		return
 	}
 	if strings.HasPrefix(action, "qset:") || strings.HasPrefix(action, "qfmt:") {
 		b.handleQualityCallback(chatID, q.From.ID, msgID, q, data)
+		return
+	}
+	if strings.HasPrefix(action, "cappol:") || strings.HasPrefix(action, "caplang:") {
+		b.handleCaptionsCallback(chatID, q.From.ID, msgID, q, data)
 		return
 	}
 	if action == "stop_confirm" {
@@ -1401,6 +1410,10 @@ func (b *Bot) handleQueueCallback(chatID, userID int64, msgID int, q *tgbotapi.C
 		b.handleQueueItemQualityMenu(chatID, userID, msgID, q, data)
 	case "itemqopen":
 		b.handleQueueItemQualityOpen(chatID, userID, msgID, q, data)
+	case "itemcap", "itemcapset":
+		b.handleQueueItemCaptionMenu(chatID, userID, msgID, q, data)
+	case "itemcapopen":
+		b.handleQueueItemCaptionOpen(chatID, userID, msgID, q, data)
 	default:
 		_ = b.api.AnswerCallback(q.ID, "unknown queue action")
 	}

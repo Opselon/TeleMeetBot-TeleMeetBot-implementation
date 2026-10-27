@@ -29,6 +29,9 @@ type downloadResult struct {
 	Via         string
 	// Selected is the format the extractor actually chose (yt-dlp sources).
 	Selected mediateam.SelectedFormat
+	// Subtitle is the fetched caption track (nil when unavailable — never
+	// fatal to the video).
+	Subtitle *mediateam.Subtitle
 }
 
 // leaseMedia pins the downloaded file behind res to this session so the
@@ -157,6 +160,7 @@ func (s *Session) prepareLocalMedia() error {
 		via:       res.Via,
 		bytes:     res.Bytes,
 		selected:  res.Selected,
+		subtitle:  res.Subtitle,
 	}
 	playMode := s.playMode
 	s.mu.Unlock()
@@ -178,12 +182,14 @@ func (s *Session) runDownloadWithID(ctx context.Context, mgr *mediateam.Manager,
 	}
 	// The manager owns dedupe, concurrency gating, size/time limits, the
 	// disk-space fence and the expiry bookkeeping. The URL was already
-	// classified by the caller; the quality policy steers extraction.
+	// classified by the caller; the quality policy and caption language
+	// steer extraction.
 	res, err := mgr.Download(ctx, mediateam.DownloadRequest{
 		URL:     target.URL,
 		Kind:    string(target.Kind),
 		ID:      id,
 		Quality: s.QualityPolicy(),
+		SubLang: s.captionLangForDownload(),
 	})
 	if err != nil {
 		return nil, err
@@ -197,6 +203,7 @@ func (s *Session) runDownloadWithID(ctx context.Context, mgr *mediateam.Manager,
 		ExpiresAt:   res.ExpiresAt,
 		Via:         res.FetchedVia,
 		Selected:    res.Selected,
+		Subtitle:    res.Subtitle,
 	}, nil
 }
 
