@@ -326,15 +326,18 @@ func sessionCardKB(st engine.Status) *tgbotapi.InlineKeyboardMarkup {
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData("♻️ Restart media", "act:"+id+":restart"),
-			tgbotapi.NewInlineKeyboardButtonData("🔀 Switch media", "act:"+id+":switchurl"),
+			tgbotapi.NewInlineKeyboardButtonData("⚡️ Speed", "act:"+id+":speed"),
 		},
 		{
+			tgbotapi.NewInlineKeyboardButtonData("🔀 Switch media", "act:"+id+":switchurl"),
 			tgbotapi.NewInlineKeyboardButtonData("🎛 Tools", "act:"+id+":tools"),
+		},
+		{
 			tgbotapi.NewInlineKeyboardButtonData("💾 Save queue", "q:save:"+id),
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData("🔄 Refresh", "act:"+id+":refresh"),
-			tgbotapi.NewInlineKeyboardButtonData("⏹ Stop", "act:"+id+":stop"),
+			tgbotapi.NewInlineKeyboardButtonData("⏹ Stop", "act:"+id+":stop_confirm"),
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData("⬅️ Dashboard", cbHome),
@@ -401,6 +404,9 @@ func healthText(s health.Snapshot, browserErr string) string {
 	}
 	sb.WriteString(fmt.Sprintf("Disk: %.1f GB free of %.1f GB\n", s.DiskFreeGB, s.DiskTotalGB))
 	sb.WriteString(fmt.Sprintf("Config: <code>%s</code>\n", esc(s.ConfigPath)))
+	// Live CPU/RAM/swap telemetry. The sampler reports N/A per metric when
+	// the platform cannot provide it, so the screen never invents values.
+	sb.WriteString("\n" + health.FormatServerResources())
 	sb.WriteString("\n🟢 Service is up. Health endpoint: <code>/healthz</code>")
 	return sb.String()
 }
@@ -546,8 +552,9 @@ func switchMediaText(st engine.Status) string {
 	return sb.String()
 }
 
-// confirmText summarises the pending stream.
-func confirmText(meetLink, mediaLink string, kind engine.MediaKind, userAudioLang, userMediaMode string, hasGoogleAccount bool) string {
+// confirmText summarises the pending stream. guestName is the effective
+// Meet display name (empty = the server default applies).
+func confirmText(meetLink, mediaLink string, kind engine.MediaKind, userAudioLang, userMediaMode, guestName string, hasGoogleAccount bool) string {
 	kindLabel := "web page"
 	switch kind {
 	case engine.MediaYouTube:
@@ -568,6 +575,9 @@ func confirmText(meetLink, mediaLink string, kind engine.MediaKind, userAudioLan
 	if (kind == engine.MediaYouTube || kind == engine.MediaDirect) && mode != engine.MediaModeBrowser {
 		sb.WriteString("<i>The media is downloaded before playback; file is freed when the session ends or switches.</i>\n")
 	}
+	if guestName != "" {
+		sb.WriteString(fmt.Sprintf("\n👤 Joining as: <b>%s</b>\n", esc(truncate(guestName, 60))))
+	}
 	if hasGoogleAccount {
 		sb.WriteString("\n👤 Profile: <b>Google Account</b> ✅\n")
 		sb.WriteString("The bot will open Chromium, join with your Google profile, share a tab and play the media.")
@@ -578,7 +588,9 @@ func confirmText(meetLink, mediaLink string, kind engine.MediaKind, userAudioLan
 	return sb.String()
 }
 
-// confirmKB offers launch/cancel for a pending stream.
+// confirmKB offers launch, per-field editing and cancel for a pending
+// stream. The two edit buttons preserve the validated value of the other
+// field; "Change links" stays as the full-restart escape hatch.
 func confirmKB(userAudioLang, userMediaMode string, hasGoogleAccount bool) *tgbotapi.InlineKeyboardMarkup {
 	norm := engine.NormalizeAudioLang(userAudioLang)
 	mode := engine.NormalizePlaybackMode(userMediaMode)
@@ -587,15 +599,18 @@ func confirmKB(userAudioLang, userMediaMode string, hasGoogleAccount bool) *tgbo
 		profileLabel = "👤 Profile: Google ✅"
 	}
 	return &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{
-		{tgbotapi.NewInlineKeyboardButtonData("🚀 Launch", cbLaunch)},
+		{tgbotapi.NewInlineKeyboardButtonData("🚀 Confirm &amp; Start", cbLaunch)},
 		{
-			tgbotapi.NewInlineKeyboardButtonData("🎵 Audio: "+engine.AudioLangDisplayName(norm), cbAudioLang),
+			tgbotapi.NewInlineKeyboardButtonData("✏️ Edit Meet", cbEditMeet),
+			tgbotapi.NewInlineKeyboardButtonData("✏️ Edit Media", cbEditMedia),
 		},
 		{
+			tgbotapi.NewInlineKeyboardButtonData("🎵 Audio: "+engine.AudioLangDisplayName(norm), cbAudioLang),
 			tgbotapi.NewInlineKeyboardButtonData(engine.PlaybackModeEmoji(mode)+" Mode: "+engine.PlaybackModeDisplay(mode), cbMediaMode),
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData(profileLabel, cbAccount),
+			tgbotapi.NewInlineKeyboardButtonData("⚙️ Settings", cbSettings),
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData("✏️ Change links", cbAgain),
@@ -879,6 +894,79 @@ func queueRemoveMenuKB(id string, items []engine.QueueItem, curIdx int) *tgbotap
 		tgbotapi.NewInlineKeyboardButtonData("⬅️ Back to Queue", "act:"+id+":queue"),
 	})
 	return &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// speedMenuText renders the playback-speed picker for a live session.
+func speedMenuText(st engine.Status) string {
+	var sb strings.Builder
+	sb.WriteString("⚡️ <b>Playback speed</b>\n\n")
+	sb.WriteString(fmt.Sprintf("Session <code>%s</code>\n", esc(string(st.ID))))
+	if st.Rate > 0 {
+		sb.WriteString(fmt.Sprintf("Current: <b>%.2gx</b>\n\n", st.Rate))
+	}
+	sb.WriteString("The speed applies immediately to the shared player.")
+	return sb.String()
+}
+
+// speedMenuKB renders the speed presets. The active preset is marked.
+func speedMenuKB(st engine.Status) *tgbotapi.InlineKeyboardMarkup {
+	id := string(st.ID)
+	presets := []float64{0.5, 0.75, 1, 1.25, 1.5, 2}
+	var rows [][]tgbotapi.InlineKeyboardButton
+	row := make([]tgbotapi.InlineKeyboardButton, 0, 3)
+	for _, p := range presets {
+		label := fmt.Sprintf("%.2gx", p)
+		if p == 1 {
+			label = "1x"
+		}
+		if st.Rate >= p-0.01 && st.Rate <= p+0.01 {
+			label = "✅ " + label
+		}
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("act:%s:rate:%d", id, int(p*100))))
+		if len(row) == 3 {
+			rows = append(rows, row)
+			row = make([]tgbotapi.InlineKeyboardButton, 0, 3)
+		}
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+	rows = append(rows, []tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardButtonData("⬅️ Session controls", "ses:"+id),
+		tgbotapi.NewInlineKeyboardButtonData("🏠 Dashboard", cbHome),
+	})
+	return &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// stopConfirmText asks before tearing a session down.
+func stopConfirmText(st engine.Status) string {
+	var sb strings.Builder
+	sb.WriteString("⚠️ <b>Stop this session?</b>\n\n")
+	title := st.Title
+	if title == "" {
+		title = st.MediaURL
+	}
+	sb.WriteString(fmt.Sprintf("%s <code>%s</code>", stateEmoji(st.State), esc(string(st.ID))))
+	if title != "" {
+		sb.WriteString(" · " + esc(truncate(title, 48)))
+	}
+	sb.WriteString("\n\nThe bot leaves the meeting, stops the stream and releases the browser. This cannot be undone.")
+	return sb.String()
+}
+
+// stopConfirmKB is the destructive-action confirmation. The confirm button
+// carries the same session id, and stop_ok re-checks the session is still
+// alive, so a stale confirm can never stop a different session.
+func stopConfirmKB(id string) *tgbotapi.InlineKeyboardMarkup {
+	return &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{
+		{
+			tgbotapi.NewInlineKeyboardButtonData("⏹ Stop session", "act:"+id+":stop_ok"),
+			tgbotapi.NewInlineKeyboardButtonData("❌ Keep running", "act:"+id+":refresh"),
+		},
+		{
+			tgbotapi.NewInlineKeyboardButtonData("🏠 Dashboard", cbHome),
+		},
+	}}
 }
 
 // queueClearConfirmKB confirms clearing upcoming items or all other items.

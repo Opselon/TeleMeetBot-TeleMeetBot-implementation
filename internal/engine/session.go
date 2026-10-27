@@ -1504,6 +1504,19 @@ func (s *Session) SetSwitchRunForTesting(fn func(target MediaTarget, stale func(
 // seams outside the engine package can express the mediaRun signature.
 type MediaStatus = mediaStatus
 
+// SetStopForTesting gives a directly-constructed session (bot tests build
+// sessions without Manager.Start) a working Stop/Done pair: cancelling the
+// context closes the done channel exactly like the real run loop's cleanup.
+func (s *Session) SetStopForTesting() {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	s.ctx, s.cancel, s.done = ctx, cancel, done
+	go func() {
+		<-ctx.Done()
+		close(done)
+	}()
+}
+
 // SetMediaRunForTesting overrides the media-action runner (seek, pause,
 // volume…) for deterministic tests, mirroring SetSwitchRunForTesting.
 func (s *Session) SetMediaRunForTesting(fn func(action string, arg float64) (MediaStatus, error)) {

@@ -45,6 +45,8 @@ const (
 	// Admin-console text steps: adding an admin id and composing a broadcast.
 	stepAdminAdd
 	stepAdminBroadcast
+	// stepGuestName waits for the Meet display-name override text.
+	stepGuestName
 )
 
 // flowTimeout drops half-finished wizards after inactivity.
@@ -66,6 +68,10 @@ type flow struct {
 	// (f.media holds its loopback URL). It is empty for typed links: only an
 	// ingested file carries a lease that must be handed to the session.
 	mediaID string
+	// mediaKind is the classified media kind of f.media ("" until known).
+	// It rides along in the persisted draft so a resumed wizard can render
+	// the review card without re-probing the link.
+	mediaKind string
 	// queue holds any additional media URLs to populate the playlist.
 	queue   []string
 	updated time.Time
@@ -88,19 +94,25 @@ func (b *Bot) getFlow(userID int64) *flow {
 	return b.flows[userID]
 }
 
-// setFlow stores the user's wizard state.
+// setFlow stores the user's wizard state and mirrors creation workflows
+// into the durable draft, so a restart can resume the wizard.
 func (b *Bot) setFlow(userID int64, f *flow) {
 	f.updated = time.Now()
 	b.mu.Lock()
 	b.flows[userID] = f
 	b.mu.Unlock()
+	b.persistDraft(userID, f)
 }
 
-// clearFlow drops the wizard state.
+// clearFlow drops the wizard state and its persisted draft, if it was one.
 func (b *Bot) clearFlow(userID int64) {
 	b.mu.Lock()
+	f := b.flows[userID]
 	delete(b.flows, userID)
 	b.mu.Unlock()
+	if _, isCreation := workflowStateOf(f); isCreation {
+		b.dropDraft(userID)
+	}
 }
 
 // expireFlows removes stale wizards.
@@ -150,7 +162,7 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 		switch m.Command() {
 		case "start":
 			b.clearFlow(userID)
-			b.sendMain(chatID)
+			b.sendMain(chatID, userID)
 		case "new", "stream":
 			b.startFlow(chatID, userID, m.CommandArguments())
 		case "sessions":
@@ -177,6 +189,12 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 		case "cancel":
 			b.clearFlow(userID)
 			b.sendText(chatID, "✖️ Cancelled. Nothing pending.", mainMenuKB())
+		case "home":
+			// Navigation only: an active session keeps running.
+			b.clearFlow(userID)
+			b.sendMain(chatID, userID)
+		case "back":
+			b.backFromWorkflow(chatID, userID)
 		case "stop":
 			b.stopCommand(chatID, m.CommandArguments())
 		case "id":
@@ -242,7 +260,11 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 	if b.tryMeetingsInput(chatID, userID, f, text) {
 		return
 	}
-	// Playlist and admin-console text steps consume their own messages.
+	// Settings, playlist and admin-console text steps consume their own
+	// messages.
+	if b.trySettingsInput(chatID, userID, f, text) {
+		return
+	}
 	if b.tryPlaylistInput(chatID, userID, f, text) {
 		return
 	}
@@ -290,7 +312,9 @@ func (b *Bot) stepInput(chatID, userID int64, f *flow, text string) {
 					}
 				}
 			}
-			b.sendText(chatID, confirmText(f.meet, f.media, kind, userLang, b.st.GetUserMediaMode(userID), b.hasGoogleAccount(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID), b.hasGoogleAccount(userID)))
+			f.mediaKind = string(kind)
+			guestName, _ := b.effectiveGuestName(userID)
+			b.sendText(chatID, confirmText(f.meet, f.media, kind, userLang, b.st.GetUserMediaMode(userID), guestName, b.hasGoogleAccount(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID), b.hasGoogleAccount(userID)))
 			return
 		}
 		f.step = stepMedia
@@ -333,10 +357,12 @@ func (b *Bot) applyWizardMedia(chatID, userID int64, f *flow, target engine.Medi
 		b.handoffPending(userID, f.mediaID)
 	}
 	f.media = target.URL
+	f.mediaKind = string(target.Kind)
 	f.step = stepNone
 	b.setFlow(userID, f)
 	userLang := b.st.GetUserAudioLang(userID)
-	b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang, b.st.GetUserMediaMode(userID), b.hasGoogleAccount(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID), b.hasGoogleAccount(userID)))
+	guestName, _ := b.effectiveGuestName(userID)
+	b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang, b.st.GetUserMediaMode(userID), guestName, b.hasGoogleAccount(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID), b.hasGoogleAccount(userID)))
 }
 
 // applyQueueAdd consumes the queue-add flow: every link in the message is
@@ -437,6 +463,17 @@ func (b *Bot) startFlow(chatID, userID int64, args string) {
 	}
 	fields := strings.Fields(args)
 	if len(fields) == 0 {
+		// A draft that survived a restart wins: resume it where it stopped
+		// instead of making the user retype everything. An in-memory wizard
+		// is already live, so it takes precedence.
+		if b.getFlow(userID) == nil {
+			if draft, ok := b.restoreDraft(userID); ok {
+				b.setFlow(userID, draft)
+				b.sendText(chatID, "📝 <b>Draft restored</b> — continue where you left off:", b.workflowScreenKB(userID, draft))
+				b.sendText(chatID, b.workflowScreenText(userID, draft), nil)
+				return
+			}
+		}
 		// Plain /new lands on the saved-meetings picker: saved links first,
 		// then New Google Meet, then Cancel.
 		b.startMeetPicker(chatID, userID)
@@ -461,10 +498,12 @@ func (b *Bot) startFlow(chatID, userID int64, args string) {
 			return
 		}
 		f.media = target.URL
+		f.mediaKind = string(target.Kind)
 		f.step = stepNone
 		b.setFlow(userID, f)
 		userLang := b.st.GetUserAudioLang(userID)
-		b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang, b.st.GetUserMediaMode(userID), b.hasGoogleAccount(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID), b.hasGoogleAccount(userID)))
+		guestName, _ := b.effectiveGuestName(userID)
+		b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang, b.st.GetUserMediaMode(userID), guestName, b.hasGoogleAccount(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID), b.hasGoogleAccount(userID)))
 		return
 	}
 	b.setFlow(userID, f)
@@ -485,6 +524,22 @@ func (b *Bot) startRequestFor(userID int64, meetURL string, req engine.StartRequ
 	autoplay := u.Autoplay
 	req.AutoPlay = &autoplay
 	return req
+}
+
+// effectiveGuestName resolves the Meet display name for a user. Precedence:
+// the user's explicit setting wins, then the verified Google identity, then
+// the server default (empty string, which startRequestFor's callers leave to
+// the engine config). The second return names the source for the review card.
+func (b *Bot) effectiveGuestName(userID int64) (string, string) {
+	if u := b.userSettings(userID); strings.TrimSpace(u.GuestName) != "" {
+		return u.GuestName, "your settings"
+	}
+	if b.gauth != nil {
+		if sum := b.gauth.Summary(userID); sum.Connected && sum.Name != "" {
+			return sum.Name, "verified Google account"
+		}
+	}
+	return "", "server default"
 }
 
 // launch starts the engine for the pending wizard.
@@ -515,6 +570,10 @@ func (b *Bot) launch(chatID, userID int64) {
 			}
 			b.log.Infof("[PIPELINE:googleauth] launching session with verified Google identity: %s for user=%d", req.GuestName, userID)
 		}
+	}
+	if guestName, source := b.effectiveGuestName(userID); guestName != "" {
+		req.GuestName = guestName
+		b.log.Infof("[PIPELINE:workflow] guest name from %s for user=%d", source, userID)
 	}
 	sess, err := b.eng.Start(context.Background(), req)
 	if err != nil {
@@ -569,7 +628,7 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 	case data == cbHome || data == cbRefresh:
 		b.log.Infof("[PIPELINE:bot] action: home/refresh from user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "dashboard")
-		_ = b.api.Edit(chatID, msgID, b.mainText(), mainMenuKB())
+		_ = b.api.Edit(chatID, msgID, b.mainText(userID), mainMenuKB())
 	case data == cbNew:
 		b.log.Infof("[PIPELINE:bot] action: new stream wizard started by user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "new stream")
@@ -638,6 +697,9 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 		b.st.SetUserAudioLang(userID, norm)
 		_ = b.api.AnswerCallback(q.ID, "Saved: "+engine.AudioLangDisplayName(norm))
 		_ = b.api.Edit(chatID, msgID, audioLangText(norm), audioLangKB(norm))
+	case data == cbEditMeet || data == cbEditMedia || data == cbResumeDraft:
+		b.log.Infof("[PIPELINE:workflow] callback %q by user=%d chat=%d", data, userID, chatID)
+		b.handleWorkflowCallback(chatID, userID, msgID, q, data)
 	case data == cbLaunch:
 		b.log.Infof("[PIPELINE:bot] action: launch session confirmed by user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "launching…")
@@ -757,6 +819,41 @@ func (b *Bot) handleAction(chatID int64, msgID int, q *tgbotapi.CallbackQuery, d
 	// It must come before the generic actions below so the flow setup never
 	// races with a media-control call.
 	st := s.Snapshot()
+	if action == "stop_confirm" {
+		_ = b.api.AnswerCallback(q.ID, "confirm to stop")
+		_ = b.api.Edit(chatID, msgID, stopConfirmText(st), stopConfirmKB(string(id)))
+		return
+	}
+	if action == "stop_ok" {
+		// The confirm button re-looks the session up by id; a session that
+		// ended between the two presses is answered honestly instead of
+		// tearing anything else down.
+		_ = b.api.AnswerCallback(q.ID, "stopping")
+		s.Stop()
+		_ = b.api.Edit(chatID, msgID, "⏹ Session "+string(id)+" is stopping.", mainMenuKB())
+		return
+	}
+	if action == "speed" {
+		_ = b.api.AnswerCallback(q.ID, "")
+		_ = b.api.Edit(chatID, msgID, speedMenuText(st), speedMenuKB(st))
+		return
+	}
+	if strings.HasPrefix(action, "rate:") {
+		var centis int
+		if _, err := fmt.Sscanf(strings.TrimPrefix(action, "rate:"), "%d", &centis); err != nil || centis < 25 || centis > 400 {
+			_ = b.api.AnswerCallback(q.ID, "invalid speed")
+			return
+		}
+		if rerr := s.SetRate(float64(centis) / 100); rerr != nil {
+			_ = b.api.AnswerCallback(q.ID, "speed failed: "+truncate(rerr.Error(), 60))
+		} else {
+			_ = b.api.AnswerCallback(q.ID, fmt.Sprintf("speed %.2gx", float64(centis)/100))
+		}
+		st = s.Snapshot()
+		_ = b.api.Edit(chatID, msgID, sessionCardText(st), sessionCardKB(st))
+		b.bindCard(chatID, msgID, s, st)
+		return
+	}
 	if action == "switchurl" {
 		userID := q.From.ID
 		b.setFlow(userID, &flow{step: stepSwitchMedia, sessionID: string(id), meet: st.MeetURL, media: st.MediaURL})
@@ -914,9 +1011,14 @@ func (b *Bot) statuses() []engine.Status {
 	return out
 }
 
-// mainText renders the landing dashboard text.
-func (b *Bot) mainText() string {
-	return mainMenuText(b.api.BotUsername(), len(b.eng.Active()), b.cfg.Limits.MaxSessions, health.FormatUptime(time.Since(b.started)))
+// mainText renders the landing dashboard text, advertising a resumable
+// creation draft when one survived a restart for this user.
+func (b *Bot) mainText(userID int64) string {
+	text := mainMenuText(b.api.BotUsername(), len(b.eng.Active()), b.cfg.Limits.MaxSessions, health.FormatUptime(time.Since(b.started)))
+	if b.hasFreshDraft(userID) {
+		text += resumeDraftNotice()
+	}
+	return text
 }
 
 // healthText renders the health card.
@@ -928,8 +1030,8 @@ func (b *Bot) healthText() string {
 }
 
 // sendMain sends the dashboard as a new message.
-func (b *Bot) sendMain(chatID int64) {
-	msgID, err := b.api.Send(chatID, b.mainText(), mainMenuKB())
+func (b *Bot) sendMain(chatID, userID int64) {
+	msgID, err := b.api.Send(chatID, b.mainText(userID), mainMenuKB())
 	if err == nil {
 		b.mu.Lock()
 		b.menus[chatID] = msgID

@@ -33,6 +33,10 @@ type Settings interface {
 	SetSpeed(ctx context.Context, userID int64, speed float64) (store.UserSettings, error)
 	SetAutoplay(ctx context.Context, userID int64, on bool) (store.UserSettings, error)
 	SetRepeatMode(ctx context.Context, userID int64, mode string) (store.UserSettings, error)
+	SetGuestName(ctx context.Context, userID int64, name string) (store.UserSettings, error)
+	SaveWorkflowDraft(ctx context.Context, snap store.WorkflowDraft) error
+	LoadWorkflowDraft(ctx context.Context, userID int64, maxAge time.Duration) (store.WorkflowDraft, bool, error)
+	DeleteWorkflowDraft(ctx context.Context, userID int64) error
 	ResetUser(ctx context.Context, userID int64) (bool, error)
 	ResetAllPreferences(ctx context.Context) (int, error)
 	Preferences(ctx context.Context) (map[int64]store.UserSettings, error)
@@ -112,6 +116,11 @@ func settingsScreenText(u store.UserSettings) string {
 		sb.WriteString("▶️ Auto-advance: <b>off</b> — playback stops at the end of each item\n")
 	}
 	sb.WriteString(fmt.Sprintf("🔁 Repeat: <b>%s</b>\n", esc(repeatDisplay(u.RepeatMode))))
+	if strings.TrimSpace(u.GuestName) != "" {
+		sb.WriteString(fmt.Sprintf("👤 Guest name: <b>%s</b>\n", esc(truncate(u.GuestName, 60))))
+	} else {
+		sb.WriteString("👤 Guest name: <i>auto</i> (verified Google identity or server default)\n")
+	}
 	sb.WriteString("\n<i>Pick a row below to change it. Changes survive bot restarts.</i>")
 	return sb.String()
 }
@@ -135,6 +144,10 @@ func userSettingsKB(u store.UserSettings) *tgbotapi.InlineKeyboardMarkup {
 	if !u.Autoplay {
 		autoplayLabel = "▶️ Auto-advance: off ⬜️"
 	}
+	guestLabel := "👤 Guest name: auto"
+	if strings.TrimSpace(u.GuestName) != "" {
+		guestLabel = "👤 Guest name: " + truncate(u.GuestName, 24)
+	}
 	return &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{
 		{
 			tgbotapi.NewInlineKeyboardButtonData("🎵 Audio language", cbAudioLang),
@@ -147,6 +160,9 @@ func userSettingsKB(u store.UserSettings) *tgbotapi.InlineKeyboardMarkup {
 		{
 			tgbotapi.NewInlineKeyboardButtonData(autoplayLabel, "set:autoplay"),
 			tgbotapi.NewInlineKeyboardButtonData("🔁 Repeat: "+repeatDisplay(u.RepeatMode), "set:repeat"),
+		},
+		{
+			tgbotapi.NewInlineKeyboardButtonData(guestLabel, "set:guestname"),
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData("♻️ Reset to defaults", "set:reset"),
@@ -212,6 +228,18 @@ func (b *Bot) handleSettingsCallback(chatID, userID int64, msgID int, q *tgbotap
 		if toast == "" {
 			toast = "repeat: " + repeatDisplay(next)
 		}
+	case "guestname":
+		_ = b.api.AnswerCallback(q.ID, "send the new name")
+		b.setFlow(userID, &flow{step: stepGuestName, parent: "settings"})
+		var text strings.Builder
+		text.WriteString("👤 <b>Guest display name</b>\n\n")
+		if current := strings.TrimSpace(b.userSettings(userID).GuestName); current != "" {
+			text.WriteString(fmt.Sprintf("Current: <b>%s</b>\n", esc(truncate(current, 60))))
+		} else {
+			text.WriteString("Current: <i>auto</i> — the bot uses your verified Google identity or the server default.\n")
+		}
+		text.WriteString("\nSend the name to display in the meeting (max 60 characters), or <code>-</code> to clear it.")
+		_ = b.api.Edit(chatID, msgID, text.String(), playlistCancelKB())
 	case "volume", "speed":
 		// Numeric pickers have their own screens; the row button just opens them.
 		_ = b.api.AnswerCallback(q.ID, "")
@@ -284,6 +312,36 @@ func boolWord(b bool) string {
 		return "on"
 	}
 	return "off"
+}
+
+// trySettingsInput consumes the settings screen's text steps (guest name).
+func (b *Bot) trySettingsInput(chatID, userID int64, f *flow, text string) bool {
+	if f.step != stepGuestName {
+		return false
+	}
+	raw := strings.TrimSpace(text)
+	if raw == "-" {
+		raw = ""
+	}
+	sanitized, err := store.SanitizeGuestName(raw)
+	if err != nil {
+		b.sendText(chatID, "❌ "+esc(err.Error())+"\n\nSend another name, or <code>-</code> to clear it.", playlistCancelKB())
+		return true
+	}
+	if _, applyErr := b.applyUserSetting(userID, func(ctx context.Context) (store.UserSettings, error) {
+		return b.set.SetGuestName(ctx, userID, sanitized)
+	}); applyErr != "" {
+		b.sendText(chatID, "❌ Could not save the guest name: "+esc(applyErr), playlistCancelKB())
+		return true
+	}
+	b.clearFlow(userID)
+	if sanitized == "" {
+		b.sendText(chatID, "✅ Guest name cleared — the auto identity applies again.", nil)
+	} else {
+		b.sendText(chatID, "✅ Guest name saved: <b>"+esc(truncate(sanitized, 60))+"</b>", nil)
+	}
+	b.showUserSettings(chatID, 0, userID)
+	return true
 }
 
 // volumeChoices are the start-volume presets. 0 means "server default".
