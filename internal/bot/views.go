@@ -254,7 +254,8 @@ func sessionCardText(st engine.Status) string {
 		}
 		sb.WriteString(fmt.Sprintf("📋 Playlist: <b>%d / %d</b>\n", pos, st.QueueLength))
 	}
-	sb.WriteString(fmt.Sprintf("⏳ Elapsed: %s", health.FormatUptime(st.Elapsed())))
+	sb.WriteString(fmt.Sprintf("⏳ Elapsed: %s\n", health.FormatUptime(st.Elapsed())))
+	sb.WriteString(health.FormatServerResources())
 	if st.Error != "" {
 		sb.WriteString("\n\n🔴 <b>Error:</b> " + esc(truncate(st.Error, 300)))
 	}
