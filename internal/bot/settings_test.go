@@ -446,7 +446,7 @@ func TestEveryRenderedCallbackRoutes(t *testing.T) {
 		cancelKB(),
 		sessionCardKB(st),
 		sessionsKB([]engine.Status{st}),
-		confirmKB("fa", "browser", false),
+		confirmKB("fa", "browser", "auto", false),
 		enqueuedKB(string(s.ID), "item-2"),
 		queueViewKB(st, items, curIdx, 0),
 		queueRemoveMenuKB(string(s.ID), items, curIdx),

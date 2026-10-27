@@ -100,7 +100,7 @@ const COMMAND_DOCS = {
 };
 const flowsGo = read('internal/bot/flows.go');
 const INLINE_ACTIONS = new Set([
-  'pause', 'resume', 'mute', 'unmute', 'voldown', 'volup', 'back10', 'fwd10', 'back30', 'fwd30', 'back60', 'fwd60', 'restart', 'refresh', 'stop', 'stop_confirm', 'stop_ok', 'speed', 'rate', 'next', 'prev', 'queue', 'jump', 'page', 'repeat', 'shuftoggle', 'add', 'addnext', 'load', 'loadpl', 'loadok', 'clear_confirm', 'do_clear', 'do_clear_all', 'rm_menu', 'rm', 'tools',
+  'pause', 'resume', 'mute', 'unmute', 'voldown', 'volup', 'back10', 'fwd10', 'back30', 'fwd30', 'back60', 'fwd60', 'restart', 'refresh', 'stop', 'stop_confirm', 'stop_ok', 'speed', 'rate', 'quality', 'qset', 'qinfo', 'qformats', 'qapply', 'qmode', 'qfmt', 'itemq', 'itemqset', 'itemqopen', 'next', 'prev', 'queue', 'jump', 'page', 'repeat', 'shuftoggle', 'add', 'addnext', 'load', 'loadpl', 'loadok', 'clear_confirm', 'do_clear', 'do_clear_all', 'rm_menu', 'rm', 'tools',
 ]);
 const commands = [];
 for (const m of flowsGo.matchAll(/case\s+("[a-z0-9]+"(?:\s*,\s*"[a-z0-9]+")*):/g)) {

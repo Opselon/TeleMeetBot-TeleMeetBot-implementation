@@ -26,6 +26,8 @@ type QueueItem struct {
 	Kind     MediaKind `json:"kind"`
 	Duration float64   `json:"duration,omitempty"`
 	AddedAt  time.Time `json:"added_at"`
+	// Quality is the per-item quality override ("" = session policy).
+	Quality string `json:"quality,omitempty"`
 }
 
 // queueOwner returns the lease owner tag for items pinned in this session's queue.
@@ -46,6 +48,12 @@ func (s *Session) InitQueue(initialURL string, extraQueue []string) {
 	s.nextQueueID = 1
 	if s.repeatMode == "" {
 		s.repeatMode = RepeatOff
+	}
+	if s.defaultQuality == "" {
+		s.defaultQuality = QualityAuto
+	}
+	if s.qualityPolicy == "" {
+		s.qualityPolicy = QualityAuto
 	}
 	s.autoAdvance = true
 
@@ -213,6 +221,7 @@ func (s *Session) Next() error {
 	target := s.queue[s.queueIdx]
 	curIdx := s.queueIdx
 	total := len(s.queue)
+	s.applyItemQualityLocked(target)
 	s.queueMu.Unlock()
 
 	s.logger().Infof("[PIPELINE:queue] session %s: advancing to next item %d/%d (%s)", s.ID, curIdx+1, total, target.Title)
@@ -249,6 +258,7 @@ func (s *Session) Previous() error {
 	target := s.queue[s.queueIdx]
 	curIdx := s.queueIdx
 	total := len(s.queue)
+	s.applyItemQualityLocked(target)
 	s.queueMu.Unlock()
 
 	s.logger().Infof("[PIPELINE:queue] session %s: returning to previous item %d/%d (%s)", s.ID, curIdx+1, total, target.Title)
@@ -281,6 +291,7 @@ func (s *Session) JumpTo(idx int) error {
 	target := s.queue[idx]
 	curIdx := s.queueIdx
 	total := len(s.queue)
+	s.applyItemQualityLocked(target)
 	s.queueMu.Unlock()
 
 	s.logger().Infof("[PIPELINE:queue] session %s: jumping to item %d/%d (%s)", s.ID, curIdx+1, total, target.Title)

@@ -314,7 +314,7 @@ func (b *Bot) stepInput(chatID, userID int64, f *flow, text string) {
 			}
 			f.mediaKind = string(kind)
 			guestName, _ := b.effectiveGuestName(userID)
-			b.sendText(chatID, confirmText(f.meet, f.media, kind, userLang, b.st.GetUserMediaMode(userID), guestName, b.hasGoogleAccount(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID), b.hasGoogleAccount(userID)))
+			b.sendText(chatID, confirmText(f.meet, f.media, kind, userLang, b.st.GetUserMediaMode(userID), b.userSettings(userID).QualityPolicy, guestName, b.hasGoogleAccount(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID), b.userSettings(userID).QualityPolicy, b.hasGoogleAccount(userID)))
 			return
 		}
 		f.step = stepMedia
@@ -362,7 +362,7 @@ func (b *Bot) applyWizardMedia(chatID, userID int64, f *flow, target engine.Medi
 	b.setFlow(userID, f)
 	userLang := b.st.GetUserAudioLang(userID)
 	guestName, _ := b.effectiveGuestName(userID)
-	b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang, b.st.GetUserMediaMode(userID), guestName, b.hasGoogleAccount(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID), b.hasGoogleAccount(userID)))
+	b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang, b.st.GetUserMediaMode(userID), b.userSettings(userID).QualityPolicy, guestName, b.hasGoogleAccount(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID), b.userSettings(userID).QualityPolicy, b.hasGoogleAccount(userID)))
 }
 
 // applyQueueAdd consumes the queue-add flow: every link in the message is
@@ -503,7 +503,7 @@ func (b *Bot) startFlow(chatID, userID int64, args string) {
 		b.setFlow(userID, f)
 		userLang := b.st.GetUserAudioLang(userID)
 		guestName, _ := b.effectiveGuestName(userID)
-		b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang, b.st.GetUserMediaMode(userID), guestName, b.hasGoogleAccount(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID), b.hasGoogleAccount(userID)))
+		b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang, b.st.GetUserMediaMode(userID), b.userSettings(userID).QualityPolicy, guestName, b.hasGoogleAccount(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID), b.userSettings(userID).QualityPolicy, b.hasGoogleAccount(userID)))
 		return
 	}
 	b.setFlow(userID, f)
@@ -520,6 +520,7 @@ func (b *Bot) startRequestFor(userID int64, meetURL string, req engine.StartRequ
 	req.Volume = u.Volume
 	req.Speed = u.Speed
 	req.RepeatMode = u.RepeatMode
+	req.Quality = u.QualityPolicy
 	req.Shuffle = false // no per-user shuffle default yet; toggle lives on the session
 	autoplay := u.Autoplay
 	req.AutoPlay = &autoplay
@@ -819,6 +820,15 @@ func (b *Bot) handleAction(chatID int64, msgID int, q *tgbotapi.CallbackQuery, d
 	// It must come before the generic actions below so the flow setup never
 	// races with a media-control call.
 	st := s.Snapshot()
+	switch action {
+	case "quality", "qinfo", "qformats", "qapply", "qmode":
+		b.handleQualityCallback(chatID, q.From.ID, msgID, q, data)
+		return
+	}
+	if strings.HasPrefix(action, "qset:") || strings.HasPrefix(action, "qfmt:") {
+		b.handleQualityCallback(chatID, q.From.ID, msgID, q, data)
+		return
+	}
 	if action == "stop_confirm" {
 		_ = b.api.AnswerCallback(q.ID, "confirm to stop")
 		_ = b.api.Edit(chatID, msgID, stopConfirmText(st), stopConfirmKB(string(id)))
@@ -1387,6 +1397,10 @@ func (b *Bot) handleQueueCallback(chatID, userID int64, msgID int, q *tgbotapi.C
 		b.persistQueue(s)
 		b.renderQueue(chatID, msgID, s, -1)
 
+	case "itemq", "itemqset":
+		b.handleQueueItemQualityMenu(chatID, userID, msgID, q, data)
+	case "itemqopen":
+		b.handleQueueItemQualityOpen(chatID, userID, msgID, q, data)
 	default:
 		_ = b.api.AnswerCallback(q.ID, "unknown queue action")
 	}

@@ -3,6 +3,7 @@ package media
 import (
 	"context"
 	"errors"
+	"net"
 	"os/exec"
 	"strings"
 	"testing"
@@ -20,6 +21,11 @@ func newYtdlpTestManager(t *testing.T, opts Options, fn func(context.Context, []
 	m, err := NewManager(opts, &testLog{t: t})
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
+	}
+	// Same DNS pin as testManager: public hosts must resolve to a public
+	// address regardless of the network the suite runs on.
+	m.lookupFn = func(host string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("93.184.216.34")}, nil
 	}
 	t.Cleanup(func() { m.Close() })
 	m.opts.YTDLPPath = "yt-dlp-probe"
@@ -80,8 +86,7 @@ func TestYTDLPOmitsProxyWhenUnset(t *testing.T) {
 // Defect 2: modern uploads are DASH-only, so a selector that needs one stream
 // carrying both codecs fails with "Requested format is not available".
 func TestFormatSelectorMergesDASHStreams(t *testing.T) {
-	m := &Manager{opts: DefaultOptions(t.TempDir())}
-	sel := m.formatSelector()
+	sel := FormatSelectorFor(QualityAuto, true)
 	if !strings.Contains(sel, "bv*") {
 		t.Fatalf("selector cannot pick a video-only stream: %q", sel)
 	}
@@ -184,19 +189,29 @@ func TestYTDLPSizeLimitUsesMaxFilesize(t *testing.T) {
 
 // The merge rung must stay cheap enough for a 2-vCPU host.
 func TestFormatSelectorCapsResolution(t *testing.T) {
-	m := &Manager{opts: DefaultOptions(t.TempDir())}
-	if sel := m.formatSelector(); !strings.Contains(sel, "height<=720") {
-		t.Fatalf("selector does not cap resolution: %q", sel)
+	if sel := FormatSelectorFor(QualityAuto, true); !strings.Contains(sel, "height<=720") {
+		t.Fatalf("auto selector does not cap resolution: %q", sel)
+	}
+	if sel := FormatSelectorFor(QualityBalanced, true); !strings.Contains(sel, "height<=720") {
+		t.Fatalf("balanced selector does not cap resolution: %q", sel)
 	}
 }
 
 // Format selector must provide an ultimate fallback rung so yt-dlp never dies
 // with "Requested format is not available" when only single-stream or unusual formats exist.
 func TestFormatSelectorHasFallback(t *testing.T) {
-	m := &Manager{opts: DefaultOptions(t.TempDir())}
-	sel := m.formatSelector()
+	sel := FormatSelectorFor(QualityAuto, true)
 	if !strings.HasSuffix(sel, "bv*/ba/b*") {
 		t.Fatalf("selector missing final single-stream fallback rung: %q", sel)
+	}
+	// Without ffmpeg the ladder must degrade to progressive-only formats:
+	// requesting a merge yt-dlp cannot perform would just fail the download.
+	saver := FormatSelectorFor(QualitySaver, false)
+	if strings.Contains(saver, "+ba") {
+		t.Fatalf("ffmpeg-less ladder must not request merges: %q", saver)
+	}
+	if !strings.Contains(saver, "b[acodec!=none]") {
+		t.Fatalf("ffmpeg-less ladder lost the progressive fallback: %q", saver)
 	}
 }
 
