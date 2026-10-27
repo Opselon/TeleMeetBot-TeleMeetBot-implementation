@@ -2,7 +2,9 @@ package bot
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,6 +24,10 @@ const (
 	// stepSwitchMedia waits for a replacement media link for a live session;
 	// unlike the wizard it never changes the Meet link or creates a session.
 	stepSwitchMedia
+	// stepQueueAdd appends links to a live session's queue.
+	stepQueueAdd
+	// stepQueueAddNext inserts links right after the playing item.
+	stepQueueAddNext
 	// stepMeetPick is the /new landing screen: saved meetings, new Meet, cancel.
 	stepMeetPick
 	// stepMeetRename waits for the text message that renames a saved meeting.
@@ -154,14 +160,14 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 		case "manage", "admin", "dashboard":
 			b.sendManageHome(chatID, userID)
 		case "queue":
-			b.queueCommand(chatID, m.CommandArguments())
+			b.queueCommand(chatID, userID, m.CommandArguments())
 		case "audiotrack", "audiolang", "lang", "language":
 			lang := b.st.GetUserAudioLang(userID)
 			b.sendText(chatID, audioLangText(lang), audioLangKB(lang))
 		case "health":
 			b.sendHealth(chatID)
-		case "settings":
-			b.sendText(chatID, settingsText(b.cfg), backKB())
+		case "settings", "prefs", "preferences":
+			b.showUserSettings(chatID, 0, userID)
 		case "account", "google", "profile":
 			b.showAccount(chatID, userID, 0)
 		case "help":
@@ -299,6 +305,8 @@ func (b *Bot) stepInput(chatID, userID int64, f *flow, text string) {
 		b.applyWizardMedia(chatID, userID, f, target)
 	case stepSwitchMedia:
 		b.applyMediaSwitch(chatID, userID, f, text)
+	case stepQueueAdd, stepQueueAddNext:
+		b.applyQueueAdd(chatID, userID, f, text)
 	default:
 		b.clearFlow(userID)
 		b.sendText(chatID, "Wizard restarted. Send a Meet link, or /cancel.", mainMenuKB())
@@ -329,6 +337,55 @@ func (b *Bot) applyWizardMedia(chatID, userID int64, f *flow, target engine.Medi
 	b.setFlow(userID, f)
 	userLang := b.st.GetUserAudioLang(userID)
 	b.sendText(chatID, confirmText(f.meet, f.media, target.Kind, userLang, b.st.GetUserMediaMode(userID), b.hasGoogleAccount(userID)), confirmKB(userLang, b.st.GetUserMediaMode(userID), b.hasGoogleAccount(userID)))
+}
+
+// applyQueueAdd consumes the queue-add flow: every link in the message is
+// validated, then appended (stepQueueAdd) or inserted after the playing item
+// (stepQueueAddNext). Nothing is enqueued when any link is invalid, so the
+// user can fix the whole batch at once.
+func (b *Bot) applyQueueAdd(chatID, userID int64, f *flow, text string) {
+	s := b.eng.Get(engine.SessionID(f.sessionID))
+	if s == nil {
+		b.clearFlow(userID)
+		b.sendText(chatID, "This session is gone — nothing to add to.", mainMenuKB())
+		return
+	}
+	urls := extractURLs(text)
+	if len(urls) == 0 {
+		b.sendText(chatID, "❌ No media links found.\n\nSend one or more http(s) links, or /cancel.", playlistCancelKB())
+		return
+	}
+	// Validate up front so a typo cannot half-fill the queue.
+	for _, u := range urls {
+		if _, err := b.classify(u); err != nil {
+			b.sendText(chatID, "❌ "+esc(err.Error())+"\n\nLink: <code>"+esc(truncate(u, 90))+"</code>\n\nFix it and send the batch again, or /cancel.", playlistCancelKB())
+			return
+		}
+	}
+	b.clearFlow(userID)
+	var (
+		added []engine.QueueItem
+		err   error
+		label string
+	)
+	if f.step == stepQueueAddNext {
+		added, err = s.EnqueueNext(urls...)
+		label = "queued to play next"
+	} else {
+		added, err = s.Enqueue(urls...)
+		label = "enqueued"
+	}
+	if err != nil {
+		b.sendText(chatID, "❌ "+esc(truncate(err.Error(), 200)), mainMenuKB())
+		return
+	}
+	b.persistQueue(s)
+	st := s.Snapshot()
+	kb := &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{
+		{tgbotapi.NewInlineKeyboardButtonData("📋 View queue", "act:"+string(s.ID)+":queue")},
+		{tgbotapi.NewInlineKeyboardButtonData("📱 Session controls", "ses:"+string(s.ID))},
+	}}
+	b.sendText(chatID, fmt.Sprintf("✅ %s %d item(s) — queue now has <b>%d</b> item(s).", esc(label), len(added), st.QueueLength), kb)
 }
 
 // applyMediaSwitch hands a validated replacement link to the engine, which
@@ -414,6 +471,22 @@ func (b *Bot) startFlow(chatID, userID int64, args string) {
 	b.sendText(chatID, flowText(f.step, f.meet), cancelKB())
 }
 
+// startRequestFor builds the engine request for a user, applying their saved
+// preferences (audio language, media mode, volume, speed, repeat, shuffle,
+// auto-advance) on top of the server defaults.
+func (b *Bot) startRequestFor(userID int64, meetURL string, req engine.StartRequest) engine.StartRequest {
+	u := b.userSettings(userID)
+	req.AudioLang = u.AudioLang
+	req.PlayMode = u.MediaMode
+	req.Volume = u.Volume
+	req.Speed = u.Speed
+	req.RepeatMode = u.RepeatMode
+	req.Shuffle = false // no per-user shuffle default yet; toggle lives on the session
+	autoplay := u.Autoplay
+	req.AutoPlay = &autoplay
+	return req
+}
+
 // launch starts the engine for the pending wizard.
 func (b *Bot) launch(chatID, userID int64) {
 	f := b.getFlow(userID)
@@ -425,13 +498,10 @@ func (b *Bot) launch(chatID, userID int64) {
 		b.sendText(chatID, fmt.Sprintf("⚠️ <b>Limit reached</b> (%d/%d). Stop a session first.", active, b.cfg.Limits.MaxSessions), sessionsKB(b.statuses()))
 		return
 	}
-	userLang := b.st.GetUserAudioLang(userID)
-	req := engine.StartRequest{
+	req := b.startRequestFor(userID, f.meet, engine.StartRequest{
 		MeetLink:  f.meet,
 		MediaLink: f.media,
-		AudioLang: userLang,
-		PlayMode:  b.st.GetUserMediaMode(userID),
-	}
+	})
 	if len(f.queue) > 0 {
 		req.Queue = f.queue
 	}
@@ -471,6 +541,8 @@ func (b *Bot) launch(chatID, userID int64) {
 	b.mu.Lock()
 	b.sessionChats[string(sess.ID)] = chatID
 	b.mu.Unlock()
+	// Persist the initial queue metadata (JSON history + SQLite).
+	b.persistQueue(sess)
 	// Remember the Meet link for the owner so /new can offer it next time.
 	// The save is best-effort: a store failure must never block a session
 	// that is already running.
@@ -520,7 +592,7 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 	case data == cbSettings:
 		b.log.Infof("[PIPELINE:bot] action: view settings by user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "")
-		_ = b.api.Edit(chatID, msgID, settingsText(b.cfg), backKB())
+		b.showUserSettings(chatID, msgID, userID)
 	case data == cbAccount:
 		b.log.Infof("[PIPELINE:bot] action: view account by user=%d chat=%d", userID, chatID)
 		_ = b.api.AnswerCallback(q.ID, "")
@@ -593,6 +665,8 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 		st := s.Snapshot()
 		_ = b.api.Edit(chatID, msgID, sessionCardText(st), sessionCardKB(st))
 		b.bindCard(chatID, msgID, s, st)
+	case strings.HasPrefix(data, "set:"):
+		b.handleSettingsCallback(chatID, userID, msgID, q, data)
 	case strings.HasPrefix(data, "pm:"):
 		b.handlePendingCallback(chatID, userID, msgID, data)
 	case strings.HasPrefix(data, "q:"):
@@ -706,6 +780,7 @@ func (b *Bot) handleAction(chatID int64, msgID int, q *tgbotapi.CallbackQuery, d
 		} else {
 			toast = "⏭ Next track"
 		}
+		b.persistQueue(s)
 		items, curIdx := s.QueueSnapshot()
 		var qRecs []store.QueueItemRecord
 		for _, it := range items {
@@ -714,11 +789,29 @@ func (b *Bot) handleAction(chatID int64, msgID int, q *tgbotapi.CallbackQuery, d
 		b.st.UpdateQueue(string(s.ID), qRecs, curIdx)
 	case "prev":
 		err = s.Previous()
-		if err != nil {
-			toast = err.Error()
-		} else {
+		switch {
+		case err == nil:
 			toast = "⏮ Previous track"
+		case errors.Is(err, engine.ErrQueueStart):
+			// Documented boundary behaviour: at the first item, Previous
+			// restarts it from the beginning (a seek, so the share never
+			// blinks) instead of failing silently.
+			rep, rerr := s.SeekTo(0)
+			switch {
+			case rerr != nil:
+				err = rerr
+				toast = "restart failed"
+			case !rep.OK:
+				err = nil
+				toast = "⏮ Already first — " + truncate(rep.Error, 60)
+			default:
+				err = nil
+				toast = "⏮ Already first — restarted item"
+			}
+		default:
+			toast = err.Error()
 		}
+		b.persistQueue(s)
 		items, curIdx := s.QueueSnapshot()
 		var qRecs []store.QueueItemRecord
 		for _, it := range items {
@@ -726,9 +819,8 @@ func (b *Bot) handleAction(chatID int64, msgID int, q *tgbotapi.CallbackQuery, d
 		}
 		b.st.UpdateQueue(string(s.ID), qRecs, curIdx)
 	case "queue":
-		items, curIdx := s.QueueSnapshot()
 		_ = b.api.AnswerCallback(q.ID, "")
-		_ = b.api.Edit(chatID, msgID, queueViewText(st, items, curIdx), queueViewKB(st, items, curIdx))
+		b.renderQueue(chatID, msgID, s, -1)
 		return
 	case "pause":
 		err, toast = s.Pause(), "paused"
@@ -891,6 +983,62 @@ func extractURLs(text string) []string {
 	return urls
 }
 
+// renderQueue shows the queue screen. page < 0 selects the page holding the
+// currently playing item.
+func (b *Bot) renderQueue(chatID int64, msgID int, s *engine.Session, page int) {
+	st := s.Snapshot()
+	items, curIdx := s.QueueSnapshot()
+	if page < 0 {
+		page = 0
+		if curIdx > 0 {
+			page = curIdx / queuePageSize
+		}
+	}
+	if total := queuePageCount(len(items)); total > 0 && page >= total {
+		page = total - 1
+	}
+	_ = b.api.Edit(chatID, msgID, queueViewText(st, items, curIdx, page), queueViewKB(st, items, curIdx, page))
+}
+
+// persistQueue mirrors a session queue into both durable stores: SQLite is
+// authoritative for restart survival, the JSON history keeps the management
+// console working during the transition.
+func (b *Bot) persistQueue(s *engine.Session) {
+	if s == nil {
+		return
+	}
+	items, curIdx := s.QueueSnapshot()
+	recs := make([]store.QueueItemRecord, 0, len(items))
+	snap := store.SessionQueueSnapshot{
+		SessionID: string(s.ID),
+		State:     store.QueueStateActive,
+		Cursor:    curIdx,
+	}
+	for _, it := range items {
+		recs = append(recs, store.QueueItemRecord{ID: it.ID, URL: it.URL, Title: it.Title})
+		snap.Items = append(snap.Items, store.QueueItemSnapshot{
+			URL:      it.URL,
+			Title:    it.Title,
+			Kind:     string(it.Kind),
+			Duration: it.Duration,
+		})
+	}
+	b.st.UpdateQueue(string(s.ID), recs, curIdx)
+	if b.set == nil {
+		return
+	}
+	owner := b.queueOwnerChat(s.ID)
+	if owner == 0 {
+		return
+	}
+	snap.OwnerID = owner
+	ctx, cancel := context.WithTimeout(context.Background(), settingsOpTimeout)
+	defer cancel()
+	if err := b.set.SaveSessionQueue(ctx, snap); err != nil {
+		b.log.Warnf("[PIPELINE:queue] persist queue %s: %v", s.ID, err)
+	}
+}
+
 // handleQueueCallback handles playlist operations.
 func (b *Bot) handleQueueCallback(chatID, userID int64, msgID int, q *tgbotapi.CallbackQuery, data string) {
 	parts := strings.Split(data, ":")
@@ -910,10 +1058,9 @@ func (b *Bot) handleQueueCallback(chatID, userID int64, msgID int, q *tgbotapi.C
 		return
 	}
 	st := s.Snapshot()
-	items, curIdx := s.QueueSnapshot()
 
-	// Advanced queue tools (shuffle/sort/reorder/save) live in their own
-	// handler so the basic view stays readable.
+	// Advanced queue tools (move/save) live in their own handler so the
+	// basic view stays readable.
 	if b.handleQueueToolsCallback(chatID, userID, msgID, q, sub, sid, parts) {
 		return
 	}
@@ -921,9 +1068,11 @@ func (b *Bot) handleQueueCallback(chatID, userID int64, msgID int, q *tgbotapi.C
 	switch sub {
 	case "jump":
 		if len(parts) < 4 {
+			_ = b.api.AnswerCallback(q.ID, "bad item")
 			return
 		}
 		itemID := parts[3]
+		items, _ := s.QueueSnapshot()
 		idx := -1
 		for i, it := range items {
 			if it.ID == itemID {
@@ -931,17 +1080,163 @@ func (b *Bot) handleQueueCallback(chatID, userID int64, msgID int, q *tgbotapi.C
 				break
 			}
 		}
-		if idx >= 0 {
-			b.log.Infof("[PIPELINE:queue] jump to item %s (index %d/%d) in session %s by user %d", itemID, idx+1, len(items), sid, userID)
-			if err := s.JumpTo(idx); err != nil {
-				b.log.Warnf("[PIPELINE:queue] jump failed: %v", err)
-				_ = b.api.AnswerCallback(q.ID, "jump failed: "+err.Error())
-			} else {
-				_ = b.api.AnswerCallback(q.ID, fmt.Sprintf("switched to item %d", idx+1))
-			}
+		if idx < 0 {
+			// The item was removed (or the callback is stale) — say so
+			// instead of leaving the button spinner forever.
+			b.log.Warnf("[PIPELINE:queue] jump to missing item %s in session %s by user %d", itemID, sid, userID)
+			_ = b.api.AnswerCallback(q.ID, "item not found (queue changed)")
+			b.renderQueue(chatID, msgID, s, -1)
+			return
 		}
+		b.log.Infof("[PIPELINE:queue] jump to item %s (index %d/%d) in session %s by user %d", itemID, idx+1, len(items), sid, userID)
+		if jerr := s.JumpTo(idx); jerr != nil {
+			b.log.Warnf("[PIPELINE:queue] jump failed: %v", jerr)
+			_ = b.api.AnswerCallback(q.ID, "jump failed: "+truncate(jerr.Error(), 60))
+		} else {
+			_ = b.api.AnswerCallback(q.ID, fmt.Sprintf("playing item %d/%d", idx+1, len(items)))
+		}
+		b.persistQueue(s)
 		st = s.Snapshot()
 		_ = b.api.Edit(chatID, msgID, sessionCardText(st), sessionCardKB(st))
+
+	case "page":
+		if len(parts) < 4 {
+			_ = b.api.AnswerCallback(q.ID, "")
+			b.renderQueue(chatID, msgID, s, 0)
+			return
+		}
+		page := 0
+		if n, err := strconv.Atoi(parts[3]); err == nil && n >= 0 {
+			page = n
+		}
+		_ = b.api.AnswerCallback(q.ID, "")
+		b.renderQueue(chatID, msgID, s, page)
+
+	case "repeat":
+		next := engine.RepeatOne
+		switch engine.NormalizeRepeatMode(st.RepeatMode) {
+		case engine.RepeatOne:
+			next = engine.RepeatAll
+		case engine.RepeatAll:
+			next = engine.RepeatOff
+		}
+		if rerr := s.SetRepeatMode(next); rerr != nil {
+			_ = b.api.AnswerCallback(q.ID, "repeat failed: "+truncate(rerr.Error(), 60))
+			return
+		}
+		_ = b.api.AnswerCallback(q.ID, "repeat: "+repeatDisplay(next))
+		b.renderQueue(chatID, msgID, s, -1)
+
+	case "shuftoggle":
+		s.SetShuffle(!st.Shuffle)
+		_ = b.api.AnswerCallback(q.ID, "shuffle "+boolWord(!st.Shuffle))
+		b.renderQueue(chatID, msgID, s, -1)
+
+	case "add":
+		_ = b.api.AnswerCallback(q.ID, "send one or more links")
+		b.setFlow(userID, &flow{step: stepQueueAdd, sessionID: sid, parent: "queue"})
+		_ = b.api.Edit(chatID, msgID, queueAddText(st, "add"), playlistCancelKB())
+
+	case "addnext":
+		_ = b.api.AnswerCallback(q.ID, "send the links to play next")
+		b.setFlow(userID, &flow{step: stepQueueAddNext, sessionID: sid, parent: "queue"})
+		_ = b.api.Edit(chatID, msgID, queueAddText(st, "addnext"), playlistCancelKB())
+
+	case "load":
+		// Load a saved playlist in place of the upcoming items.
+		if b.pl == nil {
+			_ = b.api.AnswerCallback(q.ID, "playlists unavailable")
+			return
+		}
+		list, err := playlistCall(b, func(ctx context.Context) ([]store.Playlist, error) {
+			return b.pl.List(ctx, userID)
+		})
+		if err != nil {
+			_ = b.api.AnswerCallback(q.ID, plErr(err))
+			return
+		}
+		if len(list) == 0 {
+			_ = b.api.AnswerCallback(q.ID, "no saved playlists")
+			_ = b.api.Edit(chatID, msgID, "You have no saved playlists yet. Open 📚 <b>Playlists</b> to create one.", backKB())
+			return
+		}
+		_ = b.api.AnswerCallback(q.ID, "pick a playlist")
+		_ = b.api.Edit(chatID, msgID, queueLoadText(st), queueLoadKB(st, list))
+
+	case "loadpl":
+		if len(parts) < 4 {
+			_ = b.api.AnswerCallback(q.ID, "bad playlist")
+			return
+		}
+		pid, ok := parseID(parts[3])
+		if !ok {
+			_ = b.api.AnswerCallback(q.ID, "bad playlist")
+			return
+		}
+		p, err := playlistCall(b, func(ctx context.Context) (store.Playlist, error) {
+			return b.pl.Get(ctx, userID, pid)
+		})
+		if err != nil {
+			_ = b.api.AnswerCallback(q.ID, plErr(err))
+			return
+		}
+		items, err := playlistCall(b, func(ctx context.Context) ([]store.PlaylistItem, error) {
+			return b.pl.Items(ctx, userID, pid)
+		})
+		if err != nil {
+			_ = b.api.AnswerCallback(q.ID, plErr(err))
+			return
+		}
+		if len(items) == 0 {
+			_ = b.api.AnswerCallback(q.ID, "playlist is empty")
+			return
+		}
+		// Confirmation: loading replaces everything after the current item.
+		_ = b.api.AnswerCallback(q.ID, "")
+		text := fmt.Sprintf("⚠️ <b>Load playlist?</b>\n\n<b>%s</b> (%d item(s)) will replace everything after the currently playing item in session <code>%s</code>.",
+			esc(p.Name), len(items), esc(sid))
+		kb := &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: [][]tgbotapi.InlineKeyboardButton{
+			{tgbotapi.NewInlineKeyboardButtonData("📥 Load playlist", fmt.Sprintf("q:loadok:%s:%d", sid, p.ID))},
+			{tgbotapi.NewInlineKeyboardButtonData("❌ Cancel", "act:"+sid+":queue")},
+		}}
+		_ = b.api.Edit(chatID, msgID, text, kb)
+
+	case "loadok":
+		if len(parts) < 4 {
+			_ = b.api.AnswerCallback(q.ID, "bad playlist")
+			return
+		}
+		pid, ok := parseID(parts[3])
+		if !ok {
+			_ = b.api.AnswerCallback(q.ID, "bad playlist")
+			return
+		}
+		items, err := playlistCall(b, func(ctx context.Context) ([]store.PlaylistItem, error) {
+			return b.pl.Items(ctx, userID, pid)
+		})
+		if err != nil {
+			_ = b.api.AnswerCallback(q.ID, plErr(err))
+			return
+		}
+		urls := make([]string, 0, len(items))
+		for _, it := range items {
+			urls = append(urls, it.URL)
+		}
+		urls = b.filterPlayableURLs(chatID, urls)
+		if len(urls) == 0 {
+			_ = b.api.AnswerCallback(q.ID, "no playable links left")
+			return
+		}
+		n, err := s.ReplaceUpcoming(urls)
+		if err != nil {
+			// ReplaceUpcoming never touches the queue when validation
+			// fails, so nothing to roll back here.
+			_ = b.api.AnswerCallback(q.ID, "load failed: "+truncate(err.Error(), 60))
+			return
+		}
+		b.persistQueue(s)
+		_ = b.api.AnswerCallback(q.ID, fmt.Sprintf("loaded %d item(s)", n))
+		b.renderQueue(chatID, msgID, s, -1)
 
 	case "clear_confirm":
 		b.log.Infof("[PIPELINE:queue] clear_confirm prompted for session %s by user %d", sid, userID)
@@ -950,50 +1245,99 @@ func (b *Bot) handleQueueCallback(chatID, userID int64, msgID int, q *tgbotapi.C
 
 	case "do_clear":
 		b.log.Infof("[PIPELINE:queue] do_clear executed for session %s by user %d", sid, userID)
-		_ = s.ClearUpcoming()
-		_ = b.api.AnswerCallback(q.ID, "upcoming queue cleared")
-		items, curIdx = s.QueueSnapshot()
-		var qRecs []store.QueueItemRecord
-		for _, it := range items {
-			qRecs = append(qRecs, store.QueueItemRecord{ID: it.ID, URL: it.URL, Title: it.Title})
+		if err := s.ClearUpcoming(); err != nil {
+			_ = b.api.AnswerCallback(q.ID, "clear failed: "+truncate(err.Error(), 60))
+			return
 		}
-		b.st.UpdateQueue(sid, qRecs, curIdx)
-		st = s.Snapshot()
-		_ = b.api.Edit(chatID, msgID, queueViewText(st, items, curIdx), queueViewKB(st, items, curIdx))
+		_ = b.api.AnswerCallback(q.ID, "upcoming queue cleared")
+		b.persistQueue(s)
+		b.renderQueue(chatID, msgID, s, -1)
 
 	case "do_clear_all":
 		b.log.Infof("[PIPELINE:queue] do_clear_all executed for session %s by user %d", sid, userID)
-		_ = s.ClearAllExceptCurrent()
-		_ = b.api.AnswerCallback(q.ID, "cleared all except current")
-		items, curIdx = s.QueueSnapshot()
-		var qRecs []store.QueueItemRecord
-		for _, it := range items {
-			qRecs = append(qRecs, store.QueueItemRecord{ID: it.ID, URL: it.URL, Title: it.Title})
+		if err := s.ClearAllExceptCurrent(); err != nil {
+			_ = b.api.AnswerCallback(q.ID, "clear failed: "+truncate(err.Error(), 60))
+			return
 		}
-		b.st.UpdateQueue(sid, qRecs, curIdx)
-		st = s.Snapshot()
-		_ = b.api.Edit(chatID, msgID, queueViewText(st, items, curIdx), queueViewKB(st, items, curIdx))
+		_ = b.api.AnswerCallback(q.ID, "cleared all except current")
+		b.persistQueue(s)
+		b.renderQueue(chatID, msgID, s, -1)
 
 	case "rm_menu":
 		b.log.Infof("[PIPELINE:queue] rm_menu opened for session %s by user %d", sid, userID)
 		_ = b.api.AnswerCallback(q.ID, "")
-		_ = b.api.Edit(chatID, msgID, "❌ <b>Select an upcoming item to remove:</b>", queueRemoveMenuKB(sid, items, curIdx))
+		items, curIdx := s.QueueSnapshot()
+		_ = b.api.Edit(chatID, msgID, "❌ <b>Select an item to remove:</b>", queueRemoveMenuKB(sid, items, curIdx))
 
 	case "rm":
 		if len(parts) < 4 {
+			_ = b.api.AnswerCallback(q.ID, "bad item")
 			return
 		}
 		itemID := parts[3]
 		b.log.Infof("[PIPELINE:queue] remove item %s from session %s by user %d", itemID, sid, userID)
-		_ = s.RemoveQueueItem(itemID)
-		_ = b.api.AnswerCallback(q.ID, "item removed")
-		items, curIdx = s.QueueSnapshot()
-		var qRecs []store.QueueItemRecord
-		for _, it := range items {
-			qRecs = append(qRecs, store.QueueItemRecord{ID: it.ID, URL: it.URL, Title: it.Title})
+		if err := s.RemoveQueueItem(itemID); err != nil {
+			_ = b.api.AnswerCallback(q.ID, "remove failed: "+truncate(err.Error(), 60))
+			b.renderQueue(chatID, msgID, s, -1)
+			return
 		}
-		b.st.UpdateQueue(sid, qRecs, curIdx)
-		st = s.Snapshot()
-		_ = b.api.Edit(chatID, msgID, queueViewText(st, items, curIdx), queueViewKB(st, items, curIdx))
+		_ = b.api.AnswerCallback(q.ID, "item removed")
+		b.persistQueue(s)
+		b.renderQueue(chatID, msgID, s, -1)
+
+	default:
+		_ = b.api.AnswerCallback(q.ID, "unknown queue action")
 	}
+}
+
+// queueAddText prompts for media links to append or play next.
+func queueAddText(st engine.Status, mode string) string {
+	head := "➕ <b>Add media to queue</b>"
+	if mode == "addnext" {
+		head = "⏭ <b>Play next</b>"
+	}
+	return fmt.Sprintf(`%s
+
+Session <code>%s</code> — queue has <b>%d</b> item(s).
+
+Send one or more media links (any chat message):
+• YouTube watch/shorts links
+• direct files (<code>.mp4 .webm .mp3 …</code>)
+• several links in one message = several items
+
+<i>%s</i>`,
+		head, esc(string(st.ID)), st.QueueLength,
+		map[string]string{
+			"add":     "Links are appended to the end of the queue; playback is not interrupted.",
+			"addnext": "The first link plays immediately after the current item, without replacing the queue.",
+		}[mode])
+}
+
+// queueLoadText prompts for the playlist to load.
+func queueLoadText(st engine.Status) string {
+	return fmt.Sprintf("📚 <b>Load playlist</b>\n\nSession <code>%s</code> · queue has <b>%d</b> item(s).\n\nPick a saved playlist to load after the current item.", esc(string(st.ID)), st.QueueLength)
+}
+
+// queueLoadKB lists the user's playlists as load targets.
+func queueLoadKB(st engine.Status, list []store.Playlist) *tgbotapi.InlineKeyboardMarkup {
+	id := string(st.ID)
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for _, p := range list {
+		if p.ItemCount == 0 {
+			continue
+		}
+		rows = append(rows, []tgbotapi.InlineKeyboardButton{
+			tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("📚 %s (%d)", truncate(p.Name, 32), p.ItemCount),
+				fmt.Sprintf("q:loadpl:%s:%d", id, p.ID)),
+		})
+	}
+	if len(rows) == 0 {
+		rows = append(rows, []tgbotapi.InlineKeyboardButton{
+			tgbotapi.NewInlineKeyboardButtonData("No playable playlists", "q:noop:"+id),
+		})
+	}
+	rows = append(rows, []tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardButtonData("⬅️ Back to queue", "act:"+id+":queue"),
+	})
+	return &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
 }

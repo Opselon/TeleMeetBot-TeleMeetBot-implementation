@@ -124,6 +124,15 @@ type Session struct {
 	queue       []QueueItem
 	queueIdx    int
 	nextQueueID int
+	// repeatMode is what happens when the current media ends ("off" default).
+	repeatMode string
+	// shuffle picks a random upcoming item when playback auto-advances.
+	shuffle bool
+	// autoAdvance plays the next queue item when the current media ends.
+	// It is on by default: a playlist keeps playing without operator input.
+	autoAdvance bool
+	// rng drives shuffle picks; injectable for deterministic tests.
+	rng *rand.Rand
 }
 
 // Status is a dashboard-friendly snapshot.
@@ -156,6 +165,12 @@ type Status struct {
 	QueueIndex  int
 	HasNext     bool
 	HasPrevious bool
+	// RepeatMode is the end-of-media behaviour ("off", "one", "all").
+	RepeatMode string
+	// Shuffle reports whether auto-advance picks random upcoming items.
+	Shuffle bool
+	// AutoAdvance reports whether the queue advances when media ends.
+	AutoAdvance bool
 }
 
 // Elapsed is how long the session has been running.
@@ -171,16 +186,15 @@ func (st Status) Elapsed() time.Duration {
 }
 
 // Snapshot returns a copy safe for concurrent readers.
+//
+// The mu section must stay flat: it captures the plain fields and releases
+// the lock before localFileStatus() takes its own read lock. Calling it
+// under the outer RLock is a recursive read that deadlocks whenever a
+// writer queues in between (the RWMutex writer-preference rule) — with a
+// Next worker waiting on switchMu that is a whole-session stall.
 func (s *Session) Snapshot() Status {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	s.queueMu.RLock()
-	qLen := len(s.queue)
-	qIdx := s.queueIdx
-	s.queueMu.RUnlock()
-
-	return Status{
+	st := Status{
 		ID:             s.ID,
 		State:          s.state,
 		Detail:         s.detail,
@@ -201,12 +215,21 @@ func (s *Session) Snapshot() Status {
 		AudioTrack:     s.audioRep.SelectedTrackLabel(),
 		FallbackReason: s.audioRep.FallbackReason,
 		PlayMode:       string(s.playMode),
-		LocalFile:      s.localFileStatus(),
-		QueueLength:    qLen,
-		QueueIndex:     qIdx,
-		HasNext:        qIdx >= 0 && qIdx+1 < qLen,
-		HasPrevious:    qIdx > 0,
 	}
+	s.mu.RUnlock()
+
+	s.queueMu.RLock()
+	st.QueueLength = len(s.queue)
+	st.QueueIndex = s.queueIdx
+	st.RepeatMode = NormalizeRepeatMode(s.repeatMode)
+	st.Shuffle = s.shuffle
+	st.AutoAdvance = s.autoAdvance
+	s.queueMu.RUnlock()
+	st.HasNext = st.QueueIndex >= 0 && st.QueueIndex+1 < st.QueueLength
+	st.HasPrevious = st.QueueIndex > 0
+
+	st.LocalFile = s.localFileStatus()
+	return st
 }
 
 // AudioReport returns a copy of the audio track report.
@@ -558,16 +581,11 @@ func (s *Session) watch() {
 			}
 			if st.Ended && !st.Paused {
 				if s.snapshotState() == StateStreaming {
-					if s.hasNextInQueue() {
-						s.log.Infof("[PIPELINE:queue] session %s: media playback ended, auto-advancing to next item", s.ID)
-						s.setState(StateJoining, "advancing queue")
-						go func() {
-							if err := s.Next(); err != nil && !errors.Is(err, ErrQueueEnd) {
-								s.log.Errorf("[PIPELINE:queue] session %s: auto-advance failed: %v", s.ID, err)
-							}
-						}()
-					} else {
-						s.setDetail("playback completed (end of queue)")
+					switch s.handleQueueEnded() {
+					case queueEndNext, queueEndWrap:
+						s.log.Infof("[PIPELINE:queue] session %s: media playback ended, advancing queue", s.ID)
+					case queueEndRestart:
+						s.log.Infof("[PIPELINE:queue] session %s: media playback ended, repeat-one restart", s.ID)
 					}
 				}
 			} else if st.Count > 0 && !st.Paused {
@@ -1480,6 +1498,18 @@ func (s *Session) SetSwitchRunForTesting(fn func(target MediaTarget, stale func(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.switchRun = fn
+}
+
+// MediaStatus is the exported alias of the media probe struct, so test
+// seams outside the engine package can express the mediaRun signature.
+type MediaStatus = mediaStatus
+
+// SetMediaRunForTesting overrides the media-action runner (seek, pause,
+// volume…) for deterministic tests, mirroring SetSwitchRunForTesting.
+func (s *Session) SetMediaRunForTesting(fn func(action string, arg float64) (MediaStatus, error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mediaRun = fn
 }
 
 // SetMediaPageForTesting overrides the media page for deterministic tests.

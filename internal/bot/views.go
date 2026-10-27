@@ -619,10 +619,39 @@ func enqueuedKB(sessionID, itemID string) *tgbotapi.InlineKeyboardMarkup {
 	}
 }
 
-// queueViewText formats the playlist overview.
-func queueViewText(st engine.Status, items []engine.QueueItem, curIdx int) string {
+// queuePageSize is how many queue items one screen lists. Eight per-item
+// rows keep the keyboard inside Telegram's mobile height.
+const queuePageSize = 8
+
+// queueStateLine describes the playback state in one line.
+func queueStateLine(st engine.Status) string {
+	switch {
+	case len(st.Error) > 0:
+		return "🔴 <b>Error:</b> " + esc(truncate(st.Error, 160))
+	case st.State == engine.StatePaused || st.Paused:
+		return "⏸ <b>Paused</b>"
+	case st.State == engine.StateEnded || st.State == engine.StateCompleted:
+		return "🏁 <i>Completed</i>"
+	case st.State == engine.StateError || st.State == engine.StateFailed:
+		return "🔴 <b>Failed</b>"
+	default:
+		return ""
+	}
+}
+
+// queueViewText formats the queue overview: now playing, position and the
+// upcoming tail for one page. page must already be resolved (>= 0); bounds
+// are clamped here.
+func queueViewText(st engine.Status, items []engine.QueueItem, curIdx, page int) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("📋 <b>Media Queue</b> (%d item(s))\n\n", len(items)))
+	sb.WriteString(fmt.Sprintf("📋 <b>Media Queue</b> · %d item(s)\n", len(items)))
+	if len(items) > 0 && curIdx >= 0 {
+		sb.WriteString(fmt.Sprintf("▶️ Position: <b>%d/%d</b>\n", curIdx+1, len(items)))
+	}
+	if line := queueStateLine(st); line != "" {
+		sb.WriteString(line + "\n")
+	}
+	sb.WriteString("\n")
 
 	if curIdx >= 0 && curIdx < len(items) {
 		cur := items[curIdx]
@@ -630,39 +659,92 @@ func queueViewText(st engine.Status, items []engine.QueueItem, curIdx int) strin
 		if title == "" {
 			title = cur.URL
 		}
-		sb.WriteString(fmt.Sprintf("▶️ <b>Now Playing (%d/%d):</b>\n<code>%s</code>\n", curIdx+1, len(items), esc(truncate(title, 60))))
+		sb.WriteString(fmt.Sprintf("▶️ <b>Now Playing:</b>\n<code>%s</code>\n", esc(truncate(title, 60))))
 		if st.Dur > 0 {
-			sb.WriteString(fmt.Sprintf("⏱ %s / %s\n", fmtClock(st.Cur), fmtClock(st.Dur)))
+			sb.WriteString(fmt.Sprintf("⏱ %s / %s (%d%%)\n", fmtClock(st.Cur), fmtClock(st.Dur), queuePercent(st.Cur, st.Dur)))
 		}
 		sb.WriteString("\n")
 	}
 
-	upcoming := 0
-	if curIdx+1 < len(items) {
-		sb.WriteString("⏳ <b>Upcoming:</b>\n")
-		for i := curIdx + 1; i < len(items); i++ {
-			if upcoming >= 10 {
-				sb.WriteString(fmt.Sprintf("<i>... and %d more</i>\n", len(items)-i))
-				break
-			}
+	if len(items) == 0 {
+		sb.WriteString("The queue is empty.\nSend any media link in chat to add it, or load a saved playlist below.\n")
+		return sb.String()
+	}
+
+	start, end := queuePageBounds(len(items), page)
+	if start < end {
+		sb.WriteString("<b>Queue:</b>\n")
+		for i := start; i < end; i++ {
 			it := items[i]
 			title := it.Title
 			if title == "" {
 				title = it.URL
 			}
-			sb.WriteString(fmt.Sprintf("%d. <code>%s</code>\n", i+1, esc(truncate(title, 50))))
-			upcoming++
+			marker := "·"
+			if i == curIdx {
+				marker = "▶️"
+			} else if i < curIdx {
+				marker = "✓"
+			}
+			duration := ""
+			if it.Duration > 0 {
+				duration = " (" + fmtClock(it.Duration) + ")"
+			}
+			sb.WriteString(fmt.Sprintf("%s %d. <code>%s</code>%s\n", marker, i+1, esc(truncate(title, 44)), duration))
 		}
-		sb.WriteString("\n")
-	} else if len(items) > 0 {
-		sb.WriteString("🏁 <i>At end of playlist</i>\n\n")
+		total := queuePageCount(len(items))
+		if total > 1 {
+			sb.WriteString(fmt.Sprintf("<i>Page %d/%d</i>\n", page+1, total))
+		}
 	}
-
+	if curIdx >= len(items)-1 && curIdx >= 0 {
+		sb.WriteString("\n🏁 <i>At end of queue</i>\n")
+	}
 	return sb.String()
 }
 
-// queueViewKB renders the playlist controls.
-func queueViewKB(st engine.Status, items []engine.QueueItem, curIdx int) *tgbotapi.InlineKeyboardMarkup {
+// queuePercent renders the playback progress as 0-100.
+func queuePercent(cur, dur float64) int {
+	if dur <= 0 {
+		return 0
+	}
+	p := int(cur / dur * 100)
+	if p < 0 {
+		return 0
+	}
+	if p > 100 {
+		return 100
+	}
+	return p
+}
+
+// queuePageBounds clamps a page into the item range [start, end).
+func queuePageBounds(n, page int) (int, int) {
+	if page < 0 {
+		page = 0
+	}
+	start := page * queuePageSize
+	if start >= n {
+		start = 0
+	}
+	end := start + queuePageSize
+	if end > n {
+		end = n
+	}
+	return start, end
+}
+
+// queuePageCount is the number of pages needed for n items.
+func queuePageCount(n int) int {
+	if n <= 0 {
+		return 1
+	}
+	return (n + queuePageSize - 1) / queuePageSize
+}
+
+// queueViewKB renders the queue controls: transport, repeat/shuffle toggles,
+// per-item selection with pagination, and the management rows.
+func queueViewKB(st engine.Status, items []engine.QueueItem, curIdx, page int) *tgbotapi.InlineKeyboardMarkup {
 	id := string(st.ID)
 	var rows [][]tgbotapi.InlineKeyboardButton
 
@@ -670,33 +752,99 @@ func queueViewKB(st engine.Status, items []engine.QueueItem, curIdx int) *tgbota
 	if st.State == engine.StatePaused || st.Paused {
 		pauseLabel, pauseAct = "▶️ Resume", "resume"
 	}
+	// Transport: prev/next only when the cursor can actually move; the card
+	// refresh loop keeps this honest as the queue changes.
+	transport := []tgbotapi.InlineKeyboardButton{}
+	if st.HasPrevious {
+		transport = append(transport, tgbotapi.NewInlineKeyboardButtonData("⏮ Prev", "act:"+id+":prev"))
+	}
+	transport = append(transport, tgbotapi.NewInlineKeyboardButtonData(pauseLabel, "act:"+id+":"+pauseAct))
+	if st.HasNext || st.RepeatMode == engine.RepeatAll {
+		transport = append(transport, tgbotapi.NewInlineKeyboardButtonData("⏭ Next", "act:"+id+":next"))
+	}
+	rows = append(rows, transport)
+
+	// Toggles with explicit on/off indicators.
+	repeatLabel := "🔁 Repeat: off"
+	switch st.RepeatMode {
+	case engine.RepeatOne:
+		repeatLabel = "🔁 Repeat: one 🔂"
+	case engine.RepeatAll:
+		repeatLabel = "🔁 Repeat: all 🔁"
+	}
+	shuffleLabel := "🔀 Shuffle: off"
+	if st.Shuffle {
+		shuffleLabel = "🔀 Shuffle: on ✅"
+	}
 	rows = append(rows, []tgbotapi.InlineKeyboardButton{
-		tgbotapi.NewInlineKeyboardButtonData("⏮ Prev", "act:"+id+":prev"),
-		tgbotapi.NewInlineKeyboardButtonData(pauseLabel, "act:"+id+":"+pauseAct),
-		tgbotapi.NewInlineKeyboardButtonData("⏭ Next", "act:"+id+":next"),
+		tgbotapi.NewInlineKeyboardButtonData(repeatLabel, "q:repeat:"+id),
+		tgbotapi.NewInlineKeyboardButtonData(shuffleLabel, "q:shuftoggle:"+id),
 	})
 
-	var mgmtRow []tgbotapi.InlineKeyboardButton
-	if len(items) > 1 {
-		mgmtRow = append(mgmtRow, tgbotapi.NewInlineKeyboardButtonData("🗑 Clear Options", "q:clear_confirm:"+id))
-		mgmtRow = append(mgmtRow, tgbotapi.NewInlineKeyboardButtonData("❌ Remove Item...", "q:rm_menu:"+id))
+	// Per-item selection: every visible item is a button that plays it.
+	if len(items) > 0 {
+		start, end := queuePageBounds(len(items), page)
+		for i := start; i < end; i++ {
+			it := items[i]
+			title := it.Title
+			if title == "" {
+				title = it.URL
+			}
+			label := fmt.Sprintf("%d. %s", i+1, truncate(title, 30))
+			if i == curIdx {
+				label = "▶️ " + label
+			}
+			rows = append(rows, []tgbotapi.InlineKeyboardButton{
+				tgbotapi.NewInlineKeyboardButtonData(label, fmt.Sprintf("q:jump:%s:%s", id, it.ID)),
+			})
+		}
+		// Pagination row.
+		total := queuePageCount(len(items))
+		if total > 1 {
+			if page < 0 {
+				page = 0
+			}
+			if page >= total {
+				page = total - 1
+			}
+			var pager []tgbotapi.InlineKeyboardButton
+			if page > 0 {
+				pager = append(pager, tgbotapi.NewInlineKeyboardButtonData("◀️", fmt.Sprintf("q:page:%s:%d", id, page-1)))
+			}
+			pager = append(pager, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("%d/%d", page+1, total), fmt.Sprintf("q:page:%s:%d", id, page)))
+			if page < total-1 {
+				pager = append(pager, tgbotapi.NewInlineKeyboardButtonData("▶️", fmt.Sprintf("q:page:%s:%d", id, page+1)))
+			}
+			rows = append(rows, pager)
+		}
 	}
-	if len(mgmtRow) > 0 {
-		rows = append(rows, mgmtRow)
+
+	// Management rows.
+	manage := []tgbotapi.InlineKeyboardButton{
+		tgbotapi.NewInlineKeyboardButtonData("➕ Add media", "q:add:"+id),
 	}
+	if len(items) > 0 {
+		manage = append(manage, tgbotapi.NewInlineKeyboardButtonData("💾 Save as playlist", "q:save:"+id))
+	}
+	rows = append(rows, manage)
+
 	if len(items) > 1 {
 		rows = append(rows, []tgbotapi.InlineKeyboardButton{
-			tgbotapi.NewInlineKeyboardButtonData("🔀 Shuffle upcoming", "q:shuffle:"+id),
-			tgbotapi.NewInlineKeyboardButtonData("🔤 Sort upcoming", "q:sort:"+id),
+			tgbotapi.NewInlineKeyboardButtonData("↕️ Reorder", "q:move_menu:"+id),
+			tgbotapi.NewInlineKeyboardButtonData("❌ Remove item", "q:rm_menu:"+id),
 		})
 		rows = append(rows, []tgbotapi.InlineKeyboardButton{
-			tgbotapi.NewInlineKeyboardButtonData("↕️ Reorder items", "q:move_menu:"+id),
-			tgbotapi.NewInlineKeyboardButtonData("💾 Save as playlist", "q:save:"+id),
+			tgbotapi.NewInlineKeyboardButtonData("📚 Load playlist", "q:load:"+id),
+			tgbotapi.NewInlineKeyboardButtonData("🗑 Clear…", "q:clear_confirm:"+id),
+		})
+	} else if len(items) == 1 {
+		rows = append(rows, []tgbotapi.InlineKeyboardButton{
+			tgbotapi.NewInlineKeyboardButtonData("🗑 Clear…", "q:clear_confirm:"+id),
 		})
 	}
 
 	rows = append(rows, []tgbotapi.InlineKeyboardButton{
-		tgbotapi.NewInlineKeyboardButtonData("📱 Session Controls", "ses:"+id),
+		tgbotapi.NewInlineKeyboardButtonData("📱 Session controls", "ses:"+id),
 		tgbotapi.NewInlineKeyboardButtonData("🔄 Refresh", "act:"+id+":queue"),
 	})
 	rows = append(rows, []tgbotapi.InlineKeyboardButton{

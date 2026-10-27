@@ -34,7 +34,9 @@ func (s *Session) queueOwner() string {
 }
 
 // InitQueue initializes the session playlist with the initial media link and any
-// additional queued items supplied at launch.
+// additional queued items supplied at launch. It also restores the production
+// defaults for the end-of-media behaviour (auto-advance on, repeat off), so a
+// session built outside Manager.Start still behaves like a live one.
 func (s *Session) InitQueue(initialURL string, extraQueue []string) {
 	s.queueMu.Lock()
 	defer s.queueMu.Unlock()
@@ -42,6 +44,10 @@ func (s *Session) InitQueue(initialURL string, extraQueue []string) {
 	s.queue = make([]QueueItem, 0, 1+len(extraQueue))
 	s.queueIdx = -1
 	s.nextQueueID = 1
+	if s.repeatMode == "" {
+		s.repeatMode = RepeatOff
+	}
+	s.autoAdvance = true
 
 	if strings.TrimSpace(initialURL) != "" {
 		target, err := ClassifyMedia(initialURL)

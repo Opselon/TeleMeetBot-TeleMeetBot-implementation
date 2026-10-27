@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	mathrand "math/rand"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -188,6 +189,18 @@ type StartRequest struct {
 	GuestName string
 	// GoogleCookies injects authenticated Google account cookies into the session context.
 	GoogleCookies []*proto.NetworkCookieParam
+	// Volume overrides the configured default player volume (1-100; 0 = global default).
+	Volume int
+	// Speed overrides the configured default playback speed (0.25-4; 0 = global default).
+	Speed float64
+	// RepeatMode sets the end-of-media behaviour ("off"/"one"/"all"; anything
+	// else falls back to "off").
+	RepeatMode string
+	// Shuffle makes auto-advance pick a random upcoming item.
+	Shuffle bool
+	// AutoPlay makes the queue advance when the current media ends. nil keeps
+	// the engine default (auto-advance on).
+	AutoPlay *bool
 }
 
 // Manager owns browsers and sessions.
@@ -453,6 +466,19 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (*Session, error)
 		}
 	}
 
+	autoAdvance := true
+	if req.AutoPlay != nil {
+		autoAdvance = *req.AutoPlay
+	}
+	volume := m.mediaCfg.DefaultVolume
+	if req.Volume > 0 {
+		volume = req.Volume
+	}
+	speed := m.mediaCfg.DefaultSpeed
+	if req.Speed > 0 {
+		speed = req.Speed
+	}
+
 	id := newSessionID()
 	s := &Session{
 		ID:        id,
@@ -471,15 +497,24 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (*Session, error)
 			TabTitle: tabTitle,
 			Autoplay: false, // starts after sharing is confirmed
 			Mute:     m.mediaCfg.MuteUntilConnected,
-			Loop:     len(req.Queue) == 0, // loop only single-item standalone streams, not playlists
-			Volume:   m.mediaCfg.DefaultVolume,
-			Speed:    m.mediaCfg.DefaultSpeed,
+			Loop:     len(req.Queue) == 0 && NormalizeRepeatMode(req.RepeatMode) == RepeatOff, // loop only single-item standalone streams, not playlists
+			Volume:   volume,
+			Speed:    speed,
 		},
+		repeatMode:        NormalizeRepeatMode(req.RepeatMode),
+		shuffle:           req.Shuffle,
+		autoAdvance:       autoAdvance,
+		rng:               mathrand.New(mathrand.NewSource(time.Now().UnixNano())),
 		adSkipEnabled:     m.mediaCfg.SkipYouTubeAds,
 		googleCookies:     req.GoogleCookies,
 		guestNameOverride: req.GuestName,
 	}
 	s.InitQueue(media.URL, req.Queue)
+	// Apply the request's autoplay override after InitQueue, which seeds the
+	// production default.
+	if req.AutoPlay != nil {
+		s.autoAdvance = *req.AutoPlay
+	}
 
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	s.done = make(chan struct{})

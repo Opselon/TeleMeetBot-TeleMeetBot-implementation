@@ -251,10 +251,42 @@ func run(cfg *config.Config, cfgPath string, log *slogLogger) error {
 	} else {
 		defer playlists.Close()
 	}
+
+	// Per-user preferences and session-queue metadata live in users.db. Like
+	// meetings.db, a failure is fatal: silently losing every user's settings
+	// on every restart would be worse than refusing to start.
+	if _, err := store.BackupDB(cfg.UsersFile()); err != nil {
+		log.Warnf("user db backup: %v", err)
+	}
+	users, err := store.NewUserStore(ctx, cfg.UsersFile())
+	if err != nil {
+		return fmt.Errorf("open user store %s: %w", cfg.UsersFile(), err)
+	}
+	defer users.Close()
+
+	// One-shot migration: preferences the legacy state.json still holds are
+	// lifted into users.db (backed up first, never overwritten, safe to
+	// re-run). A missing or unreadable state.json is not an error.
+	migrated, err := store.MigrateLegacyPrefs(ctx, users, cfg.StateFile())
+	if err != nil {
+		log.Warnf("legacy preference migration: %v", err)
+	} else if migrated > 0 {
+		log.Infof("migrated %d user preference(s) from state.json to users.db", migrated)
+	}
+
+	// Queue metadata that survived the previous process cannot resume
+	// playback: mark it interrupted so /queue can show what was lost.
+	if n, err := users.MarkQueuesInterrupted(ctx); err != nil {
+		log.Warnf("mark interrupted queues: %v", err)
+	} else if n > 0 {
+		log.Warnf("%d session queue(s) from a previous run were interrupted", n)
+	}
+
 	var botOpts []bot.Option
 	if playlists != nil {
 		botOpts = append(botOpts, bot.WithPlaylists(playlists))
 	}
+	botOpts = append(botOpts, bot.WithSettings(users))
 	var gauth *googleauth.Manager
 	gauthCfg := googleauth.Config{
 		ClientID:           cfg.Google.ClientID,

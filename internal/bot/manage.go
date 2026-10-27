@@ -143,6 +143,16 @@ func (b *Bot) handleManageCallback(chatID, userID int64, msgID int, q *tgbotapi.
 			b.manageEdit(chatID, msgID, manageUserResetText(id), manageUserResetKB(id))
 		case "resetok":
 			removed := b.st.ResetUser(id)
+			if b.set != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), settingsOpTimeout)
+				sqlRemoved, err := b.set.ResetUser(ctx, id)
+				cancel()
+				if err != nil {
+					b.log.Warnf("[PIPELINE:manage] reset user %d (sqlite): %v", id, err)
+				} else {
+					removed = removed || sqlRemoved
+				}
+			}
 			if removed {
 				_ = b.api.AnswerCallback(q.ID, "preferences reset")
 			} else {
@@ -190,9 +200,21 @@ func (b *Bot) handleManageCallback(chatID, userID int64, msgID int, q *tgbotapi.
 		b.showManageMaintenance(chatID, msgID)
 	case "prefs":
 		_ = b.api.AnswerCallback(q.ID, "")
-		b.manageEdit(chatID, msgID, manageResetPrefsText(b.st.Stats().Preferences), manageResetPrefsKB())
+		n := len(b.managePreferences())
+		b.manageEdit(chatID, msgID, manageResetPrefsText(n), manageResetPrefsKB())
 	case "prefsok":
-		n := b.st.ResetAllPreferences()
+		n := 0
+		if b.set != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), settingsOpTimeout)
+			m, err := b.set.ResetAllPreferences(ctx)
+			cancel()
+			if err != nil {
+				b.log.Warnf("[PIPELINE:manage] reset all preferences (sqlite): %v", err)
+			} else {
+				n += m
+			}
+		}
+		n += b.st.ResetAllPreferences()
 		_ = b.api.AnswerCallback(q.ID, fmt.Sprintf("reset %d user(s)", n))
 		b.showManageMaintenance(chatID, msgID)
 	case "backups":
@@ -248,6 +270,9 @@ func (b *Bot) handleManageCallback(chatID, userID int64, msgID int, q *tgbotapi.
 	case "diag":
 		_ = b.api.AnswerCallback(q.ID, "")
 		b.manageEdit(chatID, msgID, b.healthText(), manageDiagnosticsKB())
+	case "config":
+		_ = b.api.AnswerCallback(q.ID, "")
+		b.manageEdit(chatID, msgID, settingsText(b.cfg), manageBackKB())
 	default:
 		_ = b.api.AnswerCallback(q.ID, "unknown management action")
 	}
@@ -284,13 +309,66 @@ func (b *Bot) showManageUsers(chatID, userID int64, msgID, page int) {
 	b.manageEdit(chatID, msgID, manageUsersText(visible, page, total), manageUsersKB(visible, page, total))
 }
 
+// managePreferences returns every saved per-user preference, preferring the
+// SQLite store and merging the legacy JSON rows (a pre-migration file may
+// still hold users the database has never seen).
+func (b *Bot) managePreferences() map[int64]store.UserPreference {
+	out := b.st.Preferences()
+	if b.set == nil {
+		return out
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), settingsOpTimeout)
+	defer cancel()
+	saved, err := b.set.Preferences(ctx)
+	if err != nil {
+		b.log.Warnf("[PIPELINE:manage] sqlite preferences: %v", err)
+		return out
+	}
+	for id, u := range saved {
+		out[id] = store.UserPreference{AudioLang: u.AudioLang, MediaMode: u.MediaMode}
+	}
+	return out
+}
+
+// userPrefFor reads one user's preferences from SQLite with the legacy JSON
+// store as fallback.
+func (b *Bot) userPrefFor(id int64) (store.UserSettings, bool) {
+	if b.set != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), settingsOpTimeout)
+		u, has, err := b.set.GetRaw(ctx, id)
+		cancel()
+		if err != nil {
+			b.log.Warnf("[PIPELINE:manage] user settings %d: %v", id, err)
+		} else if has {
+			return u, true
+		}
+	}
+	if pref, has := b.st.UserPreference(id); has {
+		return store.UserSettings{AudioLang: pref.AudioLang, MediaMode: pref.MediaMode, Autoplay: true, RepeatMode: store.RepeatOff}, true
+	}
+	return store.UserSettings{}, false
+}
+
 // manageUsers builds the complete user list once per screen.
 func (b *Bot) manageUsers() []manageUser {
 	owners := b.managePlaylistOwners()
-	ids := b.st.KnownUserIDs(owners...)
+	var ids []int64
+	if b.set != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), settingsOpTimeout)
+		merged, err := b.set.KnownUserIDs(ctx, owners...)
+		cancel()
+		if err != nil {
+			b.log.Warnf("[PIPELINE:manage] sqlite known users: %v", err)
+			ids = b.st.KnownUserIDs(owners...)
+		} else {
+			ids = b.st.KnownUserIDs(merged...)
+		}
+	} else {
+		ids = b.st.KnownUserIDs(owners...)
+	}
 	out := make([]manageUser, 0, len(ids))
 	for _, id := range ids {
-		pref, has := b.st.UserPreference(id)
+		pref, has := b.userPrefFor(id)
 		out = append(out, manageUser{
 			ID:        id,
 			Admin:     b.cfg.IsAdmin(id),
@@ -307,7 +385,7 @@ func (b *Bot) manageUsers() []manageUser {
 // showManageUser renders one user's profile.
 func (b *Bot) showManageUser(chatID, userID int64, msgID int, id int64) {
 	_ = userID
-	pref, has := b.st.UserPreference(id)
+	pref, has := b.userPrefFor(id)
 	detail := manageUserDetail{
 		manageUser: manageUser{
 			ID:        id,
@@ -318,7 +396,7 @@ func (b *Bot) showManageUser(chatID, userID int64, msgID int, id int64) {
 			Playlists: b.managePlaylistCount(id),
 			Records:   len(b.st.HistoryForUser(id, 0)),
 		},
-		Pref:    pref,
+		Pref:    store.UserPreference{AudioLang: pref.AudioLang, MediaMode: pref.MediaMode},
 		History: b.st.HistoryForUser(id, 5),
 	}
 	b.manageEdit(chatID, msgID, manageUserText(detail), manageUserKB(detail))
@@ -422,6 +500,7 @@ func (b *Bot) manageFiles() []manageFileInfo {
 		{"state.json", b.cfg.StateFile()},
 		{"meetings.db", b.cfg.MeetingsFile()},
 		{"playlists.db", b.cfg.PlaylistsFile()},
+		{"users.db", b.cfg.UsersFile()},
 	}
 	out := make([]manageFileInfo, 0, len(specs))
 	for _, s := range specs {
@@ -451,6 +530,7 @@ func (b *Bot) manageBackupSources() []backup.Source {
 		{Name: "state.json", Path: b.cfg.StateFile()},
 		{Name: "meetings.db", Path: b.cfg.MeetingsFile(), SQLite: true},
 		{Name: "playlists.db", Path: b.cfg.PlaylistsFile(), SQLite: true},
+		{Name: "users.db", Path: b.cfg.UsersFile(), SQLite: true},
 	}
 }
 
