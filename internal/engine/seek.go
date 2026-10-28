@@ -40,6 +40,9 @@ type SeekReport struct {
 	// ReadyState is the HTMLMediaElement.readyState at verify time, so "not
 	// ready" failures carry the actual number.
 	ReadyState int `json:"ready_state"`
+	// Seekable is the HTMLMediaElement.seekable.length at verify time; 0 means
+	// the player explicitly reported the media as non-seekable.
+	Seekable int `json:"seekable"`
 }
 
 // clipTarget turns a relative delta into an absolute, duration-safe target.
@@ -132,6 +135,17 @@ func (s *Session) SeekBy(delta int) (SeekReport, error) {
 func (s *Session) seekLocked(target float64, delta int, relative bool) (SeekReport, error) {
 	var rep SeekReport
 	rep.Delta = delta
+	seekStart := time.Now()
+	log := s.logger()
+	// Structured seek trace: every ±10/±30/±60s press is diagnosable from
+	// the logs alone — the requested delta, the landing position, whether
+	// the player refused and why, and how long the round-trip took. This is
+	// the record that turns the next "it crashed after I pressed +60s" report
+	// into a root cause instead of a guess.
+	defer func() {
+		log.Infof("[PIPELINE:seek] session %s: delta=%ds target=%.1fs before=%.1fs after=%.1fs duration=%.1fs ready=%d seekable=%d ok=%t err=%q took=%s",
+			s.ID, delta, rep.Target, rep.Before, rep.After, rep.Duration, rep.ReadyState, rep.Seekable, rep.OK, rep.Error, time.Since(seekStart).Round(time.Millisecond))
+	}()
 	if s.mediaTab() == nil && s.mediaRun == nil {
 		rep.Error = seekReasonStaleTab
 		return rep, errors.New(seekReasonStaleTab)
@@ -147,6 +161,7 @@ func (s *Session) seekLocked(target float64, delta int, relative bool) (SeekRepo
 	rep.Before = cur.CurrentTime
 	rep.Duration = cur.Duration
 	rep.ReadyState = cur.Ready
+	rep.Seekable = cur.Seekable
 
 	if relative && delta == 0 {
 		// Explicit no-op: report the position, touch nothing. The player is

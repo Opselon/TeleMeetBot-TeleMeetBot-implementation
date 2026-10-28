@@ -186,6 +186,15 @@ func (b *Bot) Run(ctx context.Context) error {
 
 // RunEvents turns engine lifecycle events into chat notifications.
 func (b *Bot) RunEvents(ctx context.Context) {
+	// One panic anywhere on this loop would otherwise kill event delivery
+	// forever: the operator sees a frozen dashboard and reads it as an app
+	// crash. Recover, log with a stack digest, and keep serving.
+	defer func() {
+		if r := recover(); r != nil {
+			b.log.Errorf("[PIPELINE:bot] panic in RunEvents (recovered, loop continues): %v", r)
+			go b.RunEvents(ctx)
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -208,7 +217,18 @@ func (b *Bot) refreshLoop(ctx context.Context, every time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			b.refreshAll()
+			// A panic during one refresh tick (a session snapshot taken
+			// mid-teardown, a card rendered from stale state) must not kill
+			// the loop — the dashboard would freeze forever and the operator
+			// reads that as an app crash. Log and carry on with the next tick.
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						b.log.Errorf("[PIPELINE:bot] panic in refresh tick (recovered, loop continues): %v", r)
+					}
+				}()
+				b.refreshAll()
+			}()
 		}
 	}
 }
