@@ -362,6 +362,70 @@ func TestSpeedMenuPreservedAcrossCardRefresh(t *testing.T) {
 	}
 }
 
+func TestDownloadProgressRenderingInCard(t *testing.T) {
+	st := engine.Status{
+		ID:       "s-test1234",
+		State:    "streaming",
+		Detail:   "[1/6] Downloading media: 45% (45.0 MiB / 100.0 MiB · 12.5 MiB/s)",
+		MeetURL:  "https://meet.google.com/abc-defg-hij",
+		MediaURL: "https://example.com/video.mp4",
+		PlayMode: "download",
+		DownloadProgress: engine.DownloadProgress{
+			Active:  true,
+			Bytes:   47185920,  // ~45 MiB
+			Total:   104857600, // 100 MiB
+			Speed:   13107200,  // 12.5 MiB/s
+			Percent: 45,
+		},
+	}
+	card := sessionCardText(st)
+	if !strings.Contains(card, "Download:") {
+		t.Fatalf("download label missing from card: %q", card)
+	}
+	if !strings.Contains(card, "45%") {
+		t.Fatalf("percent missing from card: %q", card)
+	}
+	if !strings.Contains(card, "12.5 MiB/s") {
+		t.Fatalf("speed missing from card: %q", card)
+	}
+	if !strings.Contains(card, "45.0") || !strings.Contains(card, "100.0 MiB") {
+		t.Fatalf("byte counts missing from card: %q", card)
+	}
+}
+
+func TestQueueAndQualitySubviewsPreservedAcrossCardRefresh(t *testing.T) {
+	h := newHarnessWithSettings(t, []int64{42}, 2)
+	s := h.addSessionWithQueue(42, 2)
+	id := string(s.ID)
+
+	// User opens session card.
+	h.callback(42, "ses:"+id)
+
+	// User opens Quality subview.
+	h.callback(42, "act:"+id+":quality")
+	if got := h.api.lastEdit().text; !strings.Contains(got, "Video Quality") {
+		t.Fatalf("quality menu not shown: %q", got)
+	}
+
+	// Card refresh runs — must retain Quality menu.
+	h.bot.refreshAll()
+	if got := h.api.lastEdit().text; !strings.Contains(got, "Video Quality") {
+		t.Fatalf("quality menu overwritten by refresh: %q", got)
+	}
+
+	// User opens Queue subview.
+	h.callback(42, "act:"+id+":queue")
+	if got := h.api.lastEdit().text; !strings.Contains(got, "Media Queue") {
+		t.Fatalf("queue menu not shown: %q", got)
+	}
+
+	// Card refresh runs — must retain Queue menu.
+	h.bot.refreshAll()
+	if got := h.api.lastEdit().text; !strings.Contains(got, "Media Queue") {
+		t.Fatalf("queue menu overwritten by refresh: %q", got)
+	}
+}
+
 func TestGuestNamePreferenceLifecycle(t *testing.T) {
 	h := newHarnessWithSettings(t, []int64{42}, 2)
 

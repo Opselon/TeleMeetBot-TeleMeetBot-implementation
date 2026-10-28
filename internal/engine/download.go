@@ -141,6 +141,46 @@ func (s *Session) prepareLocalMedia() error {
 			s.ID, humanBytesI(entry.Bytes), playMode, entry.ExpiresAt.Format(time.RFC3339))
 		return nil
 	}
+	dlID := s.downloadID()
+	s.mu.Lock()
+	s.downloadProg = DownloadProgress{Active: true}
+	s.mu.Unlock()
+	s.setDetail("[1/6] Downloading media: starting")
+
+	unsub := mgr.SubscribeProgress(func(p mediateam.Progress) {
+		if p.ID == dlID || (p.URL != "" && p.URL == target.URL) {
+			s.mu.Lock()
+			pct := 0
+			if p.Total > 0 {
+				pct = int((p.Bytes * 100) / p.Total)
+				if pct > 100 {
+					pct = 100
+				}
+			}
+			s.downloadProg = DownloadProgress{
+				Active:  !p.Done,
+				Bytes:   p.Bytes,
+				Total:   p.Total,
+				Speed:   p.Speed,
+				Percent: pct,
+			}
+			s.mu.Unlock()
+			if p.Total > 0 {
+				s.setDetail(fmt.Sprintf("[1/6] Downloading media: %d%% (%s / %s · %s/s)",
+					pct, humanBytesI(p.Bytes), humanBytesI(p.Total), humanBytesI(p.Speed)))
+			} else if p.Bytes > 0 {
+				s.setDetail(fmt.Sprintf("[1/6] Downloading media: %s (%s/s)",
+					humanBytesI(p.Bytes), humanBytesI(p.Speed)))
+			}
+		}
+	})
+	defer func() {
+		unsub()
+		s.mu.Lock()
+		s.downloadProg.Active = false
+		s.mu.Unlock()
+	}()
+
 	res, err := s.downloadMedia(context.Background(), target)
 	if err != nil {
 		return err

@@ -265,6 +265,25 @@ func sessionCardText(st engine.Status) string {
 		}
 		sb.WriteString("\n")
 	}
+	if st.DownloadProgress.Active {
+		if st.DownloadProgress.Total > 0 {
+			pct := st.DownloadProgress.Percent
+			bar := renderProgressBar(pct, 10)
+			sb.WriteString(fmt.Sprintf("📥 Download: %s <b>%d%%</b>\n", bar, pct))
+			if st.DownloadProgress.Speed > 0 {
+				sb.WriteString(fmt.Sprintf("   💾 <b>%.1f</b> / <b>%.1f MiB</b> · ⚡️ <b>%.1f MiB/s</b>\n",
+					float64(st.DownloadProgress.Bytes)/(1024*1024),
+					float64(st.DownloadProgress.Total)/(1024*1024),
+					float64(st.DownloadProgress.Speed)/(1024*1024)))
+			}
+		} else if st.DownloadProgress.Bytes > 0 {
+			sb.WriteString(fmt.Sprintf("📥 Download: 💾 <b>%.1f MiB</b>", float64(st.DownloadProgress.Bytes)/(1024*1024)))
+			if st.DownloadProgress.Speed > 0 {
+				sb.WriteString(fmt.Sprintf(" · ⚡️ <b>%.1f MiB/s</b>", float64(st.DownloadProgress.Speed)/(1024*1024)))
+			}
+			sb.WriteString("\n")
+		}
+	}
 	if st.FallbackReason != "" {
 		sb.WriteString(fmt.Sprintf("ℹ️ <i>%s</i>\n", esc(st.FallbackReason)))
 	}
@@ -994,4 +1013,23 @@ func queueClearConfirmKB(id string) *tgbotapi.InlineKeyboardMarkup {
 			},
 		},
 	}
+}
+
+// renderProgressBar formats an ASCII progress bar (e.g. [████░░░░░░]).
+func renderProgressBar(pct int, width int) string {
+	if pct < 0 {
+		pct = 0
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	if width <= 0 {
+		width = 10
+	}
+	filled := (pct * width) / 100
+	if filled > width {
+		filled = width
+	}
+	empty := width - filled
+	return "[" + strings.Repeat("█", filled) + strings.Repeat("░", empty) + "]"
 }

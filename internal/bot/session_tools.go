@@ -65,6 +65,7 @@ func (b *Bot) handleQueueToolsCallback(chatID, userID int64, msgID int, q *tgbot
 
 // renderQueueMoveMenu shows the upcoming items with per-item up/down buttons.
 func (b *Bot) renderQueueMoveMenu(chatID int64, msgID int, s *engine.Session) {
+	b.setCardView(string(s.ID), chatID, msgID, "queue")
 	st := s.Snapshot()
 	items, curIdx := s.QueueSnapshot()
 	text, kb := queueMoveMenu(st, items, curIdx)

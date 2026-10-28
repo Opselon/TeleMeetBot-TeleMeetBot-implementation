@@ -146,6 +146,10 @@ func launchFlags(cfg BrowserConfig, meet MeetOptions, forMeet bool) []string {
 		"lang=" + languageOf(cfg),
 		"accept-lang=" + languageOf(cfg),
 		"user-agent=" + userAgentOf(cfg),
+		// Prevent WebRTC from degrading outbound presentation bitrate under moderate CPU load.
+		"webrtc-max-cpu-consumption-percentage=100",
+		// Allow fast direct ICE candidate negotiation without mDNS delays.
+		"disable-features=WebRtcHideLocalIpsWithMdns",
 	}
 	switch gpuMode(cfg, forMeet) {
 	case GPUModeSwiftShader:

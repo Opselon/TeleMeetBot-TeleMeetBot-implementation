@@ -79,8 +79,8 @@ func (m *Manager) fetchDirect(ctx context.Context, u *url.URL, id string) (*dire
 		}
 	}()
 
-	n, err := m.copyLimitedProgress(ctx, resp.Body, tmp, m.opts.MaxBytes, func(read int64) {
-		m.reportProgress(Progress{URL: u.String(), ID: id, Bytes: read, Total: resp.ContentLength})
+	n, err := m.copyLimitedProgress(ctx, resp.Body, tmp, m.opts.MaxBytes, func(read, speed int64) {
+		m.reportProgress(Progress{URL: u.String(), ID: id, Bytes: read, Total: resp.ContentLength, Speed: speed})
 	})
 	if err != nil {
 		_ = tmp.Close()
@@ -344,10 +344,11 @@ func (m *Manager) resolver() func(string) ([]net.IP, error) {
 
 // copyLimitedProgress is copyLimited with a mid-stream callback for progress
 // reporting. The callback fires at most 4x/second so a big file cannot flood
-// the bus.
-func (m *Manager) copyLimitedProgress(ctx context.Context, r io.Reader, w io.Writer, max int64, every func(read int64)) (int64, error) {
-	buf := make([]byte, 64*1024)
+// the bus. It also calculates instantaneous download speed in bytes/sec.
+func (m *Manager) copyLimitedProgress(ctx context.Context, r io.Reader, w io.Writer, max int64, every func(read, speed int64)) (int64, error) {
+	buf := make([]byte, 512*1024)
 	var written int64
+	var lastWritten int64
 	lastReport := time.Now()
 	for {
 		if max > 0 && written >= max {
@@ -369,9 +370,16 @@ func (m *Manager) copyLimitedProgress(ctx context.Context, r io.Reader, w io.Wri
 				return written, werr
 			}
 			written += int64(n)
-			if every != nil && time.Since(lastReport) >= 250*time.Millisecond {
-				lastReport = time.Now()
-				every(written)
+			now := time.Now()
+			elapsed := now.Sub(lastReport)
+			if every != nil && elapsed >= 250*time.Millisecond {
+				speed := int64(0)
+				if sec := elapsed.Seconds(); sec > 0 {
+					speed = int64(float64(written-lastWritten) / sec)
+				}
+				lastReport = now
+				lastWritten = written
+				every(written, speed)
 			}
 		}
 		if err == io.EOF {
