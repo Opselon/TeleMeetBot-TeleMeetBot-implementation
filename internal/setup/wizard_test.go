@@ -265,8 +265,9 @@ func TestDoctorPassesWithFakeEnvironment(t *testing.T) {
 	}
 
 	rep := Doctor(cfg, cfgPath, DoctorOptions{
-		SkipNetwork: true,
-		Validate:    func(string) (string, error) { return "doctor_bot", nil },
+		SkipNetwork:    true,
+		SkipMediaTools: true,
+		Validate:       func(string) (string, error) { return "doctor_bot", nil },
 	})
 	if !rep.OK() {
 		for _, c := range rep.Checks {
@@ -302,7 +303,9 @@ func TestWizardReportsInvalidToken(t *testing.T) {
 			"n",
 		}, "\n") + "\n"),
 		Out:                &out,
+		Profile:            ProfileFull,
 		SkipBrowserInstall: true,
+		SkipMediaInstall:   true,
 		TokenValidator: func(tok string) (string, error) {
 			calls++
 			if tok == "1:bad" {

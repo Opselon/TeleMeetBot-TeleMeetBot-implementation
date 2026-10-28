@@ -26,6 +26,20 @@ import (
 )
 
 func main() {
+	// Support bare subcommands: `telemeetbot setup`, `telemeetbot doctor`, etc.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "setup":
+			os.Args = append([]string{os.Args[0], "--setup"}, os.Args[2:]...)
+		case "doctor":
+			os.Args = append([]string{os.Args[0], "--doctor"}, os.Args[2:]...)
+		case "uninstall":
+			os.Args = append([]string{os.Args[0], "--uninstall"}, os.Args[2:]...)
+		case "version":
+			os.Args = append([]string{os.Args[0], "--version"}, os.Args[2:]...)
+		}
+	}
+
 	var (
 		// serviceMode runs the process under the Windows Service Control
 		// Manager. It is auto-detected (no console, SCM parent) and can also
@@ -34,8 +48,12 @@ func main() {
 
 		cfgFlag     = flag.String("config", "", "path to telemeetbot.yml (default: ./telemeetbot.yml or the platform's system config)")
 		wizardFlag  = flag.Bool("wizard", false, "run the interactive setup wizard")
+		setupFlag   = flag.Bool("setup", false, "run the setup and configuration wizard")
+		installFlag = flag.Bool("install", false, "install binary and run setup wizard")
 		runAfter    = flag.Bool("run", false, "with --wizard: start the bot after a successful setup")
 		checkFlag   = flag.Bool("check", false, "run doctor diagnostics and exit")
+		doctorFlag  = flag.Bool("doctor", false, "run diagnostics and exit (alias for --check)")
+		profileFlag = flag.String("profile", "", "setup profile: full (default) or minimal")
 		captureFlag = flag.Bool("capture-test", false, "with --check: run a real tab-capture probe (starts Chromium)")
 		versionFlag = flag.Bool("version", false, "print version and exit")
 
@@ -101,24 +119,28 @@ func main() {
 	cfgPath := config.ResolvePath(*cfgFlag)
 	logger := newLogger("info")
 
+	isSetupExe := strings.Contains(strings.ToLower(filepath.Base(os.Args[0])), "setup")
+	isWizard := *wizardFlag || *setupFlag || *installFlag || isSetupExe
+	isDoctor := *checkFlag || *doctorFlag
+
 	// Wizard mode (also triggered automatically when no config exists).
-	if *wizardFlag || !config.Exists(cfgPath) {
-		if !*wizardFlag {
+	if isWizard || !config.Exists(cfgPath) {
+		if !isWizard {
 			fmt.Printf("No config found at %s — starting setup wizard.\n\n", cfgPath)
 		}
 		cfg, err := setup.Run(setup.WizardOptions{
-			ConfigPath:  cfgPath,
-			Log:         logger,
-			CaptureTest: false,
+			ConfigPath:    cfgPath,
+			Log:           logger,
+			CaptureTest:   false,
+			Profile:       setup.Profile(*profileFlag),
+			InstallerMode: *installFlag || isSetupExe,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "\nsetup failed: %v\n", err)
 			os.Exit(1)
 		}
 		cfgPath = cfg.Path()
-		if *wizardFlag && !*runAfter {
-			fmt.Println("\nSetup complete. Start the bot with:")
-			fmt.Printf("  %s --config %s\n", os.Args[0], cfgPath)
+		if isWizard && !*runAfter {
 			return
 		}
 	}
@@ -194,7 +216,7 @@ func main() {
 		return
 	}
 
-	if *checkFlag {
+	if isDoctor {
 		report := setup.Doctor(cfg, cfgPath, setup.DoctorOptions{CaptureTest: *captureFlag, Log: logger})
 		report.Print()
 		if !report.OK() {

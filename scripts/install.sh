@@ -249,6 +249,18 @@ else
 fi
 
 if [ "$START" -eq 1 ] && [ "$SERVICE" -eq 1 ]; then
+  case "$PLATFORM" in
+    linux)
+      if command -v systemctl >/dev/null 2>&1 && $SUDO systemctl is-system-running >/dev/null 2>&1; then
+        $SUDO systemctl enable --now telemeetbot >/dev/null 2>&1 || true
+      fi
+      ;;
+    darwin)
+      if command -v launchctl >/dev/null 2>&1; then
+        launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/telemeetbot.plist" >/dev/null 2>&1 || true
+      fi
+      ;;
+  esac
   log "verifying the health endpoint"
   # The wizard binds 127.0.0.1:18080 by default; give the service a moment.
   sleep 2

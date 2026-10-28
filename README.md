@@ -118,27 +118,30 @@ curl http://127.0.0.1:18080/healthz
 
 ### Option C — one-command install (bare metal)
 
-**Linux / macOS:**
+### Option C — One-Command Install & Native Installers (Bare Metal)
+
+**Windows (Native Setup Wizard or PowerShell):**
+
+1. **Native Installer Wizard (Easiest)**: Download `TeleMeetBot-Setup-windows-amd64.exe` (or `TeleMeetBot-Setup-windows-arm64.exe`) from the [latest GitHub Release](https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/latest) and run it. It guides you step-by-step through profile selection, dependency setup, Telegram token configuration, and Windows service registration.
+2. **PowerShell One-Liner**:
+```powershell
+irm https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/latest/download/install.ps1 | iex
+```
+
+**Linux / macOS (POSIX sh):**
 
 ```bash
 curl -fsSL https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/latest/download/install.sh | sh
 ```
 
-**Windows (PowerShell):**
-
-```powershell
-irm https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/latest/download/install.ps1 | iex
-```
-
-The installer detects the OS and CPU arch (`amd64`/`arm64`/`arm v6, v7`/`386`), dependencies,
+The installer detects the OS and CPU architecture (`amd64`/`arm64`/`arm v6, v7`/`386`), dependencies,
 permissions and whether it is running elevated, resolves the latest **release tag**, downloads the
 matching archive and **verifies it against the release's published SHA-256 checksums** before
 touching anything. It then installs the binary (`/usr/local/bin/telemeetbot` or
 `%ProgramFiles%\TeleMeetBot`), **runs it and matches its `--version` against the release tag** so a
 corrupt or mismatched download can never be reported as a successful install, stages a template
-config (`deploy/config.example.yml`) without overwriting an existing one, installs the OS service
-(systemd on Linux, a Windows service via the SCM, a launchd agent on macOS) and launches the
-setup wizard.
+config (`deploy/config.example.yml`) without overwriting an existing one, runs the interactive
+setup wizard to finalize your configuration, and registers the OS service (systemd on Linux, Windows SCM, or launchd on macOS).
 
 > The installer is written in POSIX `sh`, not bash: the one-command install pipes it straight into
 > `sh`, which is `dash` on Debian/Ubuntu and `busybox` on Alpine. It is tested under both in CI.
@@ -146,7 +149,7 @@ setup wizard.
 Pin a specific release (recommended for unattended installs):
 
 ```bash
-curl -fsSL https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.2.0/install.sh | sh -s -- --version v1.2.0
+curl -fsSL https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.5.0/install.sh | sh -s -- --version v1.5.0
 ```
 
 Other flags: `--version vX.Y.Z` · `--prefix DIR` · `--config-dir DIR` · `--data-dir DIR`
@@ -155,27 +158,38 @@ Other flags: `--version vX.Y.Z` · `--prefix DIR` · `--config-dir DIR` · `--da
 Verify a downloaded archive yourself before installing:
 
 ```bash
-curl -fsSLO https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.2.0/SHA256SUMS
+curl -fsSLO https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/download/v1.5.0/SHA256SUMS
 sha256sum -c SHA256SUMS --ignore-missing
 ```
 
-**Lifecycle after install:**
+### Installation Profiles & Dependency Manager
+
+TeleMeetBot supports two distinct installation profiles:
+* **Full Installation (Recommended)**: Enables Google Meet WebRTC streaming and the high-speed Download & Stream media engine. Configures Chromium, standalone `yt-dlp`, `FFmpeg`, and optionally `Deno` for solving YouTube JS challenges.
+* **Minimal Installation**: Core Google Meet presentation mode only. Uses Chromium for direct browser playback; media downloading is disabled (`download.enabled: false`).
+
+**Dependencies & Runtime Isolation:**
+* End users do **not** need to install Go, Python, Selenium, Node.js, compilers, or build toolchains.
+* yt-dlp is executed as a standalone binary or managed package without requiring Python toolchains.
+* Package managers (`apt-get`, `dnf`, `pacman`, `apk`, `zypper` on Linux; `winget` on Windows; `brew` on macOS) are detected and used automatically when confirming missing dependencies.
+
+**Lifecycle and Diagnostic Commands:**
 
 ```bash
-telemeetbot --wizard                         # re-run setup (backs up the previous config to .bak)
-telemeetbot --restore-backup                 # roll the config back to that backup
-telemeetbot --check                          # doctor: config, browser, permissions, disk, network
-telemeetbot --uninstall                      # stop + remove the service and the binary
-telemeetbot --uninstall --keep-binary        # remove only the service registration
+telemeetbot setup                            # run canonical 9-step interactive setup wizard
+telemeetbot doctor                           # run doctor diagnostics (alias: telemeetbot --check)
+telemeetbot --restore-backup                 # roll the config back to that backup (.bak)
+telemeetbot uninstall                        # stop + remove the service and the binary
+telemeetbot uninstall --keep-binary          # remove only the service registration
+# Service checks:
 # Linux:   systemctl status telemeetbot | journalctl -u telemeetbot -f
 # macOS:   launchctl print gui/$(id -u)/telemeetbot
 # Windows: sc.exe query telemeetbot | Get-EventLog -LogName Application -Source telemeetbot
 ```
 
-> The uninstall never deletes your config, data directory or session history — those hold the
-> bot token and your saved meetings. Remove them manually for a full purge.
+> The uninstall never deletes your config, data directory, SQLite databases, or session history. Remove them manually for a full purge.
 
-### Option C — build from source
+### Option D — Build from Source
 
 ```bash
 go build -o telemeetbot ./cmd/telemeetbot   # Go 1.26+

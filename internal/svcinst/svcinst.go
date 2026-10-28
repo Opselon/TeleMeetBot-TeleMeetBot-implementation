@@ -39,6 +39,12 @@ type Options struct {
 	Description string
 }
 
+// IsElevated reports whether the current process is running with administrative privileges
+// (root on Unix, elevated administrator token on Windows).
+func IsElevated() bool {
+	return isElevated()
+}
+
 // System reports which service system is available and usable on this host.
 // Detection is behavioural: it checks for the supervisor binary/IPC surface,
 // not just the OS, so a Linux container without systemd reports KindNone and
