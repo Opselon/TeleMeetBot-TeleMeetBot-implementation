@@ -34,9 +34,10 @@ func TestProfileConfiguration(t *testing.T) {
 
 	// Test ProfileFull enables media downloads
 	optsFull := WizardOptions{
-		NonInteractive: true,
-		Profile:        ProfileFull,
-		TokenValidator: func(string) (string, error) { return "test_bot", nil },
+		NonInteractive:   true,
+		Profile:          ProfileFull,
+		SkipMediaInstall: true,
+		TokenValidator:   func(string) (string, error) { return "test_bot", nil },
 	}
 	optsFull.ConfigPath = filepath.Join(dir, "full.yml")
 

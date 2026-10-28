@@ -9,6 +9,7 @@ import (
 
 	"github.com/Opselon/TeleMeetBot/internal/config"
 	"github.com/Opselon/TeleMeetBot/internal/engine"
+	"github.com/Opselon/TeleMeetBot/internal/svcinst"
 )
 
 // Profile represents the installation profile selected by the operator.
@@ -68,6 +69,10 @@ func DetectPackageManager() *PackageManager {
 			return &PackageManager{Name: "brew", Path: p}
 		}
 	default: // linux / bsd
+		if !svcinst.IsElevated() {
+			// Standard users cannot invoke system package managers without root.
+			return nil
+		}
 		for _, mgr := range []string{"apt-get", "dnf", "pacman", "zypper", "apk"} {
 			if p, err := exec.LookPath(mgr); err == nil {
 				return &PackageManager{Name: mgr, Path: p}
