@@ -735,6 +735,14 @@ func (s *Session) watch() {
 				s.log.Warnf("[PIPELINE:present] session %s: presenting() false (%d/2 consecutive)", s.ID, presentMisses)
 				if presentMisses >= 2 {
 					presentMisses = 0
+					// Out-of-meeting detection first: when the tab was kicked
+					// to a landing page, re-presenting cannot ever succeed —
+					// fail fast with the honest reason instead of three 45 s
+					// present-flow timeouts (production incident 2026-10-27).
+					if err := s.checkMeetingPresence(); err != nil {
+						s.setError(err)
+						return
+					}
 					if presentTries >= 3 {
 						s.setDetail("sharing stopped and could not be resumed; leaving")
 						s.setError(errors.New("screen share was dropped by Google Meet"))
@@ -1112,6 +1120,9 @@ func (s *Session) startPresenting() error {
 	lastState := ""
 	lastNote := time.Time{}
 	lastWarn := time.Time{}
+	presentMisses := 0
+	lastDump := time.Time{}
+	presentStart := time.Now()
 	for time.Now().Before(deadline) {
 		if s.ctx.Err() != nil {
 			return s.ctx.Err()
@@ -1194,7 +1205,16 @@ func (s *Session) startPresenting() error {
 			} else {
 				if time.Since(lastWarn) >= 10*time.Second {
 					lastWarn = time.Now()
-					s.log.Warnf("[PIPELINE:present] session %s: clickPresentButton found no button; visible buttons: %s", s.ID, s.dumpToolbarButtons())
+					presentMisses++
+					// Dump the toolbar once per burst, not on every miss: a
+					// stuck loop produced 25 ~1KB dumps in one production
+					// incident. Later misses in the same burst only count.
+					if presentMisses == 1 || time.Since(lastDump) >= 90*time.Second {
+						lastDump = time.Now()
+						s.log.Warnf("[PIPELINE:present] session %s: clickPresentButton found no button (miss #%d); visible buttons: %s", s.ID, presentMisses, s.dumpToolbarButtons())
+					} else {
+						s.log.Warnf("[PIPELINE:present] session %s: clickPresentButton found no button (miss #%d, %ds since first)", s.ID, presentMisses, int(time.Since(presentStart).Seconds()))
+					}
 				}
 			}
 		}
