@@ -330,7 +330,7 @@ func sessionCardKB(st engine.Status) *tgbotapi.InlineKeyboardMarkup {
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData("🎞️ Video quality", "act:"+id+":quality"),
-			tgbotapi.NewInlineKeyboardButtonData("📊 Quality info", "act:"+id+":qinfo"),
+			tgbotapi.NewInlineKeyboardButtonData("💬 Subtitles", "act:"+id+":captions"),
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData("🔀 Switch media", "act:"+id+":switchurl"),
@@ -616,6 +616,7 @@ func confirmKB(userAudioLang, userMediaMode, userQuality string, hasGoogleAccoun
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData("🎞️ Quality: "+engine.QualityPolicyDisplay(userQuality), "set:quality"),
+			tgbotapi.NewInlineKeyboardButtonData("💬 Captions", "set:captions"),
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData(profileLabel, cbAccount),

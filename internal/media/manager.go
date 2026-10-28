@@ -40,6 +40,9 @@ type Result struct {
 	// Selected is what the extractor actually chose (yt-dlp sources).
 	// Zero value = not reported: direct HTTP fetches have no format ladder.
 	Selected SelectedFormat
+	// Subtitle is the fetched caption track, served over loopback. nil when
+	// none was requested or the track was unavailable (never fatal).
+	Subtitle *Subtitle
 }
 
 // ErrDisabled means the feature is off; callers must keep Browser mode.

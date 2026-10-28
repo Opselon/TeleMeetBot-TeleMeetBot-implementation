@@ -30,7 +30,7 @@ const maxExecRetries = 2
 // Security: yt-dlp receives exactly two vetted arguments — the output template
 // (built from a server-generated id, never user text) and the validated URL.
 // There is no shell anywhere in the chain, so no command injection surface.
-func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality string) (*ytdlpResult, error) {
+func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality, subLang string) (*ytdlpResult, error) {
 	bin, ok := m.YTDLP()
 	if !ok {
 		return nil, &ErrMissingTool{
@@ -86,6 +86,19 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality string) (*ytdlp
 		// Download & Stream session die at ~3s with "no output file with the
 		// expected name" and an empty stderr.
 		"--no-simulate",
+	)
+	if lang := strings.ToLower(strings.TrimSpace(subLang)); lang != "" && lang != "off" {
+		// Ride the caption track along with the video: the manual track when
+		// the source ships one, automatic otherwise. The artifact is
+		// verified and converted after the fetch (prepareSubtitle).
+		args = append(args,
+			"--write-subs",
+			"--write-auto-subs",
+			"--sub-langs", lang,
+			"--sub-format", "vtt/srt/best",
+		)
+	}
+	args = append(args,
 		// Report what was actually selected. With --no-simulate, --print
 		// WHEN:TEMPLATE prints during the real download; after_move runs
 		// once per output file. The comma-separated fields are parsed in

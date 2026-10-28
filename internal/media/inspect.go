@@ -76,6 +76,10 @@ type SourceInfo struct {
 	RequiresFFmpeg bool `json:"requires_ffmpeg,omitempty"`
 	// InspectedAt is when the metadata was fetched (cache bookkeeping).
 	InspectedAt time.Time `json:"inspected_at"`
+	// Subtitles lists caption tracks the extractor reported, manual first,
+	// then automatic. Automatic tracks are always labelled — a translated
+	// track is offered only when the source really ships one.
+	Subtitles []SubtitleTrack `json:"subtitles,omitempty"`
 }
 
 // InspectError wraps a failed probe with its cause for the UI.
@@ -156,10 +160,12 @@ func (m *Manager) Inspect(ctx context.Context, rawURL string) (*SourceInfo, erro
 
 // ytDLPJSON is the subset of `yt-dlp -J` output the panel needs.
 type ytDLPJSON struct {
-	Title    string  `json:"title"`
-	Duration float64 `json:"duration"`
-	IsLive   bool    `json:"is_live"`
-	Formats  []struct {
+	Title             string                   `json:"title"`
+	Duration          float64                  `json:"duration"`
+	IsLive            bool                     `json:"is_live"`
+	Subtitles         map[string][]subtitleURL `json:"subtitles"`
+	AutomaticCaptions map[string][]subtitleURL `json:"automatic_captions"`
+	Formats           []struct {
 		FormatID       string  `json:"format_id"`
 		Height         int     `json:"height"`
 		Width          int     `json:"width"`
@@ -237,7 +243,22 @@ func parseSourceInfo(stdout []byte) (*SourceInfo, error) {
 			info.RequiresFFmpeg = true
 		}
 	}
-	if len(info.Formats) == 0 {
+	manualLangs, autoLangs := SubtitleLangsFor(raw.Subtitles, raw.AutomaticCaptions)
+	for _, lang := range manualLangs {
+		ext := ""
+		if urls := raw.Subtitles[lang]; len(urls) > 0 {
+			ext = urls[0].Ext
+		}
+		info.Subtitles = append(info.Subtitles, SubtitleTrack{Lang: lang, Ext: ext})
+	}
+	for _, lang := range autoLangs {
+		ext := ""
+		if urls := raw.AutomaticCaptions[lang]; len(urls) > 0 {
+			ext = urls[0].Ext
+		}
+		info.Subtitles = append(info.Subtitles, SubtitleTrack{Lang: lang, Auto: true, Ext: ext})
+	}
+	if len(info.Formats) == 0 && len(info.Subtitles) == 0 {
 		return nil, fmt.Errorf("%w: no formats reported", ErrInspectUnsupported)
 	}
 	return info, nil

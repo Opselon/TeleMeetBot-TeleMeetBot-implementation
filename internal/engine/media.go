@@ -151,6 +151,10 @@ type PlayerOptions struct {
 	Loop     bool
 	Volume   int
 	Speed    float64
+	// SubtitleURL/SubtitleLang attach a native caption <track> served from
+	// the loopback server (Download & Stream path). Empty = none.
+	SubtitleURL  string
+	SubtitleLang string
 }
 
 // PlayerHTML renders the embedded player document. The page locks
@@ -171,13 +175,15 @@ func PlayerHTML(t MediaTarget, o PlayerOptions) (string, error) {
 		return "", fmt.Errorf("read player asset: %w", err)
 	}
 	boot, err := json.Marshal(map[string]any{
-		"src":      t.URL,
-		"tabTitle": o.TabTitle,
-		"autoplay": o.Autoplay,
-		"mute":     o.Mute,
-		"loop":     o.Loop,
-		"volume":   o.Volume,
-		"speed":    o.Speed,
+		"src":          t.URL,
+		"tabTitle":     o.TabTitle,
+		"autoplay":     o.Autoplay,
+		"mute":         o.Mute,
+		"loop":         o.Loop,
+		"volume":       o.Volume,
+		"speed":        o.Speed,
+		"subtitleURL":  o.SubtitleURL,
+		"subtitleLang": o.SubtitleLang,
 	})
 	if err != nil {
 		return "", err

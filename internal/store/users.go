@@ -88,6 +88,12 @@ type UserSettings struct {
 	GuestName string `json:"guest_name,omitempty"`
 	// QualityPolicy is the saved video-quality policy (auto default).
 	QualityPolicy string `json:"quality_policy,omitempty"`
+	// CaptionPolicy controls subtitles: off (default), auto (preferred
+	// language when available), preferred (saved language), original.
+	CaptionPolicy string `json:"caption_policy,omitempty"`
+	// CaptionLang is the preferred subtitle language (BCP-47-ish code).
+	// Deliberately independent of AudioLang.
+	CaptionLang string `json:"caption_lang,omitempty"`
 }
 
 // MaxGuestNameRunes bounds the user-supplied Meet display name.
@@ -116,12 +122,15 @@ func SanitizeGuestName(raw string) (string, error) {
 // no saved row. The audio language is Persian, as mandated.
 func DefaultUserSettings() UserSettings {
 	return UserSettings{
-		AudioLang:  DefaultAudioLang,
-		MediaMode:  DefaultMediaMode,
-		Volume:     0,
-		Speed:      0,
-		Autoplay:   true,
-		RepeatMode: RepeatOff,
+		AudioLang:     DefaultAudioLang,
+		MediaMode:     DefaultMediaMode,
+		Volume:        0,
+		Speed:         0,
+		Autoplay:      true,
+		RepeatMode:    RepeatOff,
+		QualityPolicy: QualityAuto,
+		CaptionPolicy: CaptionOff,
+		CaptionLang:   "",
 	}
 }
 
@@ -138,6 +147,8 @@ func (u UserSettings) normalize() UserSettings {
 		u.GuestName = sanitized
 	}
 	u.QualityPolicy = NormalizeQualityPolicy(u.QualityPolicy)
+	u.CaptionPolicy = NormalizeCaptionPolicy(u.CaptionPolicy)
+	u.CaptionLang = NormalizeCaptionLang(u.CaptionLang)
 	if u.Volume < 0 || u.Volume > 100 {
 		u.Volume = 0
 	}
@@ -180,7 +191,7 @@ const (
 
 // userSchemaVersion is the latest schema version recorded in
 // schema_migrations. Bump it together with a new step in userMigrations.
-const userSchemaVersion = 3
+const userSchemaVersion = 4
 
 // userMigrations maps a version to its DDL. Version 1 is idempotent
 // (CREATE ... IF NOT EXISTS). Versions 2+ add columns/tables with
@@ -234,6 +245,8 @@ var userMigrations = map[int]string{
 		updated_at INTEGER NOT NULL
 	);`,
 	3: `ALTER TABLE user_preferences ADD COLUMN quality_policy TEXT NOT NULL DEFAULT 'auto';`,
+	4: `ALTER TABLE user_preferences ADD COLUMN caption_policy TEXT NOT NULL DEFAULT 'off';
+	ALTER TABLE user_preferences ADD COLUMN caption_lang TEXT NOT NULL DEFAULT '';`,
 }
 
 // ErrUserInvalid wraps invalid user-scoped input.
@@ -350,6 +363,15 @@ func (us *UserStore) migrate(ctx context.Context) error {
 				"ALTER TABLE user_preferences ADD COLUMN quality_policy TEXT NOT NULL DEFAULT 'auto'"); err != nil {
 				return err
 			}
+		case 4:
+			if err := us.ensureColumnLocked(ctx, "user_preferences", "caption_policy",
+				"ALTER TABLE user_preferences ADD COLUMN caption_policy TEXT NOT NULL DEFAULT 'off'"); err != nil {
+				return err
+			}
+			if err := us.ensureColumnLocked(ctx, "user_preferences", "caption_lang",
+				"ALTER TABLE user_preferences ADD COLUMN caption_lang TEXT NOT NULL DEFAULT ''"); err != nil {
+				return err
+			}
 		default:
 			if _, err := us.db.ExecContext(ctx, userMigrations[v]); err != nil {
 				return fmt.Errorf("apply user migration %d: %w", v, err)
@@ -387,7 +409,7 @@ func (us *UserStore) ensureColumnLocked(ctx context.Context, table, column, ddl 
 
 // userPrefDataColumns lists the value columns (no user_id): the single-row
 // readers filter by user_id and scan only these.
-const userPrefDataColumns = `audio_lang, media_mode, volume, speed, autoplay, repeat_mode, guest_name, quality_policy`
+const userPrefDataColumns = `audio_lang, media_mode, volume, speed, autoplay, repeat_mode, guest_name, quality_policy, caption_policy, caption_lang`
 
 // userPrefColumns adds user_id for the map-shaped listing query.
 const userPrefColumns = `user_id, ` + userPrefDataColumns
@@ -395,7 +417,7 @@ const userPrefColumns = `user_id, ` + userPrefDataColumns
 func scanUserSettings(row *sql.Row) (UserSettings, error) {
 	var u UserSettings
 	var autoplay int
-	err := row.Scan(&u.AudioLang, &u.MediaMode, &u.Volume, &u.Speed, &autoplay, &u.RepeatMode, &u.GuestName, &u.QualityPolicy)
+	err := row.Scan(&u.AudioLang, &u.MediaMode, &u.Volume, &u.Speed, &autoplay, &u.RepeatMode, &u.GuestName, &u.QualityPolicy, &u.CaptionPolicy, &u.CaptionLang)
 	if err != nil {
 		return UserSettings{}, err
 	}
@@ -483,9 +505,9 @@ func (us *UserStore) upsertSettings(ctx context.Context, userID int64, apply fun
 		autoplay = 1
 	}
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE user_preferences SET audio_lang = ?, media_mode = ?, volume = ?, speed = ?, autoplay = ?, repeat_mode = ?, guest_name = ?, quality_policy = ?, updated_at = ?
+		`UPDATE user_preferences SET audio_lang = ?, media_mode = ?, volume = ?, speed = ?, autoplay = ?, repeat_mode = ?, guest_name = ?, quality_policy = ?, caption_policy = ?, caption_lang = ?, updated_at = ?
 		 WHERE user_id = ?`,
-		u.AudioLang, u.MediaMode, u.Volume, u.Speed, autoplay, u.RepeatMode, u.GuestName, u.QualityPolicy, time.Now().Unix(), userID); err != nil {
+		u.AudioLang, u.MediaMode, u.Volume, u.Speed, autoplay, u.RepeatMode, u.GuestName, u.QualityPolicy, u.CaptionPolicy, u.CaptionLang, time.Now().Unix(), userID); err != nil {
 		return UserSettings{}, fmt.Errorf("update preferences: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -529,6 +551,63 @@ func (us *UserStore) SetAutoplay(ctx context.Context, userID int64, on bool) (Us
 // SetRepeatMode persists the repeat preference.
 func (us *UserStore) SetRepeatMode(ctx context.Context, userID int64, mode string) (UserSettings, error) {
 	return us.upsertSettings(ctx, userID, func(u *UserSettings) { u.RepeatMode = NormalizeRepeatMode(mode) })
+}
+
+// Caption policies for subtitles.
+const (
+	CaptionOff       = "off"
+	CaptionAuto      = "auto"
+	CaptionPreferred = "preferred"
+	CaptionOriginal  = "original"
+)
+
+// NormalizeCaptionPolicy validates a caption policy, falling back to off.
+func NormalizeCaptionPolicy(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case CaptionAuto, CaptionPreferred, CaptionOriginal:
+		return strings.ToLower(strings.TrimSpace(s))
+	default:
+		return CaptionOff
+	}
+}
+
+// NormalizeCaptionLang trims and lowercases a subtitle language tag; empty
+// stays empty (no preference). The fence mirrors BCP-47's shape — letters,
+// digits, single dashes, must start with a letter — so a corrupt row cannot
+// leak garbage into URLs or the UI.
+func NormalizeCaptionLang(s string) string {
+	lang := strings.ToLower(strings.TrimSpace(s))
+	if len(lang) == 0 || len(lang) > 16 {
+		return ""
+	}
+	if lang[0] < 'a' || lang[0] > 'z' {
+		return ""
+	}
+	if strings.Contains(lang, "--") {
+		return ""
+	}
+	for _, r := range lang {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-') {
+			return ""
+		}
+	}
+	return lang
+}
+
+// SetCaptionPolicy persists the subtitle policy.
+func (us *UserStore) SetCaptionPolicy(ctx context.Context, userID int64, policy string) (UserSettings, error) {
+	return us.upsertSettings(ctx, userID, func(u *UserSettings) { u.CaptionPolicy = NormalizeCaptionPolicy(policy) })
+}
+
+// SetCaptionLang persists the preferred subtitle language. Empty clears it;
+// a non-empty value that fails validation is an error rather than a silent
+// clear (the caller keeps its saved preference).
+func (us *UserStore) SetCaptionLang(ctx context.Context, userID int64, lang string) (UserSettings, error) {
+	normalized := NormalizeCaptionLang(lang)
+	if normalized == "" && strings.TrimSpace(lang) != "" {
+		return UserSettings{}, fmt.Errorf("%w: invalid caption language %q", ErrUserInvalid, lang)
+	}
+	return us.upsertSettings(ctx, userID, func(u *UserSettings) { u.CaptionLang = normalized })
 }
 
 // SetQualityPolicy persists the video-quality policy.
@@ -595,7 +674,7 @@ func (us *UserStore) Preferences(ctx context.Context) (map[int64]UserSettings, e
 		var id int64
 		var u UserSettings
 		var autoplay int
-		if err := rows.Scan(&id, &u.AudioLang, &u.MediaMode, &u.Volume, &u.Speed, &autoplay, &u.RepeatMode, &u.GuestName, &u.QualityPolicy); err != nil {
+		if err := rows.Scan(&id, &u.AudioLang, &u.MediaMode, &u.Volume, &u.Speed, &autoplay, &u.RepeatMode, &u.GuestName, &u.QualityPolicy, &u.CaptionPolicy, &u.CaptionLang); err != nil {
 			return nil, fmt.Errorf("scan preference: %w", err)
 		}
 		u.Autoplay = autoplay != 0

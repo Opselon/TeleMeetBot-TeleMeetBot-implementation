@@ -153,9 +153,31 @@ if command -v chown >/dev/null 2>&1; then
   chown -R 10001:10001 "$DATA_DIR" 2>/dev/null || true
 fi
 
-# 5. Pull latest container image from GHCR
+# 5. Pull latest container image from GHCR.
+# A failed pull MUST fail the deploy: proceeding with the cached image
+# silently redeployed an old build once (2026-10-27: the :latest tag raced
+# the CI push and production ran a stale image for a day while CD reported
+# success). Bounded retries ride out transient registry/CDN errors.
 echo "==> Pulling latest Docker image: $IMAGE..."
-docker pull "$IMAGE" || echo "⚠️ Warning: docker pull failed, proceeding with local cached image."
+pull_ok=0
+pull_attempt=0
+max_pull_attempts=3
+while [ $pull_attempt -lt $max_pull_attempts ]; do
+  pull_attempt=$((pull_attempt + 1))
+  if docker pull "$IMAGE"; then
+    pull_ok=1
+    break
+  fi
+  echo "Warning: docker pull attempt $pull_attempt/$max_pull_attempts failed."
+  [ $pull_attempt -lt $max_pull_attempts ] && sleep 10
+done
+if [ $pull_ok -ne 1 ]; then
+  echo "Error: docker pull failed after $max_pull_attempts attempts." >&2
+  echo "Error: refusing to redeploy the cached image - that would silently roll back production." >&2
+  exit 1
+fi
+PULLED_DIGEST=$(docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE" 2>/dev/null | sed 's/.*@//' || true)
+echo "==> Pulled image digest: ${PULLED_DIGEST:-unknown}"
 
 # 6. Clean shutdown and removal of previous container
 echo "==> Gracefully stopping previous $CONTAINER_NAME container..."
@@ -164,13 +186,18 @@ docker rm "$CONTAINER_NAME" >/dev/null 2>&1 || true
 
 # 7. Start fresh container
 echo "==> Launching fresh $CONTAINER_NAME container..."
-docker run -d \
-  --name "$CONTAINER_NAME" \
-  --restart unless-stopped \
-  --shm-size 1g \
-  -p "127.0.0.1:${HEALTH_PORT}:18080" \
-  -v "${DATA_DIR}:/data" \
-  "$IMAGE" >/dev/null
+docker run -d   --name "$CONTAINER_NAME"   --restart unless-stopped   --shm-size 1g   -p "127.0.0.1:${HEALTH_PORT}:18080"   -v "${DATA_DIR}:/data"   "$IMAGE" >/dev/null
+
+# 7b. Verify the running container actually uses the freshly pulled image.
+# The 2026-10-27 incident: health passed while the container silently ran
+# the previous image (race between CI's image push and this script's pull).
+RUNNING_IMAGE=$(docker inspect --format '{{.Image}}' "$CONTAINER_NAME" 2>/dev/null | sed 's/^sha256://' | cut -c1-12)
+LOCAL_IMAGE_ID=$(docker inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null | sed 's/^sha256://' | cut -c1-12)
+if [ -n "$LOCAL_IMAGE_ID" ] && [ "$RUNNING_IMAGE" != "$LOCAL_IMAGE_ID" ]; then
+  echo "Error: running container image ($RUNNING_IMAGE) does not match the pulled image ($LOCAL_IMAGE_ID)." >&2
+  echo "Error: failing the deployment instead of leaving a stale binary in production." >&2
+  exit 1
+fi
 
 # 8. Health check verification loop
 echo "==> Waiting for container to become healthy..."

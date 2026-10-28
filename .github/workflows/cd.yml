@@ -32,6 +32,41 @@ jobs:
             echo "deploy=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: wait for CI (image build) of this exact commit
+        if: steps.check_secrets.outputs.deploy == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SHA: ${{ github.sha }}
+        run: |
+          # The deploy pulls ghcr.io/:latest, which CI's docker job pushes for
+          # this same commit. Both workflows start on the same push, so CD
+          # used to race CI and pull the PREVIOUS image while reporting
+          # success (production incident 2026-10-27: a stale binary ran for
+          # ~a day). Wait for the CI run of this exact SHA, bounded.
+          set -eu
+          for i in $(seq 1 60); do
+            run_id=$(gh api "repos/${{ github.repository }}/actions/runs?head_sha=$SHA&workflow=ci.yml" --jq '.workflow_runs[0].id' 2>/dev/null || true)
+            if [ -n "$run_id" ] && [ "$run_id" != "null" ]; then
+              status=$(gh api "repos/${{ github.repository }}/actions/runs/$run_id" --jq '.status + "/" + (.conclusion // "pending")')
+              echo "CI run $run_id: $status (attempt $i/60)"
+              case "$status" in
+                completed/success)
+                  echo "CI succeeded for $SHA - the image is current. Proceeding."
+                  exit 0
+                  ;;
+                completed/*)
+                  echo "::error ::CI for $SHA finished with $status - refusing to deploy."
+                  exit 1
+                  ;;
+              esac
+            else
+              echo "no CI run found for $SHA yet (attempt $i/60)"
+            fi
+            sleep 30
+          done
+          echo "::error ::timed out waiting for CI of $SHA - refusing to deploy an unverified image."
+          exit 1
+
       - name: execute remote deployment via ssh
         if: steps.check_secrets.outputs.deploy == 'true'
         uses: appleboy/ssh-action@v1.2.0

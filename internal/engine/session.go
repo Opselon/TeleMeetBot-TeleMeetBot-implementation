@@ -130,6 +130,14 @@ type Session struct {
 	// session-level one that per-item overrides temporarily replace.
 	qualityPolicy  string
 	defaultQuality string
+	// Caption policy and requested language. captionState records what the
+	// player actually reports, sampled by the watch loop. The *Default
+	// fields are the session-level values per-item overrides restore to.
+	captionPolicy        string
+	captionLang          string
+	defaultCaptionPolicy string
+	defaultCaptionLang   string
+	captionState         captionState
 	// observedQ is the player-reported resolution/quality telemetry, sampled
 	// by the watch loop.
 	observedQ observedQuality
@@ -183,6 +191,10 @@ type Status struct {
 	// SelectedFormat describes what the extraction pipeline chose for the
 	// currently loaded file (download mode only; browser mode has no ladder).
 	SelectedFormat string
+	// Caption telemetry: requested policy + the states the player reports.
+	CaptionPolicy string
+	CaptionLang   string
+	Caption       captionState
 	// Shuffle reports whether auto-advance picks random upcoming items.
 	Shuffle bool
 	// AutoAdvance reports whether the queue advances when media ends.
@@ -252,6 +264,9 @@ func (s *Session) Snapshot() Status {
 	st.HasPrevious = st.QueueIndex > 0
 
 	st.LocalFile = s.localFileStatus()
+	st.CaptionPolicy = NormalizeCaptionPolicy(s.captionPolicy)
+	st.CaptionLang = s.captionLang
+	st.Caption = s.captionState
 	return st
 }
 
@@ -599,6 +614,15 @@ func (s *Session) watch() {
 			}
 			s.mediaErr = st.Error
 			s.observedQ = observedQuality{Width: st.VideoWidth, Height: st.VideoHeight, YtQuality: st.YtQuality}
+			s.captionState = captionState{
+				Source:    st.CaptionSource,
+				Lang:      st.CaptionLang,
+				Loaded:    st.CaptionLoaded,
+				Enabled:   st.CaptionEnabled,
+				Available: st.CaptionAvailable,
+				Tracks:    st.CaptionTracks,
+				Note:      st.CaptionNote,
+			}
 			s.mu.Unlock()
 			if st.Error != "" {
 				s.setDetail("player error: " + st.Error)
@@ -711,6 +735,14 @@ func (s *Session) watch() {
 				s.log.Warnf("[PIPELINE:present] session %s: presenting() false (%d/2 consecutive)", s.ID, presentMisses)
 				if presentMisses >= 2 {
 					presentMisses = 0
+					// Out-of-meeting detection first: when the tab was kicked
+					// to a landing page, re-presenting cannot ever succeed —
+					// fail fast with the honest reason instead of three 45 s
+					// present-flow timeouts (production incident 2026-10-27).
+					if err := s.checkMeetingPresence(); err != nil {
+						s.setError(err)
+						return
+					}
 					if presentTries >= 3 {
 						s.setDetail("sharing stopped and could not be resumed; leaving")
 						s.setError(errors.New("screen share was dropped by Google Meet"))
@@ -774,7 +806,7 @@ func (s *Session) openMedia() error {
 		sourceURL = local.path
 	}
 	if kind == MediaDirect {
-		doc, err := PlayerHTML(MediaTarget{URL: target, Kind: kind}, s.playerOpts)
+		doc, err := PlayerHTML(MediaTarget{URL: target, Kind: kind}, s.playerOptsForSubtitle())
 		if err != nil {
 			return fmt.Errorf("build player: %w", err)
 		}
@@ -1088,6 +1120,9 @@ func (s *Session) startPresenting() error {
 	lastState := ""
 	lastNote := time.Time{}
 	lastWarn := time.Time{}
+	presentMisses := 0
+	lastDump := time.Time{}
+	presentStart := time.Now()
 	for time.Now().Before(deadline) {
 		if s.ctx.Err() != nil {
 			return s.ctx.Err()
@@ -1170,7 +1205,16 @@ func (s *Session) startPresenting() error {
 			} else {
 				if time.Since(lastWarn) >= 10*time.Second {
 					lastWarn = time.Now()
-					s.log.Warnf("[PIPELINE:present] session %s: clickPresentButton found no button; visible buttons: %s", s.ID, s.dumpToolbarButtons())
+					presentMisses++
+					// Dump the toolbar once per burst, not on every miss: a
+					// stuck loop produced 25 ~1KB dumps in one production
+					// incident. Later misses in the same burst only count.
+					if presentMisses == 1 || time.Since(lastDump) >= 90*time.Second {
+						lastDump = time.Now()
+						s.log.Warnf("[PIPELINE:present] session %s: clickPresentButton found no button (miss #%d); visible buttons: %s", s.ID, presentMisses, s.dumpToolbarButtons())
+					} else {
+						s.log.Warnf("[PIPELINE:present] session %s: clickPresentButton found no button (miss #%d, %ds since first)", s.ID, presentMisses, int(time.Since(presentStart).Seconds()))
+					}
 				}
 			}
 		}
@@ -1352,7 +1396,7 @@ func (s *Session) navigateMediaTab(media *rod.Page, url string, kind MediaKind) 
 	target := url
 	if kind == MediaDirect {
 		// Loopback HTTP (not data:) so Chrome always allows the media fetch.
-		doc, err := PlayerHTML(MediaTarget{URL: url, Kind: kind}, s.playerOpts)
+		doc, err := PlayerHTML(MediaTarget{URL: url, Kind: kind}, s.playerOptsForSubtitle())
 		if err != nil {
 			return err
 		}
@@ -1454,6 +1498,9 @@ type localMedia struct {
 	// selected is the format the extractor chose (yt-dlp sources); zero
 	// when not reported (direct fetches, Telegram ingest).
 	selected mediateam.SelectedFormat
+	// subtitle is the fetched caption track (nil when none was requested or
+	// the source had none).
+	subtitle *mediateam.Subtitle
 }
 
 // localFileStatus is the card-friendly view of a downloaded file.
@@ -1463,6 +1510,8 @@ type localFileStatus struct {
 	Bytes     int64     `json:"bytes,omitempty"`
 	ExpiresAt time.Time `json:"expires_at,omitempty"`
 	Via       string    `json:"via,omitempty"`
+	// Subtitle describes the attached caption track, when one was fetched.
+	Subtitle string `json:"subtitle,omitempty"`
 }
 
 func (s *Session) localFileStatus() localFileStatus {
@@ -1471,13 +1520,31 @@ func (s *Session) localFileStatus() localFileStatus {
 	if s.localFile == nil {
 		return localFileStatus{}
 	}
-	return localFileStatus{
+	lf := localFileStatus{
 		URL:       s.localFile.url,
 		Path:      s.localFile.path,
 		Bytes:     s.localFile.bytes,
 		ExpiresAt: s.localFile.expiresAt,
 		Via:       s.localFile.via,
 	}
+	if s.localFile.subtitle != nil {
+		lf.Subtitle = s.localFile.subtitle.Lang + " (vtt)"
+	}
+	return lf
+}
+
+// playerOptsForSubtitle returns the player options with the current media's
+// caption track attached, when a subtitle artifact is served for it. The
+// base options are immutable after Start; the subtitle rides per media load.
+func (s *Session) playerOptsForSubtitle() PlayerOptions {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	opts := s.playerOpts
+	if s.localFile != nil && s.localFile.subtitle != nil {
+		opts.SubtitleURL = s.localFile.subtitle.URL
+		opts.SubtitleLang = s.localFile.subtitle.Lang
+	}
+	return opts
 }
 
 // PlaybackMode returns the session's Download & Stream mode. An unset mode is

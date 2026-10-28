@@ -206,6 +206,11 @@ type StartRequest struct {
 	// policy everywhere; direct browser playback stays under YouTube's own
 	// adaptive control.
 	Quality string
+	// CaptionPolicy/CaptionLang are the user's subtitle defaults applied at
+	// launch ("off"/"" defaults). CaptionLang steers the yt-dlp subtitle
+	// fetch in download mode and the captions-module language on YouTube.
+	CaptionPolicy string
+	CaptionLang   string
 }
 
 // Manager owns browsers and sessions.
@@ -509,6 +514,8 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (*Session, error)
 		repeatMode:        NormalizeRepeatMode(req.RepeatMode),
 		qualityPolicy:     NormalizeQualityPolicy(req.Quality),
 		defaultQuality:    NormalizeQualityPolicy(req.Quality),
+		captionPolicy:     NormalizeCaptionPolicy(req.CaptionPolicy),
+		captionLang:       NormalizeCaptionLang(req.CaptionLang),
 		shuffle:           req.Shuffle,
 		autoAdvance:       autoAdvance,
 		rng:               mathrand.New(mathrand.NewSource(time.Now().UnixNano())),

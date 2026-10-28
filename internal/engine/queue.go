@@ -28,6 +28,9 @@ type QueueItem struct {
 	AddedAt  time.Time `json:"added_at"`
 	// Quality is the per-item quality override ("" = session policy).
 	Quality string `json:"quality,omitempty"`
+	// CaptionLang is the per-item subtitle language override ("" = session
+	// policy; "off" forces none for this item).
+	CaptionLang string `json:"caption_lang,omitempty"`
 }
 
 // queueOwner returns the lease owner tag for items pinned in this session's queue.
@@ -54,6 +57,15 @@ func (s *Session) InitQueue(initialURL string, extraQueue []string) {
 	}
 	if s.qualityPolicy == "" {
 		s.qualityPolicy = QualityAuto
+	}
+	if s.captionPolicy == "" {
+		s.captionPolicy = CaptionOff
+	}
+	if s.defaultCaptionPolicy == "" {
+		s.defaultCaptionPolicy = s.captionPolicy
+	}
+	if s.defaultCaptionLang == "" {
+		s.defaultCaptionLang = s.captionLang
 	}
 	s.autoAdvance = true
 
@@ -222,6 +234,7 @@ func (s *Session) Next() error {
 	curIdx := s.queueIdx
 	total := len(s.queue)
 	s.applyItemQualityLocked(target)
+	s.applyItemCaptionLocked(target)
 	s.queueMu.Unlock()
 
 	s.logger().Infof("[PIPELINE:queue] session %s: advancing to next item %d/%d (%s)", s.ID, curIdx+1, total, target.Title)
@@ -259,6 +272,7 @@ func (s *Session) Previous() error {
 	curIdx := s.queueIdx
 	total := len(s.queue)
 	s.applyItemQualityLocked(target)
+	s.applyItemCaptionLocked(target)
 	s.queueMu.Unlock()
 
 	s.logger().Infof("[PIPELINE:queue] session %s: returning to previous item %d/%d (%s)", s.ID, curIdx+1, total, target.Title)
@@ -292,6 +306,7 @@ func (s *Session) JumpTo(idx int) error {
 	curIdx := s.queueIdx
 	total := len(s.queue)
 	s.applyItemQualityLocked(target)
+	s.applyItemCaptionLocked(target)
 	s.queueMu.Unlock()
 
 	s.logger().Infof("[PIPELINE:queue] session %s: jumping to item %d/%d (%s)", s.ID, curIdx+1, total, target.Title)

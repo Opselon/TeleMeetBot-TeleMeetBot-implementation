@@ -33,6 +33,17 @@ type mediaStatus struct {
 	// YtQuality is YouTube's own playback-quality label (read-only probe of
 	// movie_player.getPlaybackQuality()); empty outside YouTube.
 	YtQuality string `json:"ytQuality,omitempty"`
+	// Caption telemetry. Source is "native" (local <track>), "youtube"
+	// (movie_player captions module) or "" (nothing observable). Enabled is
+	// what the player itself reports — an issued command is never reported
+	// as enabled until the player confirms it.
+	CaptionSource    string   `json:"captionSource,omitempty"`
+	CaptionEnabled   bool     `json:"captionEnabled,omitempty"`
+	CaptionLoaded    bool     `json:"captionLoaded,omitempty"`
+	CaptionLang      string   `json:"captionLang,omitempty"`
+	CaptionTracks    []string `json:"captionTracks,omitempty"`
+	CaptionAvailable bool     `json:"captionAvailable,omitempty"`
+	CaptionNote      string   `json:"captionNote,omitempty"`
 }
 
 // mediaControlJS builds a self-contained script that finds the best media
@@ -45,7 +56,9 @@ func mediaControlJS(action string, arg float64) string {
 	return fmt.Sprintf(`() => {
   const out = {ok: false, error: "", count: 0, paused: true, muted: false, volume: 1,
                playbackRate: 1, currentTime: 0, duration: 0, title: "", src: "",
-               videoWidth: 0, videoHeight: 0, ytQuality: ""};
+               videoWidth: 0, videoHeight: 0, ytQuality: "",
+               captionSource: "", captionEnabled: false, captionLoaded: false,
+               captionLang: "", captionTracks: [], captionAvailable: false, captionNote: ""};
   const items = [];
   const walk = (doc, depth) => {
     if (!doc || depth > 6) return;
@@ -143,7 +156,43 @@ func mediaControlJS(action string, arg float64) string {
         const p = m.play(); if (p && p.catch) p.catch(() => {});
         break;
       }
-      case "status": break;
+      case "ccOn":
+      case "ccOff": {
+        // Captions. YouTube exposes the documented getOption/setOption
+        // captions-module API (an action may carry "ccOn:<lang>"); the local
+        // player uses native text tracks. The status assembly below reads
+        // the state back, so "issued" never masquerades as "enabled".
+        const mp = document.querySelector('#movie_player');
+        if (mp && mp.getOption) {
+          try {
+            if (action === "ccOn") {
+              mp.loadModule('captions');
+              const list = (mp.getOption('captions', 'tracklist') || []);
+              const want = (action.indexOf(':') >= 0) ? action.slice(action.indexOf(':') + 1) : '';
+              let track = null;
+              if (want) {
+                for (const t of list) {
+                  const code = (t && t.languageCode) ? String(t.languageCode) : '';
+                  if (code && code.toLowerCase().indexOf(want.toLowerCase()) === 0) { track = t; break; }
+                }
+              }
+              if (track) { mp.setOption('captions', 'track', track); }
+              else if (list.length) { mp.setOption('captions', 'track', {}); }
+              out.captionNote = 'issued';
+            } else {
+              mp.unloadModule('captions');
+              out.captionNote = 'issued';
+            }
+          } catch (e) { out.error = 'captions: ' + String(e); }
+        } else if (window.__tmCaption) {
+          const r = window.__tmCaption(action === "ccOn");
+          out.captionNote = r.ok ? 'issued' : r.error;
+        } else {
+          out.captionNote = 'no caption control on this page';
+        }
+        break;
+      }
+            case "status": break;
     }
   } catch (e) { out.error = String(e); }
   if (m.error) {
@@ -174,6 +223,36 @@ func mediaControlJS(action string, arg float64) string {
       if (q) out.ytQuality = String(q);
     }
   } catch (e) {}
+  // Caption status: YouTube's module when present, else the local player's
+  // text tracks. Read-only — what is reported is what the player says.
+  try {
+    const mp = document.querySelector('#movie_player');
+    if (mp && mp.getOption) {
+      try { mp.loadModule('captions'); } catch (e) {}
+      try {
+        const tr = mp.getOption('captions', 'track');
+        const list = mp.getOption('captions', 'tracklist') || [];
+        out.captionSource = 'youtube';
+        out.captionAvailable = list.length > 0;
+        for (const t of list) {
+          if (t && t.languageCode) { out.captionTracks.push(String(t.languageCode)); }
+        }
+        if (tr && tr.languageCode) {
+          out.captionEnabled = true;
+          out.captionLang = String(tr.languageCode);
+          out.captionLoaded = true;
+        }
+      } catch (e) { out.captionNote = 'module not ready'; }
+    } else if (window.__tmCaptionState) {
+      const cs = window.__tmCaptionState();
+      out.captionSource = cs.count > 0 ? 'native' : '';
+      out.captionAvailable = cs.count > 0;
+      out.captionEnabled = !!cs.enabled;
+      out.captionLoaded = !!cs.loaded;
+      out.captionLang = cs.lang || '';
+      out.captionTracks = [];
+    }
+  } catch (e) { out.captionNote = String(e); }
   out.src = String(m.currentSrc || m.src || "").slice(0, 300);
   let real = "";
   try {
