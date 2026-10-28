@@ -141,6 +141,8 @@ type Session struct {
 	// observedQ is the player-reported resolution/quality telemetry, sampled
 	// by the watch loop.
 	observedQ observedQuality
+	// downloadProg tracks mid-fetch metrics for Download & Stream mode.
+	downloadProg DownloadProgress
 	// shuffle picks a random upcoming item when playback auto-advances.
 	shuffle bool
 	// autoAdvance plays the next queue item when the current media ends.
@@ -148,6 +150,15 @@ type Session struct {
 	autoAdvance bool
 	// rng drives shuffle picks; injectable for deterministic tests.
 	rng *rand.Rand
+}
+
+// DownloadProgress reports mid-fetch metrics for Download & Stream mode.
+type DownloadProgress struct {
+	Active  bool
+	Bytes   int64
+	Total   int64
+	Speed   int64
+	Percent int
 }
 
 // Status is a dashboard-friendly snapshot.
@@ -175,6 +186,8 @@ type Status struct {
 	PlayMode string
 	// LocalFile reports the downloaded media backing the session, if any.
 	LocalFile localFileStatus
+	// DownloadProgress reports real-time metrics while media is being fetched.
+	DownloadProgress DownloadProgress
 	// Queue fields
 	QueueLength int
 	QueueIndex  int
@@ -223,26 +236,27 @@ func (st Status) Elapsed() time.Duration {
 func (s *Session) Snapshot() Status {
 	s.mu.RLock()
 	st := Status{
-		ID:             s.ID,
-		State:          s.state,
-		Detail:         s.detail,
-		Error:          s.errMsg,
-		Title:          s.title,
-		MeetURL:        s.MeetURL,
-		MediaURL:       s.MediaURL,
-		Paused:         s.paused,
-		Muted:          s.muted,
-		Volume:         s.volume,
-		Rate:           s.rate,
-		Cur:            s.cur,
-		Dur:            s.dur,
-		Created:        s.created,
-		Joined:         s.joined,
-		Ended:          s.ended,
-		AudioLang:      s.AudioLang,
-		AudioTrack:     s.audioRep.SelectedTrackLabel(),
-		FallbackReason: s.audioRep.FallbackReason,
-		PlayMode:       string(s.playMode),
+		ID:               s.ID,
+		State:            s.state,
+		Detail:           s.detail,
+		Error:            s.errMsg,
+		Title:            s.title,
+		MeetURL:          s.MeetURL,
+		MediaURL:         s.MediaURL,
+		Paused:           s.paused,
+		Muted:            s.muted,
+		Volume:           s.volume,
+		Rate:             s.rate,
+		Cur:              s.cur,
+		Dur:              s.dur,
+		Created:          s.created,
+		Joined:           s.joined,
+		Ended:            s.ended,
+		AudioLang:        s.AudioLang,
+		AudioTrack:       s.audioRep.SelectedTrackLabel(),
+		FallbackReason:   s.audioRep.FallbackReason,
+		PlayMode:         string(s.playMode),
+		DownloadProgress: s.downloadProg,
 	}
 	s.mu.RUnlock()
 

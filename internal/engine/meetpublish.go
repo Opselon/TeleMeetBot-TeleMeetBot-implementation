@@ -68,6 +68,9 @@ func meetPeerHookJS() string {
           // own renderer. A live track that never produces frames is exactly
           // what "participants see nothing, audio works" looks like.
           const track = stream.getVideoTracks()[0];
+          if (track) {
+            try { track.contentHint = "motion"; } catch (e) {}
+          }
           if (track && window.MediaStreamTrackProcessor && !window.__tmSrcReader) {
             const proc = new MediaStreamTrackProcessor({track});
             const reader = proc.readable.getReader();

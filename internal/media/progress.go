@@ -3,12 +3,13 @@ package media
 import "sync"
 
 // Progress is one mid-download notification: bytes fetched so far, the total
-// when the server reports it, and Done when the file is committed (or failed).
+// when the server reports it, current speed in bytes/sec, and Done when the file is committed (or failed).
 type Progress struct {
 	URL    string
 	ID     string
 	Bytes  int64
 	Total  int64
+	Speed  int64
 	Done   bool
 	Failed bool
 }

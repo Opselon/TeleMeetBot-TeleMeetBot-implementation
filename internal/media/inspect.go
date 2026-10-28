@@ -144,7 +144,7 @@ func (m *Manager) Inspect(ctx context.Context, rawURL string) (*SourceInfo, erro
 	}
 	args = append(args, link)
 
-	stdout, stderr, err := m.runYTDLP(ctx, bin, args)
+	stdout, stderr, err := m.runYTDLP(ctx, bin, args, nil)
 	if err != nil {
 		return nil, fmt.Errorf("inspect source: %w%s", err, stderrSuffix(stderr))
 	}

@@ -49,7 +49,6 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality, subLang string
 	args := []string{
 		"--no-playlist", // one item, never a playlist avalanche
 		"--no-warnings",
-		"--no-progress",
 		"--newline",
 		"--no-check-certificate", // the SSRF gate already validated the host
 		// Network resilience. The proxied egress (WARP/free-pool xray inbound
@@ -67,6 +66,15 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality, subLang string
 		"--retry-sleep", "file_access:1",
 		"--socket-timeout", "30", // a hung socket must not pin the download
 		"--force-ipv4", // the WARP egress has no working IPv6 route; AAAA attempts fail 100%
+		// Maximize download throughput across network interface:
+		// Multi-threaded fragment fetching + optimized HTTP chunk and buffer sizes.
+		"--concurrent-fragments", "8",
+		"--buffer-size", "1024K",
+		"--http-chunk-size", "10M",
+		// Real-time progress output for live progress reporting:
+		"--progress",
+		"--progress-delta", "0.5",
+		"--progress-template", "download:%(progress.downloaded_bytes)s/%(progress.total_bytes)s/%(progress.total_bytes_estimate)s/%(progress.speed)s",
 	}
 	// Datacenter egress is bot-blocked by YouTube, so the download must leave
 	// through the same proxy Chromium uses. Omitting it is the difference
@@ -115,6 +123,24 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality, subLang string
 		args = append([]string{"--max-filesize", fmt.Sprintf("%d", m.opts.MaxBytes)}, args...)
 	}
 
+	onProgress := func(line string) {
+		if !strings.HasPrefix(line, "download:") {
+			return
+		}
+		parts := strings.Split(strings.TrimPrefix(line, "download:"), "/")
+		if len(parts) >= 4 {
+			var downloaded, total, speed int64
+			_, _ = fmt.Sscanf(parts[0], "%d", &downloaded)
+			if _, err := fmt.Sscanf(parts[1], "%d", &total); err != nil || total <= 0 {
+				_, _ = fmt.Sscanf(parts[2], "%d", &total)
+			}
+			_, _ = fmt.Sscanf(parts[3], "%d", &speed)
+			if downloaded > 0 {
+				m.reportProgress(Progress{URL: u, ID: id, Bytes: downloaded, Total: total, Speed: speed})
+			}
+		}
+	}
+
 	var res *ytdlpResult
 	var last error
 	for attempt := 0; attempt <= maxExecRetries; attempt++ {
@@ -134,7 +160,7 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality, subLang string
 				}
 			}
 		}
-		stdout, stderr, err := m.runYTDLP(ctx, bin, args)
+		stdout, stderr, err := m.runYTDLP(ctx, bin, args, onProgress)
 		if err == nil {
 			res, err = m.collectYTDLP(ctx, id, stdout, stderr)
 			if err == nil {
@@ -274,12 +300,54 @@ func (m *Manager) findYTDLPFile(id string, stdout []byte) (string, error) {
 	return path, nil
 }
 
+// lineWriter splits incoming process output into lines and intercepts download progress.
+type lineWriter struct {
+	buf     strings.Builder
+	onLine  func(string)
+	lineBuf []byte
+}
+
+func (lw *lineWriter) Write(p []byte) (n int, err error) {
+	for _, b := range p {
+		if b == '\n' || b == '\r' {
+			if len(lw.lineBuf) > 0 {
+				line := string(lw.lineBuf)
+				lw.lineBuf = lw.lineBuf[:0]
+				if lw.onLine != nil {
+					lw.onLine(line)
+				}
+				if !strings.HasPrefix(line, "download:") {
+					lw.buf.WriteString(line)
+					lw.buf.WriteByte('\n')
+				}
+			}
+		} else {
+			lw.lineBuf = append(lw.lineBuf, b)
+		}
+	}
+	return len(p), nil
+}
+
+func (lw *lineWriter) flush() {
+	if len(lw.lineBuf) > 0 {
+		line := string(lw.lineBuf)
+		lw.lineBuf = lw.lineBuf[:0]
+		if lw.onLine != nil {
+			lw.onLine(line)
+		}
+		if !strings.HasPrefix(line, "download:") {
+			lw.buf.WriteString(line)
+			lw.buf.WriteByte('\n')
+		}
+	}
+}
+
 // runYTDLP executes the vetted argv (test-overridable).
-func (m *Manager) runYTDLP(ctx context.Context, binary string, args []string) ([]byte, []byte, error) {
+func (m *Manager) runYTDLP(ctx context.Context, binary string, args []string, onLine func(string)) ([]byte, []byte, error) {
 	if m.ytdlpFn != nil {
 		return m.ytdlpFn(ctx, args)
 	}
-	return runExec(ctx, binary, args, m.opts.Timeout)
+	return runExec(ctx, binary, args, m.opts.Timeout, onLine)
 }
 
 // runFFmpeg executes one transcode (test-overridable).
@@ -290,24 +358,26 @@ func (m *Manager) runFFmpeg(ctx context.Context, binary, in, out string) error {
 	}
 	// "-c copy" remuxes without re-encoding: cheap, lossless, and usually
 	// all that is needed to make a container Chromium understands.
-	_, _, err := runExec(ctx, binary, []string{"-y", "-i", in, "-c", "copy", out}, m.opts.Timeout)
+	_, _, err := runExec(ctx, binary, []string{"-y", "-i", in, "-c", "copy", out}, m.opts.Timeout, nil)
 	return err
 }
 
 // runExec runs a command with a bounded timeout and captures both streams.
 // No shell is involved: argv comes from vetted Go strings only.
-func runExec(ctx context.Context, binary string, args []string, timeout time.Duration) ([]byte, []byte, error) {
+func runExec(ctx context.Context, binary string, args []string, timeout time.Duration, onLine func(string)) ([]byte, []byte, error) {
 	if timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
 	cmd := exec.CommandContext(ctx, binary, args...)
-	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
+	lw := &lineWriter{onLine: onLine}
+	var stderr strings.Builder
+	cmd.Stdout = lw
 	cmd.Stderr = &stderr
 	err := cmd.Run()
-	return []byte(stdout.String()), []byte(stderr.String()), normalizeExecError(err, ctx)
+	lw.flush()
+	return []byte(lw.buf.String()), []byte(stderr.String()), normalizeExecError(err, ctx)
 }
 
 // normalizeExecError maps an exec failure to a descriptive error, distinguishing

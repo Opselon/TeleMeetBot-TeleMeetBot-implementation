@@ -1246,6 +1246,7 @@ func (b *Bot) handleQueueCallback(chatID, userID int64, msgID int, q *tgbotapi.C
 	sub := parts[1]
 	sid := parts[2]
 	b.log.Infof("[PIPELINE:queue] queue callback: session=%s sub=%q data=%q user=%d chat=%d", sid, sub, data, userID, chatID)
+	b.setCardView(sid, chatID, msgID, "queue")
 	s := b.eng.Get(engine.SessionID(sid))
 	if s == nil {
 		b.log.Warnf("[PIPELINE:queue] queue action on expired/missing session=%s by user=%d", sid, userID)
@@ -1294,6 +1295,7 @@ func (b *Bot) handleQueueCallback(chatID, userID int64, msgID int, q *tgbotapi.C
 		b.persistQueue(s)
 		st = s.Snapshot()
 		_ = b.api.Edit(chatID, msgID, sessionCardText(st), sessionCardKB(st))
+		b.bindCard(chatID, msgID, s, st)
 
 	case "page":
 		if len(parts) < 4 {
