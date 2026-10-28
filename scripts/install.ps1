@@ -81,12 +81,24 @@ $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
   default { Die "unsupported architecture: $env:PROCESSOR_ARCHITECTURE" }
 }
 
-if (-not $Prefix)    { $Prefix    = Join-Path $env:ProgramFiles "TeleMeetBot" }
-if (-not $ConfigDir) { $ConfigDir = Join-Path $env:ProgramData "TeleMeetBot" }
-if (-not $DataDir)   { $DataDir   = Join-Path $ConfigDir "data" }
-
 $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
   [Security.Principal.WindowsBuiltInRole]::Administrator)
+
+if (-not $Prefix) {
+  if ($isAdmin) {
+    $Prefix = Join-Path $env:ProgramFiles "TeleMeetBot"
+  } else {
+    $Prefix = Join-Path $env:LOCALAPPDATA "Programs\TeleMeetBot"
+  }
+}
+if (-not $ConfigDir) {
+  if ($isAdmin) {
+    $ConfigDir = Join-Path $env:ProgramData "TeleMeetBot"
+  } else {
+    $ConfigDir = Join-Path $env:LOCALAPPDATA "TeleMeetBot"
+  }
+}
+if (-not $DataDir) { $DataDir = Join-Path $ConfigDir "data" }
 
 # ---- 2. Resolve the pinned trusted release --------------------------------
 if ($Version -eq "latest") {
@@ -109,7 +121,7 @@ $file = "telemeetbot-windows-$arch.zip"
 # assets directly. The default is the GitHub release download directory for
 # the pinned version; asset names are identical either way, which keeps the
 # checksum verification honest.
-$base = "${BaseUrl:https://github.com/$Repo/releases/download/$Version}"
+$base = if ($env:BASE_URL) { $env:BASE_URL } else { "https://github.com/$Repo/releases/download/$Version" }
 $tmp = New-Item -ItemType Directory -Path ([System.IO.Path]::GetTempPath()) -Name "telemeetbot-install-$(Get-Random)" -Force
 
 # ---- 3. Download + checksum verify ----------------------------------------
@@ -178,7 +190,16 @@ if (-not (Test-Path $configPath) -and (Test-Path $example)) {
   Write-Step "staged a template config at $configPath - the wizard will edit it"
 }
 
-# ---- 6. Windows service ---------------------------------------------------
+# ---- 6. Setup Wizard ------------------------------------------------------
+$binFinal = Join-Path $Prefix "telemeetbot.exe"
+if (-not $NoWizard) {
+  Write-Step "starting the setup wizard (Ctrl+C to abort). Config: $configPath"
+  & $binFinal --wizard --config $configPath
+} else {
+  Write-Step "installed. Run the wizard: $binFinal --wizard --config `"$configPath`""
+}
+
+# ---- 7. Windows service (after config is finalized) -----------------------
 if (-not $NoService -and $isAdmin) {
   Write-Step "registering the Windows service"
   $binPath = "`"$(Join-Path $Prefix 'telemeetbot.exe')`" --config `"$configPath`""
@@ -195,26 +216,15 @@ if (-not $NoService -and $isAdmin) {
   }
 }
 
-# ---- Chromium availability check ------------------------------------------
-$chr = Get-Command chromium -ErrorAction SilentlyContinue
-if (-not $chr) { Write-Warn "no Chromium found - the setup wizard can install one with winget (or use Docker)" }
-
-# ---- 7. Wizard + health verification --------------------------------------
-$binFinal = Join-Path $Prefix "telemeetbot.exe"
-if (-not $NoWizard) {
-  Write-Step "starting the setup wizard (Ctrl+C to abort). Config: $configPath"
-  & $binFinal --wizard --config $configPath
-  Write-Step "next steps"
-  if ($isAdmin -and -not $NoService) {
-    Write-Host "    sc.exe start telemeetbot"
-    Write-Host "    Get-EventLog -LogName Application -Source telemeetbot -Newest 20"
-  } else {
-    Write-Host "    $binFinal --config `"$configPath`""
-  }
+Write-Step "next steps"
+if ($isAdmin -and -not $NoService) {
+  Write-Host "    sc.exe start telemeetbot"
+  Write-Host "    Get-EventLog -LogName Application -Source telemeetbot -Newest 20"
 } else {
-  Write-Step "installed. Run the wizard: $binFinal --wizard --config `"$configPath`""
+  Write-Host "    $binFinal --config `"$configPath`""
 }
 
+# ---- 8. Health verification -----------------------------------------------
 if (-not $NoStart -and -not $NoService -and $isAdmin) {
   Write-Step "verifying the health endpoint"
   Start-Sleep -Seconds 2

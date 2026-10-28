@@ -142,6 +142,14 @@ type WizardOptions struct {
 	FindBrowser func(bcfg engine.BrowserConfig) (string, error)
 	// Prompter overrides the interactive question surface (tests).
 	Prompter WizardPrompter
+	// Profile sets the installation profile: ProfileFull or ProfileMinimal.
+	Profile Profile
+	// InstallerMode is true when invoked to install the binary to the system.
+	InstallerMode bool
+	// InstallDir overrides the destination directory when InstallerMode is true.
+	InstallDir string
+	// SkipMediaInstall forbids running package managers for media tools.
+	SkipMediaInstall bool
 }
 
 // Run executes the interactive setup and returns the saved config.
@@ -184,6 +192,61 @@ func Run(opts WizardOptions) (*config.Config, error) {
 	fmt.Fprintln(out, "│  Google Meet streaming bot (Go + Chromium)   │")
 	fmt.Fprintln(out, "└──────────────────────────────────────────────┘")
 	fmt.Fprintln(out)
+
+	elevatedStr := "No (user-space mode)"
+	if svcinst.IsElevated() {
+		elevatedStr = "Yes (administrator / root privileges)"
+	}
+	svcSys := svcinst.System()
+	svcStr := string(svcSys)
+	if svcSys == svcinst.KindNone {
+		svcStr = "none detected (manual start / container mode)"
+	}
+	fmt.Fprintf(out, "• Environment : %s/%s | Elevated: %s | Service: %s\n\n", runtime.GOOS, runtime.GOARCH, elevatedStr, svcStr)
+
+	var installedBin string
+	if opts.InstallerMode {
+		targetDir := opts.InstallDir
+		if targetDir == "" {
+			targetDir = defaultInstallDir()
+		}
+		if !opts.NonInteractive {
+			var err error
+			targetDir, err = p.Ask("Installation directory for binary", targetDir)
+			if err != nil {
+				return nil, err
+			}
+		}
+		var err error
+		installedBin, err = installBinaryTransactionally(targetDir, out)
+		if err != nil {
+			return nil, fmt.Errorf("application install failed: %w", err)
+		}
+	}
+
+	if opts.Profile == "" {
+		if opts.NonInteractive {
+			opts.Profile = ProfileFull
+		} else {
+			choice, err := p.Choose("Installation profile", []string{
+				"full    — Google Meet + Download & Stream media engine (Chromium, yt-dlp, FFmpeg, Deno)",
+				"minimal — Google Meet presentation only (Chromium only, direct browser streaming)",
+			}, 0)
+			if err != nil {
+				return nil, err
+			}
+			if choice == 1 {
+				opts.Profile = ProfileMinimal
+			} else {
+				opts.Profile = ProfileFull
+			}
+		}
+	}
+	if opts.Profile == ProfileMinimal {
+		cfg.Download.Enabled = false
+	} else {
+		cfg.Download.Enabled = true
+	}
 
 	if !opts.NonInteractive {
 		var err error
@@ -302,6 +365,39 @@ func Run(opts WizardOptions) (*config.Config, error) {
 		fmt.Fprintf(out, "  ✅ %s\n", bin)
 	}
 
+	// Media tools (yt-dlp, FFmpeg, Deno) for Full profile
+	if cfg.Download.Enabled {
+		fmt.Fprintln(out, "\nMedia pipeline check (Full profile):")
+		for _, depID := range []DependencyID{DepYTDLP, DepFFmpeg, DepDeno} {
+			dep := CheckDependency(depID, cfg, opts.Log)
+			if dep.Found {
+				fmt.Fprintf(out, "  ✅ %s: %s (%s)\n", dep.Name, dep.Path, dep.Version)
+				continue
+			}
+			fmt.Fprintf(out, "  ⚠️  %s: not found\n", dep.Name)
+			if len(dep.InstallCommand) > 0 && !opts.SkipMediaInstall {
+				install := true
+				if !opts.NonInteractive {
+					install, _ = p.Confirm(fmt.Sprintf("     Install %s using %s now?", dep.Name, dep.InstallCommand[0]), true)
+				}
+				if install {
+					fmt.Fprintf(out, "     Running: %s...\n", strings.Join(dep.InstallCommand, " "))
+					if err := opts.Exec(dep.InstallCommand[0], dep.InstallCommand[1:]...); err != nil {
+						fmt.Fprintf(out, "     ⚠️  install error: %v\n", err)
+					} else {
+						re := CheckDependency(depID, cfg, opts.Log)
+						if re.Found {
+							fmt.Fprintf(out, "     ✅ %s installed: %s (%s)\n", re.Name, re.Path, re.Version)
+						}
+					}
+				}
+			}
+			if !dep.Found && dep.FallbackHint != "" {
+				fmt.Fprintf(out, "     Tip: %s\n", dep.FallbackHint)
+			}
+		}
+	}
+
 	// ---- 4. Presentation mode -------------------------------------------
 	mode := 0
 	if cfg.Meet.PresentMode == "screen" {
@@ -410,7 +506,7 @@ func Run(opts WizardOptions) (*config.Config, error) {
 	// systemd), and the wizard then says so instead of failing.
 	installSvc := opts.InstallService
 	if installSvc {
-		if err := installManagedService(path); err != nil {
+		if err := installManagedService(path, installedBin); err != nil {
 			fmt.Fprintf(out, "⚠️  service install: %v\n", err)
 		}
 	} else if !opts.NonInteractive {
@@ -419,7 +515,7 @@ func Run(opts WizardOptions) (*config.Config, error) {
 			return nil, err
 		}
 		if ask {
-			if err := installManagedService(path); err != nil {
+			if err := installManagedService(path, installedBin); err != nil {
 				fmt.Fprintf(out, "⚠️  service install: %v\n", err)
 			}
 		}
@@ -449,24 +545,51 @@ func Run(opts WizardOptions) (*config.Config, error) {
 		}
 	}
 
-	fmt.Fprintln(out, "\nNext steps:")
-	fmt.Fprintf(out, "  • run the bot : %s --config %s\n", os.Args[0], path)
-	fmt.Fprintln(out, "  • open Telegram, press /start, then ➕ New stream")
-	fmt.Fprintf(out, "  • diagnostics : %s --check --config %s\n", os.Args[0], path)
+	fmt.Fprintln(out, "\n============================================================")
+	fmt.Fprintln(out, "              TeleMeetBot Setup Report")
+	fmt.Fprintln(out, "============================================================")
+	fmt.Fprintf(out, "• Version      : %s\n", config.Version)
+	fmt.Fprintf(out, "• Platform     : %s/%s\n", runtime.GOOS, runtime.GOARCH)
+	fmt.Fprintf(out, "• Profile      : %s\n", opts.Profile)
+	if installedBin != "" {
+		fmt.Fprintf(out, "• Binary       : %s\n", installedBin)
+	}
+	fmt.Fprintf(out, "• Config       : %s\n", path)
+	fmt.Fprintf(out, "• Data Dir     : %s\n", cfg.Paths.DataDir)
+	if cfg.Telegram.Token != "" {
+		fmt.Fprintf(out, "• Telegram Bot : Token configured (%s)\n", hardenToken(cfg.Telegram.Token))
+	}
+	fmt.Fprintf(out, "• Health API   : http://%s/healthz\n", cfg.Server.HealthAddr)
+
+	fmt.Fprintln(out, "\nManagement & Diagnostics:")
+	binCmd := os.Args[0]
+	if installedBin != "" {
+		binCmd = installedBin
+	}
+	fmt.Fprintf(out, "  • Start bot  : %s --config %s\n", binCmd, path)
+	fmt.Fprintf(out, "  • Diagnostics: %s --check --config %s\n", binCmd, path)
+	fmt.Fprintf(out, "  • Re-run     : %s --wizard --config %s\n", binCmd, path)
+	fmt.Fprintf(out, "  • Rollback   : %s --restore-backup\n", binCmd)
+	fmt.Fprintf(out, "  • Uninstall  : %s --uninstall\n", binCmd)
+	fmt.Fprintln(out, "============================================================")
 	return cfg, nil
 }
 
 // installManagedService installs and starts TeleMeetBot as an OS service on
 // whatever supervisor the host actually has: systemd on Linux, the SCM on
 // Windows, launchd on macOS. Returns a clear error when the host has none.
-func installManagedService(cfgPath string) error {
+func installManagedService(cfgPath string, binOverride string) error {
 	inst := svcinst.New()
 	if inst == nil {
 		return errors.New("no service system found (systemd/launchd/SCM); run the binary directly or use Docker")
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("resolve own executable: %w", err)
+	exe := binOverride
+	if exe == "" {
+		var err error
+		exe, err = os.Executable()
+		if err != nil {
+			return fmt.Errorf("resolve own executable: %w", err)
+		}
 	}
 	if err := inst.Install(svcinst.Options{
 		Binary:     exe,
@@ -568,6 +691,81 @@ func nonEmpty(a, b string) string {
 		return b
 	}
 	return a
+}
+
+func defaultInstallDir() string {
+	if runtime.GOOS == "windows" {
+		if svcinst.IsElevated() {
+			if pf := os.Getenv("ProgramFiles"); pf != "" {
+				return filepath.Join(pf, "TeleMeetBot")
+			}
+			return `C:\Program Files\TeleMeetBot`
+		}
+		if la := os.Getenv("LOCALAPPDATA"); la != "" {
+			return filepath.Join(la, "Programs", "TeleMeetBot")
+		}
+		return filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Local", "Programs", "TeleMeetBot")
+	}
+	// Unix / macOS
+	if svcinst.IsElevated() {
+		return "/usr/local/bin"
+	}
+	home := os.Getenv("HOME")
+	if home == "" {
+		home = "/root"
+	}
+	return filepath.Join(home, ".local", "bin")
+}
+
+func installBinaryTransactionally(targetDir string, out io.Writer) (string, error) {
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return "", fmt.Errorf("cannot create installation directory %s: %w", targetDir, err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("resolve own executable: %w", err)
+	}
+	selfResolved, err := filepath.EvalSymlinks(self)
+	if err == nil {
+		self = selfResolved
+	}
+	binName := filepath.Base(self)
+	if strings.Contains(strings.ToLower(binName), "setup") {
+		if runtime.GOOS == "windows" {
+			binName = "telemeetbot.exe"
+		} else {
+			binName = "telemeetbot"
+		}
+	}
+	destPath := filepath.Join(targetDir, binName)
+	if filepath.Clean(self) == filepath.Clean(destPath) {
+		return destPath, nil
+	}
+
+	tmpPath := destPath + ".tmp"
+	srcFile, err := os.Open(self)
+	if err != nil {
+		return "", fmt.Errorf("open source binary: %w", err)
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		return "", fmt.Errorf("stage binary to %s: %w", tmpPath, err)
+	}
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		dstFile.Close()
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("copy binary: %w", err)
+	}
+	dstFile.Close()
+
+	if err := os.Rename(tmpPath, destPath); err != nil {
+		os.Remove(tmpPath)
+		return "", fmt.Errorf("install binary to %s: %w", destPath, err)
+	}
+	fmt.Fprintf(out, "  ✅ installed binary to %s\n", destPath)
+	return destPath, nil
 }
 
 var _ = exec.Command

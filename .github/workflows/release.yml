@@ -85,6 +85,8 @@ jobs:
           [ -n "$GOARM" ] && arch="arm${GOARM}"
           out="telemeetbot-${GOOS}-${arch}"
           if [ "$GOOS" = "windows" ]; then
+            cp "stage/telemeetbot.exe" "stage/TeleMeetBot-Setup.exe"
+            cp "stage/telemeetbot.exe" "TeleMeetBot-Setup-${GOOS}-${arch}.exe"
             ( cd stage && zip -qr -X "../${out}.zip" . )
           else
             tar -C stage -czf "${out}.tar.gz" .
@@ -97,6 +99,7 @@ jobs:
           path: |
             telemeetbot-*.tar.gz
             telemeetbot-*.zip
+            TeleMeetBot-Setup-*.exe
           if-no-files-found: error
           retention-days: 7
 
@@ -300,10 +303,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-          find dist -type f \( -name 'telemeetbot-*.tar.gz' -o -name 'telemeetbot-*.zip' \) \
+          find dist -type f \( -name 'telemeetbot-*.tar.gz' -o -name 'telemeetbot-*.zip' -o -name 'TeleMeetBot-Setup-*.exe' \) \
             -exec mv {} release/ \;
-          # One manifest covering every archive in the release.
-          ( cd release && sha256sum telemeetbot-* | sort -k2 > SHA256SUMS )
+          # One manifest covering every archive and installer in the release.
+          ( cd release && sha256sum telemeetbot-* TeleMeetBot-Setup-* | sort -k2 > SHA256SUMS )
           cp scripts/install.sh scripts/install.ps1 release/ 2>/dev/null || true
           ls -lh release
 
@@ -336,7 +339,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --title "TeleMeetBot ${version}" \
               "${notes_args[@]}" \
-              release/*.tar.gz release/*.zip release/SHA256SUMS release/install.sh release/install.ps1
+              release/*.tar.gz release/*.zip release/*.exe release/SHA256SUMS release/install.sh release/install.ps1
           fi
 
       - name: Verify the published assets are downloadable

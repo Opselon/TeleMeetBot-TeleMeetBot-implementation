@@ -46,6 +46,8 @@ type DoctorOptions struct {
 	CaptureTest bool
 	// SkipNetwork skips outbound connectivity checks.
 	SkipNetwork bool
+	// SkipMediaTools skips yt-dlp, ffmpeg and deno checks (tests / core-only).
+	SkipMediaTools bool
 	// Log is the engine logger.
 	Log engine.Logger
 	// Validate overrides the Telegram token validation (tests).
@@ -93,7 +95,35 @@ func Doctor(cfg *config.Config, cfgPath string, opts DoctorOptions) Report {
 		r.Checks = append(r.Checks, Check{"chromium", true, strings.TrimSpace(bin + " " + version)})
 	}
 
-	// 4. Disk
+	// 4. Media tools (yt-dlp, FFmpeg, Deno)
+	if opts.SkipMediaTools {
+		r.Checks = append(r.Checks, Check{"media pipeline", true, "skipped"})
+	} else if cfg != nil && cfg.Download.Enabled {
+		ytdlp := CheckDependency(DepYTDLP, cfg, opts.Log)
+		if ytdlp.Found {
+			r.Checks = append(r.Checks, Check{"yt-dlp", true, strings.TrimSpace(ytdlp.Path + " " + ytdlp.Version)})
+		} else {
+			r.Checks = append(r.Checks, Check{"yt-dlp", false, "missing: required for Download & Stream mode (install yt-dlp or disable download in config)"})
+		}
+
+		ffmpeg := CheckDependency(DepFFmpeg, cfg, opts.Log)
+		if ffmpeg.Found {
+			r.Checks = append(r.Checks, Check{"ffmpeg", true, strings.TrimSpace(ffmpeg.Path + " " + ffmpeg.Version)})
+		} else {
+			r.Checks = append(r.Checks, Check{"ffmpeg", false, "missing: required for stream merging and container remuxing"})
+		}
+
+		deno := CheckDependency(DepDeno, cfg, opts.Log)
+		if deno.Found {
+			r.Checks = append(r.Checks, Check{"deno", true, strings.TrimSpace(deno.Path + " " + deno.Version)})
+		} else {
+			r.Checks = append(r.Checks, Check{"deno", true, "optional JS runtime: not installed (recommended for YouTube format extraction)"})
+		}
+	} else {
+		r.Checks = append(r.Checks, Check{"media pipeline", true, "disabled (Minimal profile / Browser mode)"})
+	}
+
+	// 5. Disk
 	if err := os.MkdirAll(cfg.Paths.DataDir, 0o700); err != nil {
 		r.Checks = append(r.Checks, Check{"disk", false, fmt.Sprintf("cannot create data dir: %v", err)})
 	} else {

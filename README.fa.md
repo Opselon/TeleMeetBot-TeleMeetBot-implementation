@@ -94,17 +94,36 @@ docker compose logs -f
 curl http://127.0.0.1:18080/healthz
 ```
 
-### ج) نصب یک‌کاماندی (بدون داکر)
+### ج) نصب چندسکویی و نصب‌کننده بومی (ویندوز، لینوکس، مک)
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/main/scripts/install.sh | bash
+**ویندوز (نصب‌کننده رسمی یا پاورشل):**
+1. **نصب‌کننده ویزارد گرافیکی ویندوز (آسان‌ترین)**: فایل `TeleMeetBot-Setup-windows-amd64.exe` (یا نسخه ARM64) را از [صفحه آخرین ریلیز گیت‌هاب](https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/latest) دانلود و اجرا کنید. ویزارد مراحل انتخاب پروفایل، وابستگی‌ها، توکن تلگرام و رجیستر سرویس ویندوز را به صورت گام‌به‌گام انجام می‌دهد.
+2. **دستور یک‌خطی PowerShell**:
+```powershell
+irm https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/latest/download/install.ps1 | iex
 ```
 
-این اسکریپت معماری را تشخیص می‌دهد (`amd64`/`arm64`/`arm v6, v7`/`386`)، آخرین ریلیز را
-دانلود و با SHA256 چک می‌کند، باینری را در `/usr/local/bin` می‌گذارد، unit های systemd
-را نصب می‌کند، یک قالب کانفیگ در `/etc/telemeetbot/config.yml` می‌سازد و ویزارد را اجرا می‌کند.
+**لینوکس و مک (اسکریپت استاندارد POSIX sh):**
+```bash
+curl -fsSL https://github.com/Opselon/TeleMeetBot-TeleMeetBot-implementation/releases/latest/download/install.sh | sh
+```
 
-### ج) بیلد از سورس
+این اسکریپت سیستم‌عامل و معماری پردازنده را تشخیص می‌دهد (`amd64`/`arm64`/`arm v6, v7`/`386`)، صحت آرشیو را با هش SHA-256 اعتبارسنجی می‌کند، باینری را نصب و نسخه آن را راستی‌آزمایی می‌کند، ویزارد یکپارچه ۹ مرحله‌ای را اجرا نموده و سرویس پس‌زمینه (systemd روی لینوکس، Windows SCM روی ویندوز یا launchd روی مک) را پیکربندی می‌کند.
+
+#### پروفایل‌های نصب و مدیریت وابستگی‌ها
+* **پروفایل کامل (Full - پیشنهادی)**: اشتراک استریم WebRTC در گوگل میت به همراه موتور پیشرفته دانلود و استریم رسانه. شامل ابزارهای کرومیوم، نسخه مستقل `yt-dlp`، ابزار `FFmpeg` و به صورت اختیاری موتور جاوااسکریپت `Deno`.
+* **پروفایل مینیمال (Minimal)**: صرفاً حالت اشتراک مستقیم صفحات در گوگل میت با کرومیوم. دانلود رسانه‌ها غیرفعال می‌شود (`download.enabled: false`).
+* **عدم نیاز به ابزارهای جانبی برنامه‌نویسی**: کاربران به هیچ‌وجه نیازی به نصب Go، پایتون، سلنیوم، نودجی‌اس یا ابزارهای کامپایل ندارند؛ ابزارهای موردنیاز به صورت فایل باینری مستقل یا از طریق پکیج‌منیجر بومی سیستم‌عامل (`apt-get`, `dnf`, `pacman`, `apk`, `zypper`, `winget`, `brew`) به صورت خودکار نصب و مدیریت می‌شوند.
+
+**دستورات خط فرمان و عیب‌یابی:**
+```bash
+telemeetbot setup                            # اجرای مجدد ویزارد یکپارچه ۹ مرحله‌ای
+telemeetbot doctor                           # بررسی کامل سلامت و وابستگی‌ها (معادل telemeetbot --check)
+telemeetbot --restore-backup                 # بازگردانی کانفیگ قبلی از نسخه بکاپ (.bak)
+telemeetbot uninstall                        # حذف سرویس و فایل باینری با حفظ دیتابیس‌ها و پلی‌لیست‌ها
+```
+
+### د) بیلد از سورس
 
 ```bash
 go build -o telemeetbot ./cmd/telemeetbot   # Go 1.26+

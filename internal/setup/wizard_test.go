@@ -302,6 +302,7 @@ func TestWizardReportsInvalidToken(t *testing.T) {
 			"n",
 		}, "\n") + "\n"),
 		Out:                &out,
+		Profile:            ProfileFull,
 		SkipBrowserInstall: true,
 		TokenValidator: func(tok string) (string, error) {
 			calls++
