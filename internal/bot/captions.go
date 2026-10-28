@@ -59,7 +59,10 @@ func (b *Bot) handleCaptionsCallback(chatID, userID int64, msgID int, q *tgbotap
 	switch verb {
 	case "captions":
 		_ = b.api.AnswerCallback(q.ID, "")
-		_ = b.api.Edit(chatID, msgID, captionsMenuText(st), captionsMenuKB(st))
+		b.setCardView(sid, chatID, msgID, "captions")
+		if err := b.api.Edit(chatID, msgID, captionsMenuText(st), captionsMenuKB(st)); err != nil {
+			b.log.Warnf("[PIPELINE:bot] failed to open captions menu session=%s: %v", sid, err)
+		}
 	case "cappol":
 		if len(parts) < 3 {
 			_ = b.api.AnswerCallback(q.ID, "bad policy")
@@ -72,7 +75,10 @@ func (b *Bot) handleCaptionsCallback(chatID, userID int64, msgID int, q *tgbotap
 		}
 		_ = b.api.AnswerCallback(q.ID, "captions: "+engine.CaptionPolicyDisplay(policy))
 		st = s.Snapshot()
-		_ = b.api.Edit(chatID, msgID, captionsMenuText(st), captionsMenuKB(st))
+		b.setCardView(sid, chatID, msgID, "captions")
+		if err := b.api.Edit(chatID, msgID, captionsMenuText(st), captionsMenuKB(st)); err != nil {
+			b.log.Warnf("[PIPELINE:bot] failed to update captions menu session=%s: %v", sid, err)
+		}
 	case "caplang":
 		if len(parts) < 3 {
 			_ = b.api.AnswerCallback(q.ID, "bad language")
@@ -89,7 +95,10 @@ func (b *Bot) handleCaptionsCallback(chatID, userID int64, msgID int, q *tgbotap
 		}
 		_ = b.api.AnswerCallback(q.ID, "preferred subtitle language: "+lang)
 		st = s.Snapshot()
-		_ = b.api.Edit(chatID, msgID, captionsMenuText(st), captionsMenuKB(st))
+		b.setCardView(sid, chatID, msgID, "captions")
+		if err := b.api.Edit(chatID, msgID, captionsMenuText(st), captionsMenuKB(st)); err != nil {
+			b.log.Warnf("[PIPELINE:bot] failed to update captions menu session=%s: %v", sid, err)
+		}
 	case "capon", "capoff":
 		// Real player operation with read-back; the note distinguishes
 		// "issued" from "confirmed".
@@ -100,23 +109,32 @@ func (b *Bot) handleCaptionsCallback(chatID, userID int64, msgID int, q *tgbotap
 			_ = b.api.AnswerCallback(q.ID, truncate(note, 60))
 		}
 		st = s.Snapshot()
-		_ = b.api.Edit(chatID, msgID, captionsMenuText(st), captionsMenuKB(st))
+		b.setCardView(sid, chatID, msgID, "captions")
+		if err := b.api.Edit(chatID, msgID, captionsMenuText(st), captionsMenuKB(st)); err != nil {
+			b.log.Warnf("[PIPELINE:bot] failed to update captions menu session=%s: %v", sid, err)
+		}
 	case "capdetect":
 		_ = b.api.AnswerCallback(q.ID, "probing subtitles…")
+		b.setCardView(sid, chatID, msgID, "captions")
 		b.showCaptionTracks(chatID, msgID, s)
 	case "capapply":
 		// Reload the current media so the caption policy/language reaches
 		// the extraction pipeline. Failures are reported honestly.
 		_ = b.api.AnswerCallback(q.ID, "reloading media…")
 		if err := s.RestartMedia(); err != nil {
+			b.setCardView(sid, chatID, msgID, "captions")
 			_ = b.api.Edit(chatID, msgID, "🔴 <b>Apply failed</b>\n\n"+esc(truncate(err.Error(), 250)), captionsMenuKB(st))
 			return
 		}
 		st = s.Snapshot()
+		b.setCardView(sid, chatID, msgID, "captions")
 		_ = b.api.Edit(chatID, msgID, captionsMenuText(st), captionsMenuKB(st))
 	case "capinfo":
 		_ = b.api.AnswerCallback(q.ID, "")
-		_ = b.api.Edit(chatID, msgID, b.captionInfoText(st), captionsMenuKB(st))
+		b.setCardView(sid, chatID, msgID, "captions")
+		if err := b.api.Edit(chatID, msgID, b.captionInfoText(st), captionsMenuKB(st)); err != nil {
+			b.log.Warnf("[PIPELINE:bot] failed to show captions info session=%s: %v", sid, err)
+		}
 	default:
 		_ = b.api.AnswerCallback(q.ID, "unknown caption action")
 	}

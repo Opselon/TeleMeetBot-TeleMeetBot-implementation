@@ -53,7 +53,10 @@ func (b *Bot) handleQualityCallback(chatID, userID int64, msgID int, q *tgbotapi
 	switch verb {
 	case "quality":
 		_ = b.api.AnswerCallback(q.ID, "")
-		_ = b.api.Edit(chatID, msgID, qualityMenuText(st), qualityMenuKB(st))
+		b.setCardView(sid, chatID, msgID, "quality")
+		if err := b.api.Edit(chatID, msgID, qualityMenuText(st), qualityMenuKB(st)); err != nil {
+			b.log.Warnf("[PIPELINE:bot] failed to open quality menu session=%s: %v", sid, err)
+		}
 	case "qset":
 		if len(parts) < 3 {
 			_ = b.api.AnswerCallback(q.ID, "bad policy")
@@ -66,13 +69,17 @@ func (b *Bot) handleQualityCallback(chatID, userID int64, msgID int, q *tgbotapi
 		}
 		_ = b.api.AnswerCallback(q.ID, "requested: "+engine.QualityPolicyDisplay(policy))
 		st = s.Snapshot()
-		_ = b.api.Edit(chatID, msgID, qualityMenuText(st), qualityMenuKB(st))
+		b.setCardView(sid, chatID, msgID, "quality")
+		if err := b.api.Edit(chatID, msgID, qualityMenuText(st), qualityMenuKB(st)); err != nil {
+			b.log.Warnf("[PIPELINE:bot] failed to update quality menu session=%s: %v", sid, err)
+		}
 	case "qapply":
 		// Reload the current media so the policy actually reaches the
 		// extraction ladder. Honest about what is happening: the media
 		// restarts, playback resumes at the beginning.
 		_ = b.api.AnswerCallback(q.ID, "reloading media…")
 		if err := s.RestartMedia(); err != nil {
+			b.setCardView(sid, chatID, msgID, "quality")
 			_ = b.api.Edit(chatID, msgID, "🔴 <b>Apply failed</b>\n\n"+esc(truncate(err.Error(), 250)), qualityMenuKB(st))
 			return
 		}
@@ -81,9 +88,13 @@ func (b *Bot) handleQualityCallback(chatID, userID int64, msgID int, q *tgbotapi
 		b.bindCard(chatID, msgID, s, st)
 	case "qinfo":
 		_ = b.api.AnswerCallback(q.ID, "")
-		_ = b.api.Edit(chatID, msgID, b.qualityInfoText(st), qualityInfoKB(st))
+		b.setCardView(sid, chatID, msgID, "quality")
+		if err := b.api.Edit(chatID, msgID, b.qualityInfoText(st), qualityInfoKB(st)); err != nil {
+			b.log.Warnf("[PIPELINE:bot] failed to show quality info session=%s: %v", sid, err)
+		}
 	case "qformats":
 		_ = b.api.AnswerCallback(q.ID, "probing source…")
+		b.setCardView(sid, chatID, msgID, "quality")
 		b.showSourceFormats(chatID, msgID, q.ID, s, st)
 	case "qfmt":
 		// A detected height becomes a capped policy: choosing "1080" maps
@@ -105,21 +116,27 @@ func (b *Bot) handleQualityCallback(chatID, userID int64, msgID int, q *tgbotapi
 		}
 		_ = b.api.AnswerCallback(q.ID, fmt.Sprintf("capped at ≤%dp", height))
 		st = s.Snapshot()
-		_ = b.api.Edit(chatID, msgID, qualityMenuText(st), qualityMenuKB(st))
+		b.setCardView(sid, chatID, msgID, "quality")
+		if err := b.api.Edit(chatID, msgID, qualityMenuText(st), qualityMenuKB(st)); err != nil {
+			b.log.Warnf("[PIPELINE:bot] failed to update quality menu session=%s: %v", sid, err)
+		}
 	case "qmode":
 		// The honest escape hatch for direct YouTube: switch the session to
 		// Download & Stream so the policy can actually be enforced.
 		_ = b.api.AnswerCallback(q.ID, "switching to Download & Stream…")
 		if err := s.SetPlaybackMode(media.ModeDownload); err != nil {
+			b.setCardView(sid, chatID, msgID, "quality")
 			_ = b.api.Edit(chatID, msgID, "🔴 Switch failed: "+esc(truncate(err.Error(), 200)), qualityMenuKB(st))
 			return
 		}
 		if err := s.RestartMedia(); err != nil {
 			st = s.Snapshot()
+			b.setCardView(sid, chatID, msgID, "quality")
 			_ = b.api.Edit(chatID, msgID, qualityMenuText(st), qualityMenuKB(st))
 			return
 		}
 		st = s.Snapshot()
+		b.setCardView(sid, chatID, msgID, "quality")
 		_ = b.api.Edit(chatID, msgID, qualityMenuText(st), qualityMenuKB(st))
 	default:
 		_ = b.api.AnswerCallback(q.ID, "unknown quality action")
