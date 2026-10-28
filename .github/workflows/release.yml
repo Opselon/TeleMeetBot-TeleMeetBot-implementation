@@ -136,7 +136,7 @@ jobs:
             archive: telemeetbot-windows-amd64.zip
     steps:
       - name: Download the built archive
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.goos }}-${{ matrix.goarch }}
           path: smoke
@@ -146,7 +146,7 @@ jobs:
       # transient failure kill the release.
       - name: Retry the download
         if: failure()
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ matrix.goos }}-${{ matrix.goarch }}
           path: smoke
@@ -246,31 +246,31 @@ jobs:
       # download action gives up on the whole set when one item fails its
       # retries, which would lose a release over a single flaky item.
       - name: Download the linux/amd64 artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with: { name: linux-amd64, path: dist/linux-amd64 }
       - name: Download the linux/arm64 artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with: { name: linux-arm64, path: dist/linux-arm64 }
       - name: Download the linux/arm/v6 artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with: { name: linux-arm-6, path: dist/linux-arm-6 }
       - name: Download the linux/arm/v7 artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with: { name: linux-arm-7, path: dist/linux-arm-7 }
       - name: Download the linux/386 artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with: { name: linux-386, path: dist/linux-386 }
       - name: Download the darwin/amd64 artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with: { name: darwin-amd64, path: dist/darwin-amd64 }
       - name: Download the darwin/arm64 artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with: { name: darwin-arm64, path: dist/darwin-arm64 }
       - name: Download the windows/amd64 artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with: { name: windows-amd64, path: dist/windows-amd64 }
       - name: Download the windows/arm64 artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with: { name: windows-arm64, path: dist/windows-arm64 }
 
       - name: Verify every platform artifact arrived
