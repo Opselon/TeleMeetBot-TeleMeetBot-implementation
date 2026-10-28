@@ -48,7 +48,7 @@ jobs:
           - goos: windows
             goarch: arm64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v5
         with:
@@ -194,7 +194,7 @@ jobs:
     name: docker (multi-arch)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: docker/setup-qemu-action@v3
         with:
@@ -240,7 +240,7 @@ jobs:
     needs: [build, smoke-binaries, docker]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Download one artifact per step rather than all at once: the bulk
       # download action gives up on the whole set when one item fails its
