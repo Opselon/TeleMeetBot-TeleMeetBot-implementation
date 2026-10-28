@@ -634,6 +634,19 @@ func (s *Session) MonitorSkipAds(stop <-chan struct{}) {
 	if log == nil {
 		log = noopLogger{}
 	}
+	// This goroutine runs for the whole session lifetime and polls the media
+	// tab. A seek that lands at the end of the track forces a queue
+	// auto-advance, which navigates that tab while this loop is polling it —
+	// a rod eval against a target being torn down can panic deep inside the
+	// driver, and with no recover() the whole goroutine would die and take
+	// ad-skipping (and, if the panic escapes, the process) with it.
+	// Recover, report, and let the next sample continue: failures are already
+	// counted and bounded by adSkipMaxFailures below.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("[PIPELINE:adskip] monitor panicked (recovered, polling stops for session %s): %v", s.ID, r)
+		}
+	}()
 	// A test-built Session has no ctx/done; the loop must still run and stop on
 	// the stop channel rather than dereference a nil context.
 	ctxDone := func() <-chan struct{} {
