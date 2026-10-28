@@ -1,24 +1,24 @@
-# TeleMeetBot — Dependabot configuration
+# TeleMeetBot — Dependabot version-update configuration.
 #
-# TeleMeetBot is a Go application (go.mod / go.sum) plus a Node.js docs site
-# (website/package.json) running on GitHub Actions, packaged with Docker.
-# Dependabot covers all four ecosystems natively, so it is the primary update
-# engine here; the custom .github/workflows/dependency-audit.yml workflow only
-# adds the nightly/weekly *audit* surface (report + detection of updates
-# Dependabot's policy cannot open PRs for) and never duplicates a PR.
+# The repository is a Go application (go.mod/go.sum) with a Node.js Astro docs
+# site (website/package.json) that runs on GitHub Actions and is published as
+# a Docker image, so every dependency surface here is one Dependabot covers
+# natively. Dependabot is therefore the *only* thing that opens update PRs.
+# The companion workflow .github/workflows/dependency-audit.yml only audits
+# (nightly/weekly detection + reporting); it never opens a PR.
 #
-# Update policy:
-#   - security updates are checked daily and land first,
-#   - compatible patch/minor updates are grouped weekly per ecosystem so a
-#     human can review one PR per ecosystem instead of one per package,
-#   - major updates are always isolated into their own PR for review, because
-#     a major bump (e.g. astro 5 -> 7) regularly needs application changes.
+# Update policy (full rationale in docs/dependency-update-policy.md):
+#   - security updates land first, ungrouped,
+#   - compatible minor/patch updates are grouped per ecosystem so a human
+#     reviews one PR per ecosystem instead of one PR per package,
+#   - major updates are always isolated into their own PR, and the majors
+#     known to require application changes are ignored until reviewed.
 
 version: 2
 updates:
-  # ---- Go modules (the application itself) -------------------------------
+  # Go modules — the application itself.
   - package-ecosystem: "gomod"
-    directory: "/"
+    directory: "/" # Location of package manifests
     schedule:
       interval: "weekly"
       day: "monday"
@@ -33,28 +33,27 @@ updates:
       prefix: "deps(go)"
       include: "scope"
     groups:
-      # Compatible minor/patch Go module updates ship as one PR. go-rod's
-      # transitive deps (ysmood/*, modernc.org/*) move together with the
-      # browser-automation stack, so grouping them keeps the test matrix
-      # meaningful instead of producing 8 near-identical PRs.
+      # Compatible minor/patch module bumps ship as one PR. rod's transitive
+      # stack (ysmood/*, modernc.org/*) moves together, so grouping keeps the
+      # test matrix meaningful instead of producing 8 near-identical PRs.
+      # Major bumps are deliberately NOT grouped: rod, sqlite or
+      # telegram-bot-api majors can change public APIs the bot compiles
+      # against, so they get their own PR with the failure isolated to it.
       go-modules:
         update-types:
           - "minor"
           - "patch"
-    # Major Go module bumps are deliberately NOT grouped: rod, sqlite or
-    # telegram-bot-api majors can change public APIs the bot compiles
-    # against, so they get their own PR with the failure isolated to it.
 
-  # ---- docs website (website/package.json + package-lock.json) -----------
+  # Docs website — website/package.json + package-lock.json.
   - package-ecosystem: "npm"
-    directory: "/website"
+    directory: "/website" # Location of package manifests
     schedule:
       interval: "weekly"
       day: "monday"
       time: "06:30"
       timezone: "UTC"
     open-pull-requests-limit: 5
-    versioning-strategy: "increase"   # bump package.json ranges, not only the lock
+    versioning-strategy: "increase" # bump package.json ranges, not only the lock
     rebase-strategy: "auto"
     labels:
       - "dependencies"
@@ -69,17 +68,19 @@ updates:
           - "minor"
           - "patch"
     ignore:
-      # Major Astro/MDX bumps break the site build and are reviewed manually
-      # (see docs/dependency-update-policy for the rationale). Dependabot
-      # still reports them; a human decides when to take them.
+      # astro 5 -> 7 is not a drop-in upgrade: astro 7 replaced the default
+      # Markdown processor with Sätteri (requiring a new
+      # @astrojs/markdown-remark dependency and a config migration) and the
+      # Vite/lightningcss upgrade it brings fails to minify this site's CSS.
+      # Verified experimentally; held until a human owns that migration.
       - dependency-name: "astro"
         update-types: ["version-update:semver-major"]
       - dependency-name: "@astrojs/mdx"
         update-types: ["version-update:semver-major"]
 
-  # ---- GitHub Actions workflow dependencies ------------------------------
+  # GitHub Actions used by the CI/CD workflows.
   - package-ecosystem: "github-actions"
-    directory: "/"
+    directory: "/" # Location of package manifests
     schedule:
       interval: "weekly"
       day: "monday"
@@ -98,9 +99,9 @@ updates:
           - "minor"
           - "patch"
 
-  # ---- Docker base images used for the published container ---------------
+  # Docker base images referenced by Dockerfile.
   - package-ecosystem: "docker"
-    directory: "/"
+    directory: "/" # Location of package manifests
     schedule:
       interval: "weekly"
       day: "monday"

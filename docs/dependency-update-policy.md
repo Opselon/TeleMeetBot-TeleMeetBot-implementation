@@ -36,12 +36,48 @@ Risky majors are explicitly **not** auto-taken:
 
 | Package | Current | Latest | Decision |
 |---|---|---|---|
-| `astro` | 5.18.2 | 7.x | Held. Major requires site re-verification; dependabot is configured to ignore `major` for it. |
-| `@astrojs/mdx` | 4.3.14 | 8.x | Held. Major requires site re-verification. |
+| `astro` | 5.18.2 | 7.4.3 | **Held — verified breaking.** See "astro 5 → 7" below. |
+| `@astrojs/mdx` | 4.3.14 | 8.1.2 | Held — moves with the astro major. |
 | `github.com/go-rod/rod` | 0.116.2 | 0.116.2 | At latest. |
 | `github.com/ysmood/fetchup` | 0.2.3 | 0.5.3 | **Pinned to ≤0.2.3 due to a genuine API break**: `fetchup.New()` signature changed from `New(dir string, urls ...string)` to `New(urls ...string)` in 0.5.x. rod's launcher depends on the old signature, so anything above 0.2.3 breaks `go build ./...`. Do not bump without a rod release that adapts to it. |
 | `github.com/ysmood/got` | 0.40.0 | 0.41.0 | Downgraded from 0.41.0 as the companion pin for the `fetchup` constraint above. |
 | `@playwright/test` | 1.64.1 | 1.64.1 | At latest compatible with `^1.55.0`. |
+
+### astro 5 → 7 (verified, deliberately held)
+
+The initial audit found 6 npm advisories against the website tree — most
+consequentially **GHSA-26w7-cxv4-gfx2 (astro AVIF image-optimization RCE,
+CVSS 9.8)** and GHSA-2pvr-wf23-7pc7 (SSRF in prerendered error pages, CVSS
+7.5). Every one of them is only patched in astro ≥ 6.x/7.x, so `npm audit`
+on the 5.x tree has no in-range fix.
+
+Upgrading was tried and **does not work today**:
+
+1. astro 7 replaced the default Markdown processor with Sätteri; the build
+   refuses to run until `@astrojs/markdown-remark` is installed as a new
+   dependency and the `markdown.rehypePlugins`/`remarkPlugins` config is
+   migrated onto it.
+2. After adding that dependency, `astro build` dies inside
+   `lightningcss minify` with `[lightningcss minify] Unexpected token
+   SquareBracketBlock` on this site's CSS — a Vite/lightningcss version
+   incompatibility carried by astro 7.
+
+Exposure on this site is low (verified, not assumed): `define:vars` is not
+used anywhere in `src/`, no `astro:assets` `<Image>`/`<Picture>` component is
+used (so no AVIF image-optimization path runs in this site's build), and the
+site is statically prerendered. The `define:vars` XSS advisory nonetheless
+applies because `BaseHead.astro` uses `<script is:inline>`, which is the
+sink class the advisory describes.
+
+**Decision:** the astro major stays held and is tracked as the single highest
+priority manual dependency migration. Dependabot is configured to ignore
+`version-update:semver-major` for `astro` and `@astrojs/mdx` so it does not
+re-open this every week; the audit workflow's npm-audit job keeps reporting
+the advisories so they are not forgotten. Taking the upgrade means: install
+`@astrojs/markdown-remark`, migrate `astro.config.mjs` markdown plugins,
+resolve the lightningcss minify failure (or set `build.inlineStylesheets` /
+disable the minifier), then run the full website build + SEO + contrast
+suites.
 
 ## Constraints discovered during the initial audit (important)
 
