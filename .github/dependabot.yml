@@ -1,0 +1,115 @@
+# TeleMeetBot — Dependabot configuration
+#
+# TeleMeetBot is a Go application (go.mod / go.sum) plus a Node.js docs site
+# (website/package.json) running on GitHub Actions, packaged with Docker.
+# Dependabot covers all four ecosystems natively, so it is the primary update
+# engine here; the custom .github/workflows/dependency-audit.yml workflow only
+# adds the nightly/weekly *audit* surface (report + detection of updates
+# Dependabot's policy cannot open PRs for) and never duplicates a PR.
+#
+# Update policy:
+#   - security updates are checked daily and land first,
+#   - compatible patch/minor updates are grouped weekly per ecosystem so a
+#     human can review one PR per ecosystem instead of one per package,
+#   - major updates are always isolated into their own PR for review, because
+#     a major bump (e.g. astro 5 -> 7) regularly needs application changes.
+
+version: 2
+updates:
+  # ---- Go modules (the application itself) -------------------------------
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    rebase-strategy: "auto"
+    labels:
+      - "dependencies"
+      - "go"
+    commit-message:
+      prefix: "deps(go)"
+      include: "scope"
+    groups:
+      # Compatible minor/patch Go module updates ship as one PR. go-rod's
+      # transitive deps (ysmood/*, modernc.org/*) move together with the
+      # browser-automation stack, so grouping them keeps the test matrix
+      # meaningful instead of producing 8 near-identical PRs.
+      go-modules:
+        update-types:
+          - "minor"
+          - "patch"
+    # Major Go module bumps are deliberately NOT grouped: rod, sqlite or
+    # telegram-bot-api majors can change public APIs the bot compiles
+    # against, so they get their own PR with the failure isolated to it.
+
+  # ---- docs website (website/package.json + package-lock.json) -----------
+  - package-ecosystem: "npm"
+    directory: "/website"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:30"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    versioning-strategy: "increase"   # bump package.json ranges, not only the lock
+    rebase-strategy: "auto"
+    labels:
+      - "dependencies"
+      - "npm"
+      - "docs-site"
+    commit-message:
+      prefix: "deps(website)"
+      include: "scope"
+    groups:
+      npm-compatible:
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # Major Astro/MDX bumps break the site build and are reviewed manually
+      # (see docs/dependency-update-policy for the rationale). Dependabot
+      # still reports them; a human decides when to take them.
+      - dependency-name: "astro"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@astrojs/mdx"
+        update-types: ["version-update:semver-major"]
+
+  # ---- GitHub Actions workflow dependencies ------------------------------
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:00"
+      timezone: "UTC"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "deps(ci)"
+      include: "scope"
+    groups:
+      actions:
+        update-types:
+          - "minor"
+          - "patch"
+
+  # ---- Docker base images used for the published container ---------------
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "07:30"
+      timezone: "UTC"
+    open-pull-requests-limit: 3
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "deps(docker)"
+      include: "scope"

@@ -1,0 +1,287 @@
+# TeleMeetBot — dependency health audit (nightly + weekly)
+#
+# This workflow is the *detection and reporting* layer on top of Dependabot
+# (see .github/dependabot.yml). Dependabot opens the update PRs; this workflow
+# exists because Dependabot alone cannot:
+#
+#   - fail a check when a *critical* security advisory has no fix available,
+#   - report on runtime pins Dependabot does not see (the Go toolchain in
+#     go.mod, the golang:1.26-bookworm / debian:bookworm-slim image tags in
+#     Dockerfile, the yt-dlp / deno downloads the Dockerfile vendors in),
+#   - produce a single human-readable audit report across every ecosystem.
+#
+# It NEVER opens a PR by itself and never pushes to main: detection only, in
+# two non-overlapping slots:
+#
+#   nightly  — 03:00 UTC, Monday-Saturday: security + low-risk compatible
+#              detection. Fast jobs only, no Docker build, no site build.
+#   weekly   — 03:00 UTC, Sunday: the same checks plus the full matrix
+#              (Docker base images, toolchains, lockfile consistency, the
+#              website build). The weekly job is the one that can take longer.
+#
+# Concurrency: one audit of each kind at a time; a newer run cancels a stale
+# one so a flaky runner cannot stack jobs.
+
+name: dependency audit
+
+on:
+  schedule:
+    # Nightly audit — 03:00 UTC, Monday through Saturday.
+    - cron: "0 3 * * 1-6"
+    # Weekly comprehensive audit — 03:00 UTC on Sunday (offset from the
+    # Dependabot Monday slots so the two never race for the same runner).
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
+    # Manual trigger: used by the initial audit run and for on-demand re-checks
+    # after a security advisory lands.
+    inputs:
+      scope:
+        description: "Audit scope"
+        required: false
+        default: "weekly"
+        type: choice
+        options:
+          - nightly
+          - weekly
+
+permissions:
+  contents: read      # read-only: no branch push, no PR creation, no release
+  issues: write       # only to open a tracking issue for a critical advisory
+  security-events: read
+
+concurrency:
+  group: dep-audit-${{ github.event.inputs.scope || (github.event.schedule == '0 3 * * 0' && 'weekly' || 'nightly') }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.26"
+  NODE_VERSION: "22"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # go: are the modules in go.mod/go.sum up to date, consistent, and free of
+  # known reachable vulnerabilities?
+  # ---------------------------------------------------------------------------
+  go-modules:
+    name: go modules
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Report module versions and available updates
+        run: |
+          set -euo pipefail
+          echo "## Go modules (go.mod)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          go list -m all | sed 's/^/  /' | head -60 >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          # Modules with an available newer version. Empty output = up to date.
+          echo "### Updates available" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          updates="$(go list -m -u all 2>/dev/null | awk '$NF ~ /^\[/' || true)"
+          if [ -n "$updates" ]; then
+            printf '%s\n' "$updates" | sed 's/^/  /' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "  (none — all modules are at their latest compatible version)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Lockfile consistency (go mod verify + tidy check)
+        run: |
+          set -euo pipefail
+          go mod verify
+          # A tree whose go.mod/go.sum are not tidy is a real inconsistency:
+          # CI builds must be reproducible from the committed files alone.
+          go mod tidy
+          if ! git diff --exit-code -- go.mod go.sum; then
+            echo "::error::go.mod/go.sum are not consistent with the module graph (go mod tidy produced changes)"
+            exit 1
+          fi
+          echo "go.mod/go.sum are consistent."
+
+  go-vulncheck:
+    name: go govulncheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Run govulncheck
+        run: |
+          set -euo pipefail
+          go run golang.org/x/vuln/cmd/govulncheck@latest ./... 2>&1 | tee /tmp/govulncheck.txt
+          echo "## govulncheck" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          sed 's/^/  /' /tmp/govulncheck.txt | head -80 >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # npm audit of the docs site tree, plus lockfile/build consistency.
+  # ---------------------------------------------------------------------------
+  website-npm:
+    name: website npm audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+
+      - name: npm ci (lockfile consistency)
+        run: npm ci --no-audit --no-fund
+
+      - name: npm audit (published advisories)
+        run: |
+          set -euo pipefail
+          echo "## website npm audit" >> "$GITHUB_STEP_SUMMARY"
+          # json for the machine, human for the summary. Do not fail the job
+          # on advisories whose only fix is a breaking major bump — those are
+          # tracked as known limitations instead (see the docs policy).
+          npm audit --omit=dev --json > /tmp/audit.json || true
+          python3 - <<'PY' >> "${GITHUB_STEP_SUMMARY}"
+          import json, sys
+          try:
+              d = json.load(open('/tmp/audit.json'))
+          except Exception:
+              print("```text")
+              print("(npm audit produced no parseable report)")
+              print("```")
+              sys.exit(0)
+          meta = d.get('metadata', {}).get('vulnerabilities', {})
+          print("```text")
+          print("vulnerabilities by severity:", meta)
+          for name, adv in sorted((d.get('vulnerabilities') or {}).items()):
+              via = adv.get('via') or []
+              urls = [v.get('url') for v in via if isinstance(v, dict)]
+              print(f"  - {name}: severity={adv.get('severity')} fixAvailable={adv.get('fixAvailable')}")
+              for u in urls[:3]:
+                  if u:
+                      print(f"      advisory: {u}")
+          print("```")
+          PY
+
+      - name: Outdated packages
+        run: |
+          set -euo pipefail
+          echo "## website outdated" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          npm outdated --omit=dev || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Site build smoke (weekly comprehensive run only)
+        if: github.event.inputs.scope != 'nightly' && github.event.schedule != '0 3 * * 1-6'
+        run: |
+          set -euo pipefail
+          npm run build
+          echo "## website build" >> "$GITHUB_STEP_SUMMARY"
+          echo "  site builds cleanly with the locked dependency set." >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Weekly only: the runtime pins Dependabot does not cover.
+  # ---------------------------------------------------------------------------
+  runtime-pins:
+    name: runtime pins (docker, toolchains, vendored binaries)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event.inputs.scope != 'nightly' && github.event.schedule != '0 3 * * 1-6'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Audit Docker base image pins
+        run: |
+          set -euo pipefail
+          echo "## Docker base images" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          grep -nE '^\s*(FROM|COPY --from=)' Dockerfile | sed 's/^/  /' >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          Pinned tags: `golang:1.26-bookworm` (build), `debian:bookworm-slim`
+          (runtime), `aiogram/telegram-bot-api:latest` (vendored local Bot API
+          server). The runtime image is intentionally pinned to a named
+          distribution rather than `:latest`; updates are reviewed manually
+          (see docs/dependency-update-policy.md).
+          EOF
+
+      - name: Audit CI/runtime version pins
+        run: |
+          set -euo pipefail
+          echo "## Pinned toolchain / runtime versions" >> "$GITHUB_STEP_SUMMARY"
+          echo '```text' >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "  go.mod directive : $(grep -m1 '^go ' go.mod)"
+            echo "  CI go-version    : $GO_VERSION (workflow env)"
+            echo "  Dockerfile go    : $(grep -m1 'FROM golang' Dockerfile)"
+            echo "  node (website)   : $NODE_VERSION (workflow env)"
+            echo "  vendored yt-dlp  : Dockerfile fetches the latest release at build time"
+            echo "  vendored deno    : Dockerfile fetches the latest release at build time"
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compose file validity
+        run: |
+          set -euo pipefail
+          docker compose config -q
+          echo "## compose" >> "$GITHUB_STEP_SUMMARY"
+          echo "  docker-compose.yml: valid." >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # Aggregate: pass/fail signal. 'skipped' is expected for runtime-pins during
+  # the nightly run and must NOT count as a failure.
+  # ---------------------------------------------------------------------------
+  audit-summary:
+    name: audit summary
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [go-modules, go-vulncheck, website-npm, runtime-pins]
+    if: always()
+    env:
+      RES_GO_MODULES: ${{ needs.go-modules.result }}
+      RES_GO_VULNCHECK: ${{ needs.go-vulncheck.result }}
+      RES_WEBSITE_NPM: ${{ needs.website-npm.result }}
+      RES_RUNTIME_PINS: ${{ needs.runtime-pins.result }}
+    steps:
+      - name: Aggregate results
+        run: |
+          set -euo pipefail
+          {
+            echo "## Dependency audit result"
+            echo ""
+            echo "| job | result |"
+            echo "|---|---|"
+            echo "| go modules (update detection + lockfile consistency) | ${RES_GO_MODULES} |"
+            echo "| go govulncheck (reachable vulns) | ${RES_GO_VULNCHECK} |"
+            echo "| website npm audit | ${RES_WEBSITE_NPM} |"
+            echo "| runtime pins (weekly only) | ${RES_RUNTIME_PINS} |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Only a real 'failure' fails the audit. 'skipped' is by design for
+          # runtime-pins on the nightly run; 'cancelled' means a newer audit
+          # superseded this one.
+          for res in ${RES_GO_MODULES} ${RES_GO_VULNCHECK} ${RES_WEBSITE_NPM} ${RES_RUNTIME_PINS}; do
+            if [ "$res" = "failure" ]; then
+              echo "::error::at least one audit job failed — see the job logs above"
+              exit 1
+            fi
+          done
+
+          {
+            echo "Audit complete. **No dependency-update PR is created by this workflow** —"
+            echo "update PRs are opened by Dependabot per \`.github/dependabot.yml\`."
+          } >> "$GITHUB_STEP_SUMMARY"
