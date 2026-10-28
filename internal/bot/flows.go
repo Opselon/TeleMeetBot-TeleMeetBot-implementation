@@ -630,6 +630,7 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 	switch {
 	case data == cbHome || data == cbRefresh:
 		b.log.Infof("[PIPELINE:bot] action: home/refresh from user=%d chat=%d", userID, chatID)
+		b.unbindCard(chatID, msgID)
 		_ = b.api.AnswerCallback(q.ID, "dashboard")
 		_ = b.api.Edit(chatID, msgID, b.mainText(userID), mainMenuKB())
 	case data == cbNew:
@@ -638,25 +639,31 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 		b.startFlow(chatID, userID, "")
 	case data == cbSessions:
 		b.log.Infof("[PIPELINE:bot] action: view sessions by user=%d chat=%d", userID, chatID)
+		b.unbindCard(chatID, msgID)
 		_ = b.api.AnswerCallback(q.ID, "")
 		_ = b.api.Edit(chatID, msgID, sessionsText(b.statuses()), sessionsKB(b.statuses()))
 	case data == cbPlaylists:
 		b.log.Infof("[PIPELINE:bot] action: open playlists by user=%d chat=%d", userID, chatID)
+		b.unbindCard(chatID, msgID)
 		_ = b.api.AnswerCallback(q.ID, "")
 		b.showPlaylistList(chatID, userID, msgID, 0)
 	case data == cbManage:
 		b.log.Infof("[PIPELINE:bot] action: open management console by user=%d chat=%d", userID, chatID)
+		b.unbindCard(chatID, msgID)
 		b.handleManageCallback(chatID, userID, msgID, q, data)
 	case data == cbHealth:
 		b.log.Infof("[PIPELINE:bot] action: view health by user=%d chat=%d", userID, chatID)
+		b.unbindCard(chatID, msgID)
 		_ = b.api.AnswerCallback(q.ID, "")
 		_ = b.api.Edit(chatID, msgID, b.healthText(), backKB())
 	case data == cbSettings:
 		b.log.Infof("[PIPELINE:bot] action: view settings by user=%d chat=%d", userID, chatID)
+		b.unbindCard(chatID, msgID)
 		_ = b.api.AnswerCallback(q.ID, "")
 		b.showUserSettings(chatID, msgID, userID)
 	case data == cbAccount:
 		b.log.Infof("[PIPELINE:bot] action: view account by user=%d chat=%d", userID, chatID)
+		b.unbindCard(chatID, msgID)
 		_ = b.api.AnswerCallback(q.ID, "")
 		b.showAccount(chatID, userID, msgID)
 	case data == cbAccountConnect:
@@ -840,7 +847,10 @@ func (b *Bot) handleAction(chatID int64, msgID int, q *tgbotapi.CallbackQuery, d
 	}
 	if action == "stop_confirm" {
 		_ = b.api.AnswerCallback(q.ID, "confirm to stop")
-		_ = b.api.Edit(chatID, msgID, stopConfirmText(st), stopConfirmKB(string(id)))
+		b.setCardView(string(id), chatID, msgID, "stop_confirm")
+		if err := b.api.Edit(chatID, msgID, stopConfirmText(st), stopConfirmKB(string(id))); err != nil {
+			b.log.Warnf("[PIPELINE:bot] failed to show stop confirmation session=%s: %v", id, err)
+		}
 		return
 	}
 	if action == "stop_ok" {
@@ -849,41 +859,58 @@ func (b *Bot) handleAction(chatID int64, msgID int, q *tgbotapi.CallbackQuery, d
 		// tearing anything else down.
 		_ = b.api.AnswerCallback(q.ID, "stopping")
 		s.Stop()
-		_ = b.api.Edit(chatID, msgID, "⏹ Session "+string(id)+" is stopping.", mainMenuKB())
+		b.unbindCard(chatID, msgID)
+		if err := b.api.Edit(chatID, msgID, "⏹ Session "+string(id)+" is stopping.", mainMenuKB()); err != nil {
+			b.log.Warnf("[PIPELINE:bot] failed to show stopped message session=%s: %v", id, err)
+		}
 		return
 	}
 	if action == "speed" {
 		_ = b.api.AnswerCallback(q.ID, "")
-		_ = b.api.Edit(chatID, msgID, speedMenuText(st), speedMenuKB(st))
+		b.setCardView(string(id), chatID, msgID, "speed")
+		if err := b.api.Edit(chatID, msgID, speedMenuText(st), speedMenuKB(st)); err != nil {
+			b.log.Warnf("[PIPELINE:bot] failed to open speed menu session=%s: %v", id, err)
+		}
 		return
 	}
 	if strings.HasPrefix(action, "rate:") {
 		var centis int
 		if _, err := fmt.Sscanf(strings.TrimPrefix(action, "rate:"), "%d", &centis); err != nil || centis < 25 || centis > 400 {
+			b.log.Warnf("[PIPELINE:bot] invalid playback rate requested session=%s action=%q", id, action)
 			_ = b.api.AnswerCallback(q.ID, "invalid speed")
 			return
 		}
-		if rerr := s.SetRate(float64(centis) / 100); rerr != nil {
+		newRate := float64(centis) / 100
+		if rerr := s.SetRate(newRate); rerr != nil {
+			b.log.Errorf("[PIPELINE:bot] failed to set playback rate session=%s rate=%.2gx: %v", id, newRate, rerr)
 			_ = b.api.AnswerCallback(q.ID, "speed failed: "+truncate(rerr.Error(), 60))
 		} else {
-			_ = b.api.AnswerCallback(q.ID, fmt.Sprintf("speed %.2gx", float64(centis)/100))
+			_ = b.api.AnswerCallback(q.ID, fmt.Sprintf("speed %.2gx", newRate))
 		}
 		st = s.Snapshot()
-		_ = b.api.Edit(chatID, msgID, sessionCardText(st), sessionCardKB(st))
-		b.bindCard(chatID, msgID, s, st)
+		b.setCardView(string(id), chatID, msgID, "speed")
+		if err := b.api.Edit(chatID, msgID, speedMenuText(st), speedMenuKB(st)); err != nil {
+			b.log.Warnf("[PIPELINE:bot] failed to update speed menu session=%s: %v", id, err)
+		}
 		return
 	}
 	if action == "switchurl" {
 		userID := q.From.ID
 		b.setFlow(userID, &flow{step: stepSwitchMedia, sessionID: string(id), meet: st.MeetURL, media: st.MediaURL})
 		_ = b.api.AnswerCallback(q.ID, "send the new media link")
-		_ = b.api.Edit(chatID, msgID, switchMediaText(st), cancelKB())
+		b.setCardView(string(id), chatID, msgID, "switchurl")
+		if err := b.api.Edit(chatID, msgID, switchMediaText(st), cancelKB()); err != nil {
+			b.log.Warnf("[PIPELINE:bot] failed to open switch media prompt session=%s: %v", id, err)
+		}
 		return
 	}
 	if action == "tools" {
 		items, curIdx := s.QueueSnapshot()
 		_ = b.api.AnswerCallback(q.ID, "")
-		_ = b.api.Edit(chatID, msgID, playlistQueueToolsText(st, items, curIdx), playlistQueueToolsKB(st))
+		b.setCardView(string(id), chatID, msgID, "tools")
+		if err := b.api.Edit(chatID, msgID, playlistQueueToolsText(st, items, curIdx), playlistQueueToolsKB(st)); err != nil {
+			b.log.Warnf("[PIPELINE:bot] failed to open tools menu session=%s: %v", id, err)
+		}
 		return
 	}
 	var err error
@@ -936,6 +963,7 @@ func (b *Bot) handleAction(chatID int64, msgID int, q *tgbotapi.CallbackQuery, d
 		b.st.UpdateQueue(string(s.ID), qRecs, curIdx)
 	case "queue":
 		_ = b.api.AnswerCallback(q.ID, "")
+		b.setCardView(string(id), chatID, msgID, "queue")
 		b.renderQueue(chatID, msgID, s, -1)
 		return
 	case "pause":
@@ -984,9 +1012,53 @@ func (b *Bot) handleAction(chatID int64, msgID int, q *tgbotapi.CallbackQuery, d
 // bindCard ties a dashboard message to a session for live updates.
 func (b *Bot) bindCard(chatID int64, msgID int, s *engine.Session, st engine.Status) {
 	b.mu.Lock()
-	b.cards[string(st.ID)] = &cardRef{chat: chatID, msg: msgID, text: sessionCardText(st), fixedAt: time.Now()}
+	defer b.mu.Unlock()
+	b.cards[string(st.ID)] = &cardRef{
+		chat:    chatID,
+		msg:     msgID,
+		text:    sessionCardText(st),
+		fixedAt: time.Now(),
+		view:    "card",
+		viewAt:  time.Now(),
+	}
 	b.sessionChats[string(st.ID)] = chatID
-	b.mu.Unlock()
+}
+
+// setCardView flags that a session's card message is currently displaying a subview
+// (e.g. "speed", "quality", "captions", "tools", "queue", "stop_confirm").
+// The refresh loop will avoid overwriting this message while the user is actively
+// interacting with the subview (up to 2 minutes of idle inactivity).
+func (b *Bot) setCardView(sessionID string, chatID int64, msgID int, view string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	ref := b.cards[sessionID]
+	if ref == nil {
+		ref = &cardRef{
+			chat:    chatID,
+			msg:     msgID,
+			fixedAt: time.Now(),
+		}
+		b.cards[sessionID] = ref
+		b.sessionChats[sessionID] = chatID
+	} else {
+		ref.chat = chatID
+		ref.msg = msgID
+	}
+	ref.view = view
+	ref.viewAt = time.Now()
+	ref.text = ""
+}
+
+// unbindCard removes message bindings for any card that matches chatID and msgID,
+// preventing background refresh from overwriting non-session screens (e.g. Dashboard).
+func (b *Bot) unbindCard(chatID int64, msgID int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for id, ref := range b.cards {
+		if ref.chat == chatID && ref.msg == msgID {
+			delete(b.cards, id)
+		}
+	}
 }
 
 // sendSessionCard sends a fresh card for a session.
@@ -1118,7 +1190,10 @@ func (b *Bot) renderQueue(chatID int64, msgID int, s *engine.Session, page int) 
 	if total := queuePageCount(len(items)); total > 0 && page >= total {
 		page = total - 1
 	}
-	_ = b.api.Edit(chatID, msgID, queueViewText(st, items, curIdx, page), queueViewKB(st, items, curIdx, page))
+	b.setCardView(string(s.ID), chatID, msgID, "queue")
+	if err := b.api.Edit(chatID, msgID, queueViewText(st, items, curIdx, page), queueViewKB(st, items, curIdx, page)); err != nil {
+		b.log.Warnf("[PIPELINE:bot] failed to render queue session=%s page=%d: %v", s.ID, page, err)
+	}
 }
 
 // persistQueue mirrors a session queue into both durable stores: SQLite is

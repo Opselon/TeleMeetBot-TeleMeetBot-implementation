@@ -300,6 +300,68 @@ func TestSpeedControlsReachEngine(t *testing.T) {
 	}
 }
 
+func TestSpeedMenuPreservedAcrossCardRefresh(t *testing.T) {
+	h := newHarnessWithSettings(t, []int64{42}, 2)
+	s := h.addSessionWithQueue(42, 2)
+	id := string(s.ID)
+
+	// User opens session card.
+	h.callback(42, "ses:"+id)
+	if got := h.api.lastEdit().text; !strings.Contains(got, "Session "+id) {
+		t.Fatalf("session card not shown: %q", got)
+	}
+
+	// User clicks Speed to open speed menu.
+	h.callback(42, "act:"+id+":speed")
+	if got := h.api.lastEdit().text; !strings.Contains(got, "Playback speed") {
+		t.Fatalf("speed menu not shown: %q", got)
+	}
+
+	// Refresh loop runs: the speed menu MUST NOT be overwritten by the session card.
+	h.bot.refreshAll()
+	if got := h.api.lastEdit().text; !strings.Contains(got, "Playback speed") {
+		t.Fatalf("speed menu was overwritten by refreshAll: %q", got)
+	}
+
+	// User selects a speed preset.
+	h.callback(42, "act:"+id+":rate:150")
+	if got := s.Snapshot().Rate; got < 1.49 || got > 1.51 {
+		t.Fatalf("rate = %.2f, want 1.50", got)
+	}
+	if got := h.api.lastEdit().text; !strings.Contains(got, "Playback speed") {
+		t.Fatalf("speed menu was closed unexpectedly after rate selection: %q", got)
+	}
+
+	// Subsequent refresh ticks while user remains in speed menu still preserve it.
+	h.bot.refreshAll()
+	if got := h.api.lastEdit().text; !strings.Contains(got, "Playback speed") {
+		t.Fatalf("speed menu was overwritten by refreshAll after rate selection: %q", got)
+	}
+
+	// User navigates back via "⬅️ Session controls".
+	h.callback(42, "ses:"+id)
+	if got := h.api.lastEdit().text; !strings.Contains(got, "Session "+id) {
+		t.Fatalf("session card not restored: %q", got)
+	}
+
+	// Inactivity timeout: if a subview stays inactive for > 2m, refreshAll reverts it.
+	h.callback(42, "act:"+id+":speed")
+	if got := h.api.lastEdit().text; !strings.Contains(got, "Playback speed") {
+		t.Fatalf("speed menu not opened: %q", got)
+	}
+
+	h.bot.mu.Lock()
+	if ref := h.bot.cards[id]; ref != nil {
+		ref.viewAt = time.Now().Add(-3 * time.Minute)
+	}
+	h.bot.mu.Unlock()
+
+	h.bot.refreshAll()
+	if got := h.api.lastEdit().text; !strings.Contains(got, "Session "+id) {
+		t.Fatalf("inactivity timeout did not revert subview to session card: %q", got)
+	}
+}
+
 func TestGuestNamePreferenceLifecycle(t *testing.T) {
 	h := newHarnessWithSettings(t, []int64{42}, 2)
 

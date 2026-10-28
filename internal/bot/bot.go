@@ -43,6 +43,8 @@ type cardRef struct {
 	fixedAt  time.Time
 	lastEdit time.Time
 	errs     int
+	view     string
+	viewAt   time.Time
 }
 
 // Engine is the engine surface the bot needs (Manager implements it; tests fake it).
@@ -217,6 +219,17 @@ func (b *Bot) refreshAll() {
 		st := s.Snapshot()
 		b.mu.Lock()
 		ref := b.cards[string(st.ID)]
+		if ref != nil && ref.view != "" && ref.view != "card" {
+			// Subview active (e.g. speed, quality, captions, tools, queue):
+			// pause periodic re-rendering so user interaction is not interrupted.
+			// Revert to card view after 2 minutes of idle inactivity.
+			if time.Since(ref.viewAt) < 2*time.Minute {
+				b.mu.Unlock()
+				continue
+			}
+			b.log.Warnf("[PIPELINE:bot] subview %q timed out after inactivity session=%s, reverting to card", ref.view, st.ID)
+			ref.view = "card"
+		}
 		b.mu.Unlock()
 		if ref == nil {
 			continue
@@ -258,7 +271,7 @@ func (b *Bot) refreshCard(ref *cardRef, id engine.SessionID, text string, kb *tg
 		errs := ref.errs
 		b.mu.Unlock()
 		if errs <= 2 {
-			b.log.Debugf("edit card %s: %v", id, err)
+			b.log.Warnf("[PIPELINE:bot] edit card %s failed (chat=%d msg=%d): %v", id, ref.chat, ref.msg, err)
 		}
 		// Do not record the text: a transient Telegram failure must not leave
 		// the card permanently stale.
