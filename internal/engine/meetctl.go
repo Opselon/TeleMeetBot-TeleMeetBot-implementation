@@ -297,6 +297,11 @@ func (s *Session) clickPresentButton() (bool, string) {
     const itemTooltip = norm(item.getAttribute('data-tooltip') || "");
     const itemText = norm(item.innerText || item.textContent || "");
     if (itemAria.includes("stop") || itemTooltip.includes("stop") || itemText.includes("stop")) continue;
+    // A live presentation indicator ("x is presenting") is a label, not a
+    // share control: clicking it never starts our own share.
+    if (itemAria.includes("is presenting") || itemText.includes("is presenting") || itemTooltip.includes("is presenting") ||
+        itemAria.includes("is sharing") || itemText.includes("is sharing") ||
+        itemAria.includes("is starting") || itemText.includes("is starting")) continue;
     if (itemAria.includes("present") || itemAria.includes("share screen") || itemAria.includes("share your screen") ||
         itemTooltip.includes("present") || itemTooltip.includes("share screen") ||
         itemText.includes("present") || itemText.includes("share screen") || itemText.includes("share your screen") ||
@@ -353,6 +358,16 @@ func (s *Session) clickPresentButton() (bool, string) {
     }
     if (aria.includes("stop presenting") || aria.includes("stop sharing") || tooltip.includes("stop") ||
         aria.includes("is starting") || text.includes("is starting") || tooltip.includes("is starting")) {
+      continue;
+    }
+    // Someone else's presentation indicator ("narges yazdanpanah is presenting",
+    // "x is presenting compute") is a label, not a control. The generic
+    // 'present' match below scores it 80 and the bot ends up clicking the
+    // indicator instead of "Present now" — getDisplayMedia is never invoked
+    // and the share flow times out waiting for a stream that cannot start.
+    if (aria.includes("is presenting") || text.includes("is presenting") || tooltip.includes("is presenting") ||
+        aria.includes("is sharing") || text.includes("is sharing") || tooltip.includes("is sharing") ||
+        aria.includes("you are presenting") || text.includes("you are presenting")) {
       continue;
     }
 
