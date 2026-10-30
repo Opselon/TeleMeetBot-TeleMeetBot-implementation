@@ -80,6 +80,12 @@ type MediaOptions struct {
 	// means direct; FromConfig falls back to browser.proxy so a VPS that
 	// already proxies Chromium does not need a second setting.
 	DownloadProxy string
+	// DownloadFallbacks are the alternate egresses handed to yt-dlp after
+	// the primary fails to extract a YouTube URL (YouTube rate-limits one
+	// datacenter egress at the API layer: "Unable to download API page: N
+	// bytes read (caused by <IncompleteRead>)"). Empty keeps the historical
+	// single-proxy behaviour.
+	DownloadFallbacks []string
 	// DownloadBaseDir is the anchor for a relative DownloadDir (the config's
 	// paths.data_dir). Empty means "resolve against the process CWD".
 	DownloadBaseDir string
@@ -323,6 +329,7 @@ func (m *Manager) initMediaManager() error {
 		// Same egress Chromium already uses: one proxy setting is enough.
 		opts.Proxy = strings.TrimSpace(m.browserCfg.Proxy)
 	}
+	opts.FallbackProxies = append(opts.FallbackProxies[:0], m.mediaCfg.DownloadFallbacks...)
 	opts.AllowTranscode = m.mediaCfg.DownloadAllowXcode
 	// Anchor the download dir on the data dir when the operator left it
 	// relative or empty: a managed dir relative to the process CWD is

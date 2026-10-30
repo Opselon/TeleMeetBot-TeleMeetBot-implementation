@@ -25,27 +25,84 @@ type ytdlpResult struct {
 // maxExecRetries bounds retries on a transient yt-dlp failure.
 const maxExecRetries = 2
 
-// fetchYTDLP runs yt-dlp to fetch url into the managed directory.
+// proxyBlocked reports whether a yt-dlp failure is an egress block rather
+// than a genuine "this URL cannot be downloaded" verdict. These are the two
+// shapes YouTube uses to wall off a single datacenter egress at the API
+// layer:
 //
-// Security: yt-dlp receives exactly two vetted arguments — the output template
-// (built from a server-generated id, never user text) and the validated URL.
-// There is no shell anywhere in the chain, so no command injection surface.
-func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality, subLang string) (*ytdlpResult, error) {
-	bin, ok := m.YTDLP()
-	if !ok {
-		return nil, &ErrMissingTool{
-			Name: "yt-dlp",
-			Path: firstNonEmpty(m.opts.YTDLPPath, "yt-dlp"),
-			Hint: "install yt-dlp (https://github.com/yt-dlp/yt-dlp#installation) to enable Download & Stream for this source",
+//   - "Unable to download API page: N bytes read (caused by <IncompleteRead>)"
+//   - YouTube truncates the innertube response mid-body, which is a
+//     per-IP rate limit, not a property of the video.
+//   - "Sign in to confirm you're not a bot" - the datacenter IP itself is
+//     flagged.
+//
+// Neither says anything about the requested media, so both are worth a
+// different route. Everything else (unsupported URL, missing format,
+// age-restricted content) is a real verdict and must NOT burn a fallback.
+func proxyBlocked(stderr []byte) bool {
+	t := strings.ToLower(string(stderr))
+	// Covers the bare http.client marker ("IncompleteRead(...)") and yt-dlp's
+	// wrapped form ("<IncompleteRead: N bytes read>"). Matching the short
+	// stem keeps this from drifting with yt-dlp's phrasing.
+	if strings.Contains(t, "incomplet") {
+		return true
+	}
+	return strings.Contains(t, "sign in to confirm you're not a bot") ||
+		strings.Contains(t, "sign in to confirm you’re not a bot") ||
+		strings.Contains(t, "http error 429")
+}
+
+// stderrOf pulls the embedded yt-dlp stderr text out of a wrapped fetch
+// error (the %w in "yt-dlp: exit status 1: ERROR: ..."). The ladder decision
+// reads the real diagnosis, not a bare "exit status 1".
+func stderrOf(err error) []byte {
+	if err == nil {
+		return nil
+	}
+	return []byte(err.Error())
+}
+
+// transientFailure reports whether a subprocess failure looks like a
+// short-lived transport problem (connection reset, broken pipe, TLS EOF)
+// rather than a completed run that returned a verdict. The diagnosis lives in
+// yt-dlp's stderr, so both the error text and the stderr are inspected. The
+// historical behaviour retried these, and the retry counters the logs rely on
+// come from that contract.
+func transientFailure(err error, stderr []byte) bool {
+	t := strings.ToLower(string(stderr))
+	if err != nil {
+		t += " " + strings.ToLower(err.Error())
+	}
+	return strings.Contains(t, "connection reset") ||
+		strings.Contains(t, "broken pipe") ||
+		strings.Contains(t, "eof") ||
+		strings.Contains(t, "no such file or directory")
+}
+
+// egresses returns the ordered list of egresses a YouTube download may use:
+// the configured primary proxy first, then each fallback. The empty string
+// means "direct connection" and is only present when the operator configured
+// no proxy at all.
+func (m *Manager) egresses() []string {
+	var out []string
+	if p := strings.TrimSpace(m.opts.Proxy); p != "" {
+		out = append(out, p)
+	}
+	for _, p := range m.opts.FallbackProxies {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
 		}
 	}
-	// The output template is server-generated and id is alphanumeric; the
-	// final name (with the container yt-dlp picked) is discovered afterwards
-	// by listing the managed directory.
-	if _, err := SafeJoin(m.opts.Dir, id+".mp4"); err != nil {
-		return nil, fmt.Errorf("output path: %w", err)
+	if len(out) == 0 {
+		out = append(out, "")
 	}
+	return out
+}
 
+// ytdlpArgs builds the vetted argv for one yt-dlp run. proxy is the egress
+// that run must use; the empty string means a direct connection (no --proxy
+// flag at all, matching the historical behaviour).
+func (m *Manager) ytdlpArgs(u, id, quality, subLang, proxy string) []string {
 	args := []string{
 		"--no-playlist", // one item, never a playlist avalanche
 		"--no-warnings",
@@ -79,7 +136,7 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality, subLang string
 	// Datacenter egress is bot-blocked by YouTube, so the download must leave
 	// through the same proxy Chromium uses. Omitting it is the difference
 	// between "Sign in to confirm you're not a bot" and a working download.
-	if p := strings.TrimSpace(m.opts.Proxy); p != "" {
+	if p := strings.TrimSpace(proxy); p != "" {
 		args = append(args, "--proxy", p)
 	}
 	// ffmpeg decides whether the merge ladder is usable at all: asking
@@ -106,6 +163,13 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality, subLang string
 			"--sub-format", "vtt/srt/best",
 		)
 	}
+	if m.opts.MaxBytes > 0 {
+		// Abort an oversized download while it runs. Never use --match-filter
+		// here: a DASH-merged selection has no exact `filesize` (only
+		// filesize_approx), so the filter rejected every format and yt-dlp
+		// exited 0 having written nothing.
+		args = append(args, "--max-filesize", fmt.Sprintf("%d", m.opts.MaxBytes))
+	}
 	args = append(args,
 		// Report what was actually selected. With --no-simulate, --print
 		// WHEN:TEMPLATE prints during the real download; after_move runs
@@ -113,14 +177,32 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality, subLang string
 		// collectYTDLP and end up on the session's quality info. Commas (not
 		// pipes) keep the argv free of shell metacharacters.
 		"--print", "after_move:%(format_id)s,%(width)s,%(height)s,%(fps)s,%(vcodec)s,%(acodec)s,%(ext)s,%(tbr)s",
+		// The URL is the positional argument and must come last: an argument
+		// that follows it is treated as a second video.
 		u,
 	)
-	if m.opts.MaxBytes > 0 {
-		// Abort an oversized download while it runs. Never use --match-filter
-		// here: a DASH-merged selection has no exact `filesize` (only
-		// filesize_approx), so the filter rejected every format and yt-dlp
-		// exited 0 having written nothing.
-		args = append([]string{"--max-filesize", fmt.Sprintf("%d", m.opts.MaxBytes)}, args...)
+	return args
+}
+
+// fetchYTDLP runs yt-dlp to fetch url into the managed directory.
+//
+// Security: yt-dlp receives exactly two vetted arguments — the output template
+// (built from a server-generated id, never user text) and the validated URL.
+// There is no shell anywhere in the chain, so no command injection surface.
+func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality, subLang string) (*ytdlpResult, error) {
+	bin, ok := m.YTDLP()
+	if !ok {
+		return nil, &ErrMissingTool{
+			Name: "yt-dlp",
+			Path: firstNonEmpty(m.opts.YTDLPPath, "yt-dlp"),
+			Hint: "install yt-dlp (https://github.com/yt-dlp/yt-dlp#installation) to enable Download & Stream for this source",
+		}
+	}
+	// The output template is server-generated and id is alphanumeric; the
+	// final name (with the container yt-dlp picked) is discovered afterwards
+	// by listing the managed directory.
+	if _, err := SafeJoin(m.opts.Dir, id+".mp4"); err != nil {
+		return nil, fmt.Errorf("output path: %w", err)
 	}
 
 	onProgress := func(line string) {
@@ -141,49 +223,101 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality, subLang string
 		}
 	}
 
+	// Egress ladder: the primary proxy first, then each configured fallback.
+	// YouTube rate-limits a single datacenter egress at the API layer (the
+	// extractor then dies with "Unable to download API page: N bytes read
+	// (caused by <IncompleteRead>)") even though the video itself is
+	// perfectly downloadable over a different route, so a blocked egress is
+	// retried over the next one instead of failing the whole session. Only
+	// egress-shaped failures advance the ladder; a genuine verdict such as
+	// "unsupported URL" or "Requested format is not available" fails fast on
+	// the first route. stderr carries the last run's diagnosis so the ladder
+	// decision below sees the real failure text.
+	routes := m.egresses()
 	var res *ytdlpResult
 	var last error
-	for attempt := 0; attempt <= maxExecRetries; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return nil, err
+	var stderr []byte
+	for ri, proxy := range routes {
+		args := m.ytdlpArgs(u, id, quality, subLang, proxy)
+		label := proxy
+		if label == "" {
+			label = "direct"
 		}
-		if attempt > 0 {
-			d := time.Duration(attempt) * time.Second
-			if m.retryDelay != nil {
-				d = m.retryDelay(attempt)
+		for attempt := 0; attempt <= maxExecRetries; attempt++ {
+			if err := ctx.Err(); err != nil {
+				return nil, err
 			}
-			if d > 0 {
-				select {
-				case <-ctx.Done():
-					return nil, ctx.Err()
-				case <-time.After(d):
+			if attempt > 0 {
+				d := time.Duration(attempt) * time.Second
+				if m.retryDelay != nil {
+					d = m.retryDelay(attempt)
+				}
+				if d > 0 {
+					select {
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-time.After(d):
+					}
 				}
 			}
-		}
-		stdout, stderr, err := m.runYTDLP(ctx, bin, args, onProgress)
-		if err == nil {
-			res, err = m.collectYTDLP(ctx, id, stdout, stderr)
-			if err == nil {
-				return res, nil
+			stdout, runStderr, rerr := m.runYTDLP(ctx, bin, args, onProgress)
+			if rerr == nil {
+				res, rerr = m.collectYTDLP(ctx, id, stdout, runStderr)
+				if rerr == nil {
+					if ri > 0 {
+						m.log.Infof("[PIPELINE:download] %s: extracted via fallback egress %s (primary %s was blocked)", id, label, primaryLabel(m.opts.Proxy))
+					}
+					return res, nil
+				}
+				last = rerr
+				continue
 			}
-			last = err
+			// A missing dependency is not retryable.
+			var missing *ErrMissingTool
+			if errors.As(rerr, &missing) {
+				return nil, rerr
+			}
+			// Keep the last diagnosis for the egress-ladder decision below:
+			// proxyBlocked() reads exactly this text.
+			stderr = runStderr
+			if len(stderr) == 0 {
+				stderr = stderrOf(rerr)
+			}
+			// Carry yt-dlp's own diagnosis into the error: "exit status 1" alone
+			// tells the operator nothing, while stderr names the real cause
+			// (bot check, unsupported URL, missing format).
+			last = fmt.Errorf("yt-dlp: %w%s", rerr, stderrSuffix(stderr))
+			m.log.Warnf("[PIPELINE:download] %s: yt-dlp attempt %d via %s failed: %s", id, attempt+1, label, truncateForLog(string(stderr), 200))
+			// A deterministic extractor verdict ("Requested format is not
+			// available", "Unsupported URL") does not change between attempts:
+			// stop rerunning identical argv and let the egress ladder decide
+			// whether another route could help. Transient, rate-limit-shaped
+			// failures keep the historical bounded retries to ride out a flap.
+			if !proxyBlocked(stderr) && !transientFailure(rerr, stderr) {
+				break
+			}
+		}
+		if ri+1 < len(routes) && proxyBlocked(stderr) {
+			m.log.Warnf("[PIPELINE:download] %s: egress %s blocked by the source (%s); trying next egress %s", id, label, truncateForLog(strings.TrimSpace(string(stderr)), 120), routes[ri+1])
 			continue
 		}
-		// A missing dependency is not retryable.
-		var missing *ErrMissingTool
-		if errors.As(err, &missing) {
-			return nil, err
-		}
-		// Carry yt-dlp's own diagnosis into the error: "exit status 1" alone
-		// tells the operator nothing, while stderr names the real cause
-		// (bot check, unsupported URL, missing format).
-		last = fmt.Errorf("yt-dlp: %w%s", err, stderrSuffix(stderr))
-		m.log.Warnf("[PIPELINE:download] %s: yt-dlp attempt %d failed: %s", id, attempt+1, truncateForLog(string(stderr), 200))
+		// A real verdict (or a route error that is not egress-shaped): the
+		// remaining fallbacks cannot help either.
+		break
 	}
 	if last == nil {
 		last = errors.New("yt-dlp produced no usable file")
 	}
 	return nil, last
+}
+
+// primaryLabel renders the primary egress for a log line ("direct" when none
+// is configured).
+func primaryLabel(p string) string {
+	if p = strings.TrimSpace(p); p != "" {
+		return p
+	}
+	return "direct"
 }
 
 // ytDLPJoinOK is the nil sentinel the output-path check compares against.

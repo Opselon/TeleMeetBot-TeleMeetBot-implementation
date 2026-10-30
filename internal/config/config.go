@@ -79,6 +79,15 @@ type DownloadConfig struct {
 	// connection. Defaults to browser.proxy when unset, since that is the
 	// egress the operator already had to configure for Chromium.
 	Proxy string `yaml:"proxy"`
+	// FallbackProxies are tried, in order, when the primary Proxy fails to
+	// extract a YouTube URL. YouTube rate-limits or hard-blocks a single
+	// datacenter egress at the API layer (the extractor then dies with
+	// "Unable to download API page: N bytes read (caused by <IncompleteRead>)"
+	// or "Sign in to confirm you're not a bot"), and a second route — a Tor
+	// SOCKS5 port, a second WARP instance, a residential relay — is the
+	// difference between a dead session and a working one. Empty keeps the
+	// historical single-proxy behaviour.
+	FallbackProxies []string `yaml:"fallback_proxies"`
 }
 
 // TelegramConfig holds bot token and access control.
@@ -612,6 +621,21 @@ func (c *Config) Validate() error {
 				problems = append(problems, "download.proxy is not a valid proxy URL (want scheme://host:port)")
 			case u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5" && u.Scheme != "socks5h":
 				problems = append(problems, "download.proxy scheme must be http, https, socks5 or socks5h")
+			}
+		}
+		for i, fp := range c.Download.FallbackProxies {
+			fp = strings.TrimSpace(fp)
+			c.Download.FallbackProxies[i] = fp
+			if fp == "" {
+				problems = append(problems, "download.fallback_proxies entries must not be empty")
+				continue
+			}
+			u, err := url.Parse(fp)
+			switch {
+			case err != nil || u.Host == "":
+				problems = append(problems, fmt.Sprintf("download.fallback_proxies[%d] is not a valid proxy URL (want scheme://host:port)", i))
+			case u.Scheme != "http" && u.Scheme != "https" && u.Scheme != "socks5" && u.Scheme != "socks5h":
+				problems = append(problems, fmt.Sprintf("download.fallback_proxies[%d] scheme must be http, https, socks5 or socks5h", i))
 			}
 		}
 		switch strings.ToLower(strings.TrimSpace(c.Download.Dir)) {

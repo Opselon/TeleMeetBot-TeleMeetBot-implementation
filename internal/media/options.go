@@ -51,6 +51,14 @@ type Options struct {
 	// so a download from a VPS without the operator's proxy can never
 	// extract a YouTube URL. Empty means a direct connection.
 	Proxy string
+	// FallbackProxies are alternate egresses tried, in order, after the
+	// primary Proxy fails to extract a YouTube URL. YouTube rate-limits a
+	// single datacenter egress at the API layer — the extractor then dies
+	// with "Unable to download API page: N bytes read (caused by
+	// <IncompleteRead>)" — so a second route (Tor SOCKS5, a second WARP
+	// instance, a residential relay) is what keeps a session alive. Empty
+	// keeps the historical single-proxy behaviour.
+	FallbackProxies []string
 }
 
 // DefaultOptions returns the production policy: one hour TTL, 2 GiB ceiling,
