@@ -85,6 +85,7 @@ const COMMAND_DOCS = {
   stop: 'Stop one session: /stop <id>. Without an id it lists what can be stopped.',
   id: 'Return your numeric Telegram user id (use it in telegram.admins).',
   ping: 'Liveness probe: replies with the process uptime.',
+  history: 'Show your recent meeting sessions: links, states, durations and when they ran.',
   playlists: 'Open your persistent playlist library to manage, reorder, or launch playlists.',
   playlist: 'Alias of /playlists.',
   library: 'Alias of /playlists.',
@@ -280,6 +281,10 @@ const CONFIG_DOCS = {
   'logging.level': '<code>debug</code>, <code>info</code>, <code>warn</code> or <code>error</code>. <code>debug</code> adds the UI-control traces useful in Meet-redesign reports.',
   'logging.file': 'Log file path. Empty logs to stdout (journald under systemd).',
   'paths.data_dir': 'Writable directory for <code>state.json</code> and runtime files. The container image uses <code>/data</code>.',
+  'dashboard.enabled': 'Turn the light web dashboard on (default off). The Telegram dashboard stays the primary surface.',
+  'dashboard.addr': 'Listen address of the web dashboard, default <code>:8080</code>.',
+  'dashboard.public_base_url': 'Origin users open in a browser (e.g. <code>https://bot.example.com</code>); it only feeds the login page hint.',
+  'dashboard.session_hours': 'Web login cookie lifetime in hours (default 24).',
 };
 const unknownKeys = configKeys.filter((entry) => !CONFIG_DOCS[entry.key]);
 if (unknownKeys.length) {
