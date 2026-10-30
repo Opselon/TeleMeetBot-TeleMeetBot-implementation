@@ -984,6 +984,7 @@ func (b *Bot) launchPlaylist(chatID, userID, playlistID int64, meetURL string) {
 	})
 	b.mu.Lock()
 	b.sessionChats[string(sess.ID)] = chatID
+	b.trackLive(chatID, true, string(sess.ID))
 	b.mu.Unlock()
 	b.persistQueue(sess)
 	b.saveCurrentMeet(userID, sess.MeetURL)

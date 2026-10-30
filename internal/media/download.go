@@ -58,6 +58,7 @@ func (m *Manager) Download(ctx context.Context, req DownloadRequest) (*Result, e
 	if !IsDownloadable(kind) {
 		return nil, fmt.Errorf("%w: kind %q is not downloadable", ErrUnsupported, kind)
 	}
+	m.reportStage("validate", u.String(), id, StageValidate)
 
 	// SSRF gate, second half: the resolved destination must be public. A
 	// friendly hostname can still point at the cloud metadata service.
@@ -106,7 +107,14 @@ func (m *Manager) Download(ctx context.Context, req DownloadRequest) (*Result, e
 	)
 	switch kind {
 	case "direct":
-		res, err := m.fetchDirect(ctx, u, id)
+		// Bounded transient retry: a reset connection or a 5xx from the CDN
+		// is re-fetched with backoff; validation/size verdicts fail fast.
+		var res *directResult
+		err := m.retryTransient(ctx, transientRetryAttempts, transientRetryBaseDelay, "download", id, func(attempt int) error {
+			var ferr error
+			res, ferr = m.fetchDirect(ctx, u, id)
+			return ferr
+		})
 		if err != nil {
 			m.sweepIDFiles(id)
 			return nil, err
@@ -131,12 +139,14 @@ func (m *Manager) Download(ctx context.Context, req DownloadRequest) (*Result, e
 	}
 
 	// Re-verify what landed on disk before announcing it to the engine.
+	m.reportStage(kind, u.String(), id, StageVerify)
 	if err := verifyDownloadedFile(path, m.opts.MaxBytes); err != nil {
 		_ = m.deleteManaged(path, "verification failed")
 		m.sweepIDFiles(id)
 		return nil, err
 	}
 
+	m.reportStage(kind, u.String(), id, StageFinalize)
 	now := time.Now()
 	entry := Entry{
 		ID:          id,
@@ -152,7 +162,7 @@ func (m *Manager) Download(ctx context.Context, req DownloadRequest) (*Result, e
 	if err := m.entries.Add(entry); err != nil {
 		m.log.Warnf("[PIPELINE:download] %s: cannot persist manifest: %v", id, err)
 	}
-	m.reportProgress(Progress{URL: u.String(), ID: id, Bytes: bytes, Total: bytes, Done: true})
+	m.reportProgress(Progress{URL: u.String(), ID: id, Bytes: bytes, Total: bytes, Speed: 0, Done: true, Stage: StageDone, Percent: 100, ETA: 0, Kind: kind})
 	m.log.Infof("[PIPELINE:download] %s: ready via %s (%s, expires in %s)", id, via, humanBytes(bytes), m.opts.TTL)
 	result := &Result{
 		URL:         m.localURL(entry),

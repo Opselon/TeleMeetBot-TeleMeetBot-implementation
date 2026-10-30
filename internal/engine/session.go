@@ -143,6 +143,11 @@ type Session struct {
 	observedQ observedQuality
 	// downloadProg tracks mid-fetch metrics for Download & Stream mode.
 	downloadProg DownloadProgress
+	// Stage tracker: which [N/6] pipeline step is running and how long each
+	// completed step took. Guarded by mu; see stages.go.
+	stageStep    int
+	stageStarted time.Time
+	stageTimes   [stageCount + 1]float64
 	// shuffle picks a random upcoming item when playback auto-advances.
 	shuffle bool
 	// autoAdvance plays the next queue item when the current media ends.
@@ -159,6 +164,11 @@ type DownloadProgress struct {
 	Total   int64
 	Speed   int64
 	Percent int
+	// Stage is the media pipeline stage (media.StageValidate ... StageDone);
+	// empty on legacy paths means "downloading".
+	Stage string
+	// ETASeconds is seconds remaining, -1 when unknown.
+	ETASeconds int64
 }
 
 // Status is a dashboard-friendly snapshot.
@@ -188,6 +198,8 @@ type Status struct {
 	LocalFile localFileStatus
 	// DownloadProgress reports real-time metrics while media is being fetched.
 	DownloadProgress DownloadProgress
+	// Stages is the [1/6]..[6/6] pipeline timeline (nil before the first step).
+	Stages []StageTiming
 	// Queue fields
 	QueueLength int
 	QueueIndex  int
@@ -274,6 +286,7 @@ func (s *Session) Snapshot() Status {
 	}
 	s.mu.RUnlock()
 	s.queueMu.RUnlock()
+	st.Stages = s.StageTimings()
 	st.HasNext = st.QueueIndex >= 0 && st.QueueIndex+1 < st.QueueLength
 	st.HasPrevious = st.QueueIndex > 0
 
@@ -310,6 +323,7 @@ func (s *Session) setState(state, detail string) {
 	s.state = state
 	if detail != "" {
 		s.detail = detail
+		s.trackStageLocked(stageStepOf(detail))
 	}
 	s.mu.Unlock()
 	if changed {
@@ -321,6 +335,7 @@ func (s *Session) setState(state, detail string) {
 func (s *Session) setDetail(detail string) {
 	s.mu.Lock()
 	s.detail = detail
+	s.trackStageLocked(stageStepOf(detail))
 	s.mu.Unlock()
 }
 
@@ -330,6 +345,7 @@ func (s *Session) setError(err error) {
 	s.state = StateError
 	s.detail = err.Error()
 	s.ended = time.Now()
+	s.closeStageLocked(time.Now())
 	s.mu.Unlock()
 	s.log.Errorf("session %s failed: %v", s.ID, err)
 	s.mgr.emit(Event{Session: s.ID, Kind: EventError, Text: err.Error()})

@@ -2,8 +2,33 @@ package media
 
 import "sync"
 
+// Pipeline stages a download moves through, in order. They ride on every
+// Progress event so the Telegram card, the engine snapshot and the web
+// dashboard can all show WHERE the download is, not only how many bytes
+// moved.
+const (
+	// StageValidate covers URL validation, SSRF resolution and the disk
+	// fence — everything before the first byte is requested.
+	StageValidate = "validate"
+	// StageConnect covers request dispatch up to the first response byte.
+	StageConnect = "connect"
+	// StageDownload is the body/fragment transfer.
+	StageDownload = "download"
+	// StageVerify is the post-fetch integrity check (size, sniffs).
+	StageVerify = "verify"
+	// StageFinalize covers rename/commit, manifest write and subtitles.
+	StageFinalize = "finalize"
+	// StageDone marks a committed download.
+	StageDone = "done"
+)
+
 // Progress is one mid-download notification: bytes fetched so far, the total
-// when the server reports it, current speed in bytes/sec, and Done when the file is committed (or failed).
+// when the server reports it, current speed in bytes/sec, and Done when the
+// file is committed (or failed).
+//
+// The richer fields (Stage, Percent, ETA, Kind) were added with the pipeline
+// upgrade; Total-based percent is computed by reporters when the total is
+// known, so a consumer never re-derives it.
 type Progress struct {
 	URL    string
 	ID     string
@@ -12,6 +37,38 @@ type Progress struct {
 	Speed  int64
 	Done   bool
 	Failed bool
+	// Stage is the pipeline stage the download is in right now (one of the
+	// Stage* constants). Empty on legacy events means "downloading".
+	Stage string `json:",omitempty"`
+	// Percent is 0-100 when Total is known, -1 when unknown.
+	Percent float64 `json:",omitempty"`
+	// ETA is seconds remaining, -1 when unknown.
+	ETA int64 `json:",omitempty"`
+	// Kind is the backend: "http" (direct fetch) or "yt-dlp".
+	Kind string `json:",omitempty"`
+	// Error is a short failure reason when Failed is true.
+	Error string `json:",omitempty"`
+}
+
+// percentOf computes 0-100 from bytes/total, or -1 when the total is unknown.
+func percentOf(bytes, total int64) float64 {
+	if total <= 0 || bytes < 0 {
+		return -1
+	}
+	p := float64(bytes) / float64(total) * 100
+	if p > 100 {
+		p = 100
+	}
+	return p
+}
+
+// etaOf estimates seconds remaining from speed, or -1 when it cannot be
+// known (no total, no speed, or speed so low it would round to forever).
+func etaOf(bytes, total, speed int64) int64 {
+	if total <= 0 || speed <= 0 || bytes >= total {
+		return -1
+	}
+	return (total - bytes) / speed
 }
 
 // progressBus fans progress events out to every subscriber. It is a fan-out

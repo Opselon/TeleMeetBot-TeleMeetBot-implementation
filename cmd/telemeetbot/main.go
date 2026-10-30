@@ -16,12 +16,15 @@ import (
 
 	"github.com/Opselon/TeleMeetBot/internal/bot"
 	"github.com/Opselon/TeleMeetBot/internal/config"
+	"github.com/Opselon/TeleMeetBot/internal/dashboard"
 	"github.com/Opselon/TeleMeetBot/internal/engine"
 	"github.com/Opselon/TeleMeetBot/internal/googleauth"
 	"github.com/Opselon/TeleMeetBot/internal/health"
 	"github.com/Opselon/TeleMeetBot/internal/localbotapi"
+	"github.com/Opselon/TeleMeetBot/internal/logx"
 	"github.com/Opselon/TeleMeetBot/internal/setup"
 	"github.com/Opselon/TeleMeetBot/internal/store"
+	"github.com/Opselon/TeleMeetBot/internal/userstate"
 	"github.com/Opselon/TeleMeetBot/internal/web"
 )
 
@@ -155,6 +158,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	// One recorder for the whole process, shared by every handler wrap.
+	logRec = logx.NewRecorder(2000)
 	logger = newLogger(cfg.Logging.Level, cfg.Logging.File)
 
 	// Media-only diagnosis: play the link on a tab exactly like the player tab,
@@ -241,6 +246,42 @@ func run(cfg *config.Config, cfgPath string, log *slogLogger) error {
 	ctx, stop := termSignalContext(context.Background())
 	defer stop()
 
+	// Central log capture: every slog line is teed into the recorder (see
+	// newLogger) so the web dashboard can tail and filter logs without
+	// touching the hot path.
+	rec := logRec
+	if rec == nil {
+		rec = logx.NewRecorder(2000)
+		logRec = rec
+	}
+
+	// Per-user state tracker: one observable view of what every user is
+	// doing, shared by the bot and the web dashboard.
+	tracker := userstate.New(func(from, to userstate.Info) {
+		if to.State == userstate.StateIdle {
+			return
+		}
+		if from.State == "" || from.State == userstate.StateIdle {
+			rec.Record(logx.Entry{Level: logx.LevelInfo, Component: "userstate",
+				Message: fmt.Sprintf("user %d -> %s", to.UserID, to.State)})
+			return
+		}
+		rec.Record(logx.Entry{Level: logx.LevelInfo, Component: "userstate",
+			Message: fmt.Sprintf("user %d: %s -> %s", to.UserID, from.State, to.State)})
+	})
+	go func() {
+		t := time.NewTicker(5 * time.Minute)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				tracker.Prune(time.Hour)
+			}
+		}
+	}()
+
 	// Persisted history: warn about sessions killed with the previous process.
 	st := store.Load(cfg.StateFile())
 	interrupted := st.Interrupted()
@@ -309,6 +350,7 @@ func run(cfg *config.Config, cfgPath string, log *slogLogger) error {
 		botOpts = append(botOpts, bot.WithPlaylists(playlists))
 	}
 	botOpts = append(botOpts, bot.WithSettings(users))
+	botOpts = append(botOpts, bot.WithUserTracker(tracker))
 	var gauth *googleauth.Manager
 	gauthCfg := googleauth.Config{
 		ClientID:           cfg.Google.ClientID,
@@ -395,6 +437,33 @@ func run(cfg *config.Config, cfgPath string, log *slogLogger) error {
 	healthSrv := web.New(cfg.Server.HealthAddr, b.Snapshot, log, webOpts...)
 	errCh := make(chan error, 2)
 
+	// Web dashboard (opt-in): Telegram Login for auth, the same admin
+	// allow-list for authorization, and the engine/log/user surfaces for
+	// control. A dashboard failure never takes the bot down.
+	if cfg.Dash.Enabled {
+		dashCfg := dashboard.Config{
+			Enabled:       true,
+			Addr:          cfg.Dash.Addr,
+			BotToken:      cfg.Telegram.Token,
+			BotUsername:   api.BotUsername(),
+			PublicBaseURL: cfg.Dash.PublicBaseURL,
+			SessionTTL:    time.Duration(cfg.Dash.SessionHours) * time.Hour,
+			SecretPath:    filepath.Join(cfg.Paths.DataDir, "dashboard-secret.key"),
+			IsAdmin:       cfg.IsAdmin,
+		}
+		if dashSrv, derr := dashboard.New(dashCfg, dashboard.Dependencies{
+			Health: b.Snapshot,
+			Engine: eng,
+			Logs:   rec,
+			Users:  tracker,
+		}, log); derr != nil {
+			log.Warnf("web dashboard unavailable: %v", derr)
+		} else {
+			go func() { errCh <- dashSrv.Start(ctx) }()
+			log.Infof("web dashboard enabled at http://%s (login: Telegram admin account)", cfg.Dash.Addr)
+		}
+	}
+
 	go func() { errCh <- b.Run(ctx) }()
 	go func() { b.RunEvents(ctx) }()
 	go func() { b.RefreshLoop(ctx) }()
@@ -433,7 +502,13 @@ func (s *slogLogger) Errorf(format string, args ...interface{}) {
 	s.l.Error(fmt.Sprintf(format, args...))
 }
 
-// newLogger builds the app logger (text on stderr, optional JSON file).
+// logRec is the process-wide log recorder. It is created after config load
+// and teed from every subsequent log line; before that (early setup, wizard)
+// nil simply means no capture.
+var logRec *logx.Recorder
+
+// newLogger builds the app logger (text on stdout, optional file), teed into
+// the central log recorder so the web dashboard can tail and filter logs.
 func newLogger(level string, file ...string) *slogLogger {
 	var lvl slog.Level
 	switch strings.ToLower(level) {
@@ -446,7 +521,7 @@ func newLogger(level string, file ...string) *slogLogger {
 	default:
 		lvl = slog.LevelInfo
 	}
-	h := slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})
+	var h slog.Handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: lvl})
 	if len(file) > 0 && strings.TrimSpace(file[0]) != "" {
 		if dir := filepath.Dir(file[0]); dir != "." {
 			_ = os.MkdirAll(dir, 0o700)
@@ -454,6 +529,9 @@ func newLogger(level string, file ...string) *slogLogger {
 		if f, err := os.OpenFile(file[0], os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
 			h = slog.NewTextHandler(f, &slog.HandlerOptions{Level: lvl})
 		}
+	}
+	if logRec != nil {
+		h = logx.NewTeeHandler(h, logRec)
 	}
 	return &slogLogger{l: slog.New(h)}
 }

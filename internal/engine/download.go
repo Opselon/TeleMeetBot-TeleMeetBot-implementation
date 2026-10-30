@@ -149,20 +149,34 @@ func (s *Session) prepareLocalMedia() error {
 
 	unsub := mgr.SubscribeProgress(func(p mediateam.Progress) {
 		if p.ID == dlID || (p.URL != "" && p.URL == target.URL) {
-			s.mu.Lock()
-			pct := 0
-			if p.Total > 0 {
-				pct = int((p.Bytes * 100) / p.Total)
-				if pct > 100 {
-					pct = 100
+			pct := int(p.Percent)
+			if p.Percent < 0 {
+				if p.Total > 0 {
+					pct = int((p.Bytes * 100) / p.Total)
+					if pct > 100 {
+						pct = 100
+					}
+				} else {
+					pct = 0
 				}
 			}
+			eta := p.ETA
+			if eta == 0 {
+				eta = -1
+			}
+			stage := p.Stage
+			if stage == "" {
+				stage = mediateam.StageDownload
+			}
+			s.mu.Lock()
 			s.downloadProg = DownloadProgress{
-				Active:  !p.Done,
-				Bytes:   p.Bytes,
-				Total:   p.Total,
-				Speed:   p.Speed,
-				Percent: pct,
+				Active:     !p.Done,
+				Bytes:      p.Bytes,
+				Total:      p.Total,
+				Speed:      p.Speed,
+				Percent:    pct,
+				Stage:      stage,
+				ETASeconds: eta,
 			}
 			s.mu.Unlock()
 			if p.Total > 0 {
