@@ -43,9 +43,16 @@ jobs:
           # used to race CI and pull the PREVIOUS image while reporting
           # success (production incident 2026-10-27: a stale binary ran for
           # ~a day). Wait for the CI run of this exact SHA, bounded.
+          #
+          # The `workflow` query param is NOT a reliable filter here: GitHub
+          # returns runs from every workflow that shares head_sha (observed:
+          # this very cd.yml run came back first), so CD would pick its own
+          # in_progress run and wait for ITSELF to finish — forever. Filter
+          # the runs in jq by workflow path instead.
           set -eu
           for i in $(seq 1 60); do
-            run_id=$(gh api "repos/${{ github.repository }}/actions/runs?head_sha=$SHA&workflow=ci.yml" --jq '.workflow_runs[0].id' 2>/dev/null || true)
+            run_id=$(gh api "repos/${{ github.repository }}/actions/runs?head_sha=$SHA" \
+              --jq '[.workflow_runs[] | select(.path == ".github/workflows/ci.yml")] | .[0].id // empty' 2>/dev/null || true)
             if [ -n "$run_id" ] && [ "$run_id" != "null" ]; then
               status=$(gh api "repos/${{ github.repository }}/actions/runs/$run_id" --jq '.status + "/" + (.conclusion // "pending")')
               echo "CI run $run_id: $status (attempt $i/60)"
