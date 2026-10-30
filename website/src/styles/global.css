@@ -2132,7 +2132,7 @@ body.no-scroll {
   align-items: center;
   gap: 6px;
   padding: 9px 13px;
-  border-bottom: 1px solid var([var-border]);
+  border-bottom: 1px solid var(--border);
   border-bottom: 1px solid var(--border);
   font-family: var(--font-mono);
   font-size: 10px;
