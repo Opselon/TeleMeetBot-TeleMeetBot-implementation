@@ -751,6 +751,43 @@ func (m *Manager) acquireWarmBrowser() (*rod.Browser, func(), bool) {
 	return w.browser, release, true
 }
 
+// WarmNeeded reports whether a warm browser is missing while no session is
+// running — exactly the state the keep-warm loop refills.
+func (m *Manager) WarmNeeded() bool {
+	m.warmMu.Lock()
+	warm := m.warm != nil
+	m.warmMu.Unlock()
+	if warm {
+		return false
+	}
+	return len(m.Active()) == 0
+}
+
+// KeepWarm refills the warm-browser slot whenever it is consumed and the
+// engine is idle, so the NEXT session always skips the cold start — not just
+// the first one after process launch. It returns when ctx is cancelled.
+// Failures are logged and retried on the next tick; they never crash.
+func (m *Manager) KeepWarm(ctx context.Context, every time.Duration) {
+	if every <= 0 {
+		every = time.Minute
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if !m.WarmNeeded() {
+				continue
+			}
+			if err := m.WarmUp(); err != nil {
+				m.log.Warnf("[PIPELINE:browser] keep-warm refill failed (will retry): %v", err)
+			}
+		}
+	}
+}
+
 // ShutdownWarm closes any idle warm browser (application shutdown path).
 func (m *Manager) ShutdownWarm() {
 	m.warmMu.Lock()

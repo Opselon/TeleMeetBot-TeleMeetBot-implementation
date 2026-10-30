@@ -162,6 +162,12 @@ func main() {
 	logRec = logx.NewRecorder(2000)
 	logger = newLogger(cfg.Logging.Level, cfg.Logging.File)
 
+	// Secret redaction for captured logs: the dashboard can render log
+	// entries, so credential material must be scrubbed before it lands in
+	// the ring buffer. Best-effort hygiene, not a substitute for never
+	// logging secrets in the first place.
+	logx.SetRedactors(cfg.Telegram.Token, cfg.Google.ClientSecret, cfg.Telegram.LocalBotAPI.APIHash)
+
 	// Media-only diagnosis: play the link on a tab exactly like the player tab,
 	// then sample playback + rendered pixels. Green/black/codec problems show
 	// here without needing a meeting.
@@ -386,6 +392,20 @@ func run(cfg *config.Config, cfgPath string, log *slogLogger) error {
 				log.Warnf("browser warm-up failed (sessions will start cold): %v", err)
 			}
 		}()
+		// Keep-warm: the first session consumes the warm slot; this loop
+		// refills it whenever the engine is idle again, so EVERY session
+		// skips the cold start, not just the first. Failures retry on the
+		// next tick and never take the bot down.
+		go eng.KeepWarm(ctx, time.Minute)
+	}
+
+	// Memory watchdog: the Go heap is bounded by GOMEMLIMIT, but a stalled
+	// GC phase (browser JSON payloads, log fan-out) can creep toward it.
+	// When the live heap crosses 80% of the limit, force a full GC cycle and
+	// return the freed pages to the OS. This keeps long-lived processes at a
+	// steady footprint instead of drifting up over days.
+	if os.Getenv("GOMEMLIMIT") == "" {
+		go memoryWatchdog(ctx, log, 256<<20)
 	}
 	// Hard fence at the engine level: the dashboard also checks, but a session
 	// must never be able to start past limits.max_sessions.
@@ -479,9 +499,45 @@ func run(cfg *config.Config, cfgPath string, log *slogLogger) error {
 		stop()
 	}
 
+	// Tell the operators what is happening: a silent shutdown looks exactly
+	// like a crash from the outside.
+	b.Broadcast("🛑 <b>Shutting down</b> — stopping active sessions…")
 	eng.StopAll()
+	eng.ShutdownWarm()
+	b.Broadcast("✅ <b>Stopped</b> — all sessions closed cleanly. See you.")
 	log.Infof("bye")
 	return nil
+}
+
+// memoryWatchdog forces a full GC + OS page return when the live heap
+// crosses 80% of limit. Periodic and cheap; a failure of the GC to reclaim
+// is logged once per crossing, not per tick.
+func memoryWatchdog(ctx context.Context, log *slogLogger, limit int64) {
+	const threshold = 0.8
+	var lastTrigger time.Time
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			var ms runtime.MemStats
+			runtime.ReadMemStats(&ms)
+			if int64(ms.HeapInuse) < int64(float64(limit)*threshold) {
+				continue
+			}
+			// Avoid re-triggering every minute while the heap sits high.
+			if !lastTrigger.IsZero() && time.Since(lastTrigger) < 5*time.Minute {
+				continue
+			}
+			lastTrigger = time.Now()
+			log.Warnf("[PIPELINE:runtime] heap %.1f MiB crossed %.0f%% of the %d MiB soft limit — forcing full GC",
+				float64(ms.HeapInuse)/(1<<20), threshold*100, limit/(1<<20))
+			runtime.GC()
+			debug.FreeOSMemory()
+		}
+	}
 }
 
 // logger adapters ------------------------------------------------------------

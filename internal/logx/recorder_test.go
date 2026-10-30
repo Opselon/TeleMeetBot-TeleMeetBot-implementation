@@ -111,3 +111,26 @@ func TestCatchPanicDigest(t *testing.T) {
 		t.Fatalf("digest = %q", entries[0].Message)
 	}
 }
+
+func TestRedaction(t *testing.T) {
+	SetRedactors("123456:AAHsupersecrettoken", "short")
+	defer func() { redactors.Store([]string(nil)) }()
+	r := NewRecorder(8)
+	r.Record(Entry{Level: LevelWarn, Message: "auth failed for bot 123456:AAHsupersecrettoken at line short-x"})
+	entries := r.Recent(0)
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d", len(entries))
+	}
+	msg := entries[0].Message
+	if strings.Contains(msg, "AAHsupersecrettoken") {
+		t.Fatalf("secret leaked: %q", msg)
+	}
+	if !strings.Contains(msg, "[redacted]") {
+		t.Fatalf("redaction marker missing: %q", msg)
+	}
+	// The short value (len < 8) must NOT be registered as a redactor —
+	// otherwise every message containing the word "short" would be mangled.
+	if !strings.Contains(msg, "short-x") {
+		t.Fatalf("short redactor must be ignored: %q", msg)
+	}
+}
