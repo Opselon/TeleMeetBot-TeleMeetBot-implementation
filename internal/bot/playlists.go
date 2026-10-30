@@ -984,8 +984,9 @@ func (b *Bot) launchPlaylist(chatID, userID, playlistID int64, meetURL string) {
 	})
 	b.mu.Lock()
 	b.sessionChats[string(sess.ID)] = chatID
-	b.trackLive(chatID, true, string(sess.ID))
 	b.mu.Unlock()
+	// trackLive takes b.mu itself; calling it under the lock self-deadlocks.
+	b.trackLive(chatID, true, string(sess.ID))
 	b.persistQueue(sess)
 	b.saveCurrentMeet(userID, sess.MeetURL)
 	b.sendText(chatID, fmt.Sprintf("▶️ Launching <b>%s</b> with <b>%d</b> item(s).", esc(p.Name), len(urls)), nil)
