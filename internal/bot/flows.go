@@ -611,8 +611,12 @@ func (b *Bot) launch(chatID, userID int64) {
 	})
 	b.mu.Lock()
 	b.sessionChats[string(sess.ID)] = chatID
-	b.trackLive(chatID, true, string(sess.ID))
 	b.mu.Unlock()
+	// trackLive takes b.mu itself (liveSessionIDs/ liveSessionCount read
+	// b.sessionChats under the lock), so it must run OUTSIDE the critical
+	// section: calling it while b.mu is held self-deadlocks the worker
+	// goroutine handling this update forever.
+	b.trackLive(chatID, true, string(sess.ID))
 	// Persist the initial queue metadata (JSON history + SQLite).
 	b.persistQueue(sess)
 	// Remember the Meet link for the owner so /new can offer it next time.
@@ -1022,7 +1026,6 @@ func (b *Bot) handleAction(chatID int64, msgID int, q *tgbotapi.CallbackQuery, d
 // bindCard ties a dashboard message to a session for live updates.
 func (b *Bot) bindCard(chatID int64, msgID int, s *engine.Session, st engine.Status) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.cards[string(st.ID)] = &cardRef{
 		chat:    chatID,
 		msg:     msgID,
@@ -1032,6 +1035,10 @@ func (b *Bot) bindCard(chatID int64, msgID int, s *engine.Session, st engine.Sta
 		viewAt:  time.Now(),
 	}
 	b.sessionChats[string(st.ID)] = chatID
+	b.mu.Unlock()
+	// trackLive takes b.mu itself (liveSessionIDs/liveSessionCount read
+	// b.sessionChats under the lock), so it must run OUTSIDE the critical
+	// section: calling it while b.mu is held self-deadlocks the caller.
 	b.trackLive(chatID, true, string(st.ID))
 }
 
