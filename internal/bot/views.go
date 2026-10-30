@@ -527,6 +527,7 @@ func helpText() string {
 • 🌐 Audio Language — choose Persian (fa), creator original, or dubbed audio
 • 👤 Google Account — link your Google account (/account) to display your verified name
 • 📚 Playlists &amp; Queue — manage multi-track streaming queues
+• 📜 History — /history lists your recent sessions with their results
 • ⏹ Stop — leave the meeting
 
 <b>Supported Media</b>
