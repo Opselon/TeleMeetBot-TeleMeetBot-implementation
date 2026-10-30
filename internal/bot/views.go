@@ -2,7 +2,9 @@ package bot
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -266,10 +268,15 @@ func sessionCardText(st engine.Status) string {
 		sb.WriteString("\n")
 	}
 	if st.DownloadProgress.Active {
+		stage := downloadStageLabel(st.DownloadProgress.Stage)
 		if st.DownloadProgress.Total > 0 {
 			pct := st.DownloadProgress.Percent
 			bar := renderProgressBar(pct, 10)
-			sb.WriteString(fmt.Sprintf("📥 Download: %s <b>%d%%</b>\n", bar, pct))
+			line := fmt.Sprintf("📥 %s: %s <b>%d%%</b>", stage, bar, pct)
+			if st.DownloadProgress.ETASeconds > 0 {
+				line += fmt.Sprintf(" · ⏳ <b>%s</b>", formatETA(st.DownloadProgress.ETASeconds))
+			}
+			sb.WriteString(line + "\n")
 			if st.DownloadProgress.Speed > 0 {
 				sb.WriteString(fmt.Sprintf("   💾 <b>%.1f</b> / <b>%.1f MiB</b> · ⚡️ <b>%.1f MiB/s</b>\n",
 					float64(st.DownloadProgress.Bytes)/(1024*1024),
@@ -277,11 +284,13 @@ func sessionCardText(st engine.Status) string {
 					float64(st.DownloadProgress.Speed)/(1024*1024)))
 			}
 		} else if st.DownloadProgress.Bytes > 0 {
-			sb.WriteString(fmt.Sprintf("📥 Download: 💾 <b>%.1f MiB</b>", float64(st.DownloadProgress.Bytes)/(1024*1024)))
+			sb.WriteString(fmt.Sprintf("📥 %s: 💾 <b>%.1f MiB</b>", stage, float64(st.DownloadProgress.Bytes)/(1024*1024)))
 			if st.DownloadProgress.Speed > 0 {
 				sb.WriteString(fmt.Sprintf(" · ⚡️ <b>%.1f MiB/s</b>", float64(st.DownloadProgress.Speed)/(1024*1024)))
 			}
 			sb.WriteString("\n")
+		} else {
+			sb.WriteString(fmt.Sprintf("📥 %s…\n", stage))
 		}
 	}
 	if st.FallbackReason != "" {
@@ -295,6 +304,9 @@ func sessionCardText(st engine.Status) string {
 		sb.WriteString(fmt.Sprintf("📋 Playlist: <b>%d / %d</b>\n", pos, st.QueueLength))
 	}
 	sb.WriteString(fmt.Sprintf("⏳ Elapsed: %s\n", health.FormatUptime(st.Elapsed())))
+	if len(st.Stages) > 0 {
+		sb.WriteString("🧭 Pipeline: " + esc(stageTimingLine(st.Stages)) + "\n")
+	}
 	sb.WriteString(health.FormatServerResources())
 	if st.Error != "" {
 		sb.WriteString("\n\n🔴 <b>Error:</b> " + esc(truncate(st.Error, 300)))
@@ -1032,4 +1044,77 @@ func renderProgressBar(pct int, width int) string {
 	}
 	empty := width - filled
 	return "[" + strings.Repeat("█", filled) + strings.Repeat("░", empty) + "]"
+}
+
+// stageTimingLine renders the session pipeline timeline compactly:
+// "download 8.2s · meet 1.1s · join 12.4s*" (* = active step).
+func stageTimingLine(sts []engine.StageTiming) string {
+	var b strings.Builder
+	for i, st := range sts {
+		if i > 0 {
+			b.WriteString(" · ")
+		}
+		name := st.Name
+		if name == "" {
+			name = fmt.Sprintf("step%d", st.Step)
+		}
+		sec := st.Seconds
+		if sec < 0 {
+			b.WriteString(fmt.Sprintf("%s ?", name))
+			continue
+		}
+		s := strconv.FormatFloat(sec, 'f', 1, 64)
+		s = strings.TrimRight(strings.TrimRight(s, "0"), ".")
+		if s == "" {
+			s = "0"
+		}
+		if st.Active {
+			b.WriteString(fmt.Sprintf("%s %ss*", name, s))
+		} else {
+			b.WriteString(fmt.Sprintf("%s %ss", name, s))
+		}
+	}
+	return b.String()
+}
+
+// downloadStageLabel maps a media pipeline stage to the human label shown on
+// the download card. Unknown/empty stages read as "Downloading" so a card
+// rendered from an older engine snapshot still makes sense.
+func downloadStageLabel(stage string) string {
+	switch stage {
+	case "validate":
+		return "Preparing"
+	case "connect":
+		return "Connecting"
+	case "download":
+		return "Downloading"
+	case "verify":
+		return "Verifying"
+	case "finalize":
+		return "Finalizing"
+	case "done":
+		return "Done"
+	default:
+		return "Downloading"
+	}
+}
+
+// formatETA renders seconds remaining as a short human duration ("2m 30s").
+func formatETA(seconds int64) string {
+	if seconds < 0 {
+		return "—"
+	}
+	d := time.Duration(seconds) * time.Second
+	switch {
+	case d >= time.Hour:
+		h := int64(d.Hours())
+		m := int64(d.Minutes()) % 60
+		return fmt.Sprintf("%dh %02dm", h, m)
+	case d >= time.Minute:
+		m := int64(d.Minutes())
+		s := seconds % 60
+		return fmt.Sprintf("%dm %02ds", m, s)
+	default:
+		return fmt.Sprintf("%ds", seconds)
+	}
 }

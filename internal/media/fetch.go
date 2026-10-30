@@ -39,6 +39,7 @@ func (m *Manager) fetchDirect(ctx context.Context, u *url.URL, id string) (*dire
 		ctx, cancel = context.WithTimeout(ctx, m.opts.HTTPTimeout)
 		defer cancel()
 	}
+	m.reportStage("http", u.String(), id, StageConnect)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
@@ -53,6 +54,7 @@ func (m *Manager) fetchDirect(ctx context.Context, u *url.URL, id string) (*dire
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("fetch %s: HTTP %d", u.Host, resp.StatusCode)
 	}
+	m.reportStage("http", u.String(), id, StageDownload)
 	ct := resp.Header.Get("Content-Type")
 	if !AllowedContentType(ct) {
 		return nil, fmt.Errorf("unsupported content type %q", firstLine(ct))
@@ -80,7 +82,12 @@ func (m *Manager) fetchDirect(ctx context.Context, u *url.URL, id string) (*dire
 	}()
 
 	n, err := m.copyLimitedProgress(ctx, resp.Body, tmp, m.opts.MaxBytes, func(read, speed int64) {
-		m.reportProgress(Progress{URL: u.String(), ID: id, Bytes: read, Total: resp.ContentLength, Speed: speed})
+		m.reportProgress(Progress{
+			URL: u.String(), ID: id, Bytes: read, Total: resp.ContentLength, Speed: speed,
+			Stage: StageDownload, Kind: "http",
+			Percent: percentOf(read, resp.ContentLength),
+			ETA:     etaOf(read, resp.ContentLength, speed),
+		})
 	})
 	if err != nil {
 		_ = tmp.Close()

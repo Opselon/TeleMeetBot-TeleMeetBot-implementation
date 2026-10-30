@@ -101,6 +101,7 @@ func (b *Bot) setFlow(userID int64, f *flow) {
 	b.mu.Lock()
 	b.flows[userID] = f
 	b.mu.Unlock()
+	b.trackFlow(userID, f)
 	b.persistDraft(userID, f)
 }
 
@@ -110,6 +111,7 @@ func (b *Bot) clearFlow(userID int64) {
 	f := b.flows[userID]
 	delete(b.flows, userID)
 	b.mu.Unlock()
+	b.trackFlow(userID, nil)
 	if _, isCreation := workflowStateOf(f); isCreation {
 		b.dropDraft(userID)
 	}
@@ -118,11 +120,16 @@ func (b *Bot) clearFlow(userID int64) {
 // expireFlows removes stale wizards.
 func (b *Bot) expireFlows() {
 	b.mu.Lock()
-	defer b.mu.Unlock()
+	var expired []int64
 	for uid, f := range b.flows {
 		if time.Since(f.updated) > flowTimeout {
 			delete(b.flows, uid)
+			expired = append(expired, uid)
 		}
+	}
+	b.mu.Unlock()
+	for _, uid := range expired {
+		b.trackFlow(uid, nil)
 	}
 }
 
@@ -602,6 +609,7 @@ func (b *Bot) launch(chatID, userID int64) {
 	})
 	b.mu.Lock()
 	b.sessionChats[string(sess.ID)] = chatID
+	b.trackLive(chatID, true, string(sess.ID))
 	b.mu.Unlock()
 	// Persist the initial queue metadata (JSON history + SQLite).
 	b.persistQueue(sess)
@@ -1022,6 +1030,7 @@ func (b *Bot) bindCard(chatID int64, msgID int, s *engine.Session, st engine.Sta
 		viewAt:  time.Now(),
 	}
 	b.sessionChats[string(st.ID)] = chatID
+	b.trackLive(chatID, true, string(st.ID))
 }
 
 // setCardView flags that a session's card message is currently displaying a subview

@@ -371,16 +371,18 @@ func TestDownloadProgressRenderingInCard(t *testing.T) {
 		MediaURL: "https://example.com/video.mp4",
 		PlayMode: "download",
 		DownloadProgress: engine.DownloadProgress{
-			Active:  true,
-			Bytes:   47185920,  // ~45 MiB
-			Total:   104857600, // 100 MiB
-			Speed:   13107200,  // 12.5 MiB/s
-			Percent: 45,
+			Active:     true,
+			Bytes:      47185920,  // ~45 MiB
+			Total:      104857600, // 100 MiB
+			Speed:      13107200,  // 12.5 MiB/s
+			Percent:    45,
+			Stage:      "download",
+			ETASeconds: 95,
 		},
 	}
 	card := sessionCardText(st)
-	if !strings.Contains(card, "Download:") {
-		t.Fatalf("download label missing from card: %q", card)
+	if !strings.Contains(card, "Downloading:") {
+		t.Fatalf("download stage label missing from card: %q", card)
 	}
 	if !strings.Contains(card, "45%") {
 		t.Fatalf("percent missing from card: %q", card)
@@ -390,6 +392,9 @@ func TestDownloadProgressRenderingInCard(t *testing.T) {
 	}
 	if !strings.Contains(card, "45.0") || !strings.Contains(card, "100.0 MiB") {
 		t.Fatalf("byte counts missing from card: %q", card)
+	}
+	if !strings.Contains(card, "1m 35s") {
+		t.Fatalf("ETA missing from card: %q", card)
 	}
 }
 

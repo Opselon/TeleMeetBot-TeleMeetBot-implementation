@@ -218,7 +218,12 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality, subLang string
 			}
 			_, _ = fmt.Sscanf(parts[3], "%d", &speed)
 			if downloaded > 0 {
-				m.reportProgress(Progress{URL: u, ID: id, Bytes: downloaded, Total: total, Speed: speed})
+				m.reportProgress(Progress{
+					URL: u, ID: id, Bytes: downloaded, Total: total, Speed: speed,
+					Stage: StageDownload, Kind: "yt-dlp",
+					Percent: percentOf(downloaded, total),
+					ETA:     etaOf(downloaded, total, speed),
+				})
 			}
 		}
 	}

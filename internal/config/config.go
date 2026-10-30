@@ -22,16 +22,17 @@ var Version = "dev"
 
 // Config is the full on-disk configuration (YAML).
 type Config struct {
-	Telegram TelegramConfig `yaml:"telegram"`
-	Server   ServerConfig   `yaml:"server"`
-	Browser  BrowserConfig  `yaml:"browser"`
-	Media    MediaConfig    `yaml:"media"`
-	Meet     MeetConfig     `yaml:"meet"`
-	Limits   LimitsConfig   `yaml:"limits"`
-	Logging  LoggingConfig  `yaml:"logging"`
-	Paths    PathsConfig    `yaml:"paths"`
-	Download DownloadConfig `yaml:"download"`
-	Google   GoogleConfig   `yaml:"google"`
+	Telegram TelegramConfig  `yaml:"telegram"`
+	Server   ServerConfig    `yaml:"server"`
+	Browser  BrowserConfig   `yaml:"browser"`
+	Media    MediaConfig     `yaml:"media"`
+	Meet     MeetConfig      `yaml:"meet"`
+	Limits   LimitsConfig    `yaml:"limits"`
+	Logging  LoggingConfig   `yaml:"logging"`
+	Paths    PathsConfig     `yaml:"paths"`
+	Download DownloadConfig  `yaml:"download"`
+	Google   GoogleConfig    `yaml:"google"`
+	Dash     DashboardConfig `yaml:"dashboard"`
 
 	// path is where the config was loaded from / should be saved to.
 	path string
@@ -119,6 +120,24 @@ type TelegramConfig struct {
 // ServerConfig is the local HTTP surface (health checks only, no remote login).
 type ServerConfig struct {
 	HealthAddr string `yaml:"health_addr"`
+}
+
+// DashboardConfig controls the light web dashboard: Telegram Login for
+// authentication, the admin allow-list for authorization, and a small JSON
+// API that mirrors the Telegram control surface (start/stop/playback, logs,
+// users). Everything else — healthz, the Google OAuth callback — stays on
+// the existing server listener.
+type DashboardConfig struct {
+	// Enabled turns the dashboard on. Default false: the Telegram dashboard
+	// remains the primary surface and the web one is opt-in.
+	Enabled bool `yaml:"enabled"`
+	// Addr is the listen address (":8080"). Empty = ":8080".
+	Addr string `yaml:"addr"`
+	// PublicBaseURL is the origin users open in a browser (e.g.
+	// "https://bot.example.com"); it only feeds the login page hint.
+	PublicBaseURL string `yaml:"public_base_url"`
+	// SessionHours bounds a login cookie (default 24, 0 = default).
+	SessionHours int `yaml:"session_hours"`
 }
 
 // BrowserConfig controls the embedded Chromium instance.
@@ -398,6 +417,12 @@ func (c *Config) normalize() {
 	}
 	if c.Telegram.PollTimeoutSeconds <= 0 {
 		c.Telegram.PollTimeoutSeconds = 30
+	}
+	if c.Dash.Enabled && strings.TrimSpace(c.Dash.Addr) == "" {
+		c.Dash.Addr = ":8080"
+	}
+	if c.Dash.SessionHours < 0 {
+		c.Dash.SessionHours = 0
 	}
 	c.Telegram.LocalBotAPI.EnvOverrides()
 	if c.Telegram.LocalBotAPI.Enabled {

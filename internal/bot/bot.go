@@ -18,6 +18,7 @@ import (
 	"github.com/Opselon/TeleMeetBot/internal/health"
 	"github.com/Opselon/TeleMeetBot/internal/media"
 	"github.com/Opselon/TeleMeetBot/internal/store"
+	"github.com/Opselon/TeleMeetBot/internal/userstate"
 )
 
 // Logger is the logging surface of the bot layer.
@@ -109,6 +110,9 @@ type Bot struct {
 	set Settings
 	// gauth manages per-user Google Account profile cookies.
 	gauth *googleauth.Manager
+	// track is the per-user state tracker feeding the web dashboard. Nil is
+	// valid (tests); every update site is guarded.
+	track *userstate.Tracker
 }
 
 // Option customizes a Bot after the required dependencies are wired.
@@ -127,6 +131,19 @@ func WithSettings(st Settings) Option {
 // WithGoogleAuth attaches the per-user Google Account profile manager.
 func WithGoogleAuth(gauth *googleauth.Manager) Option {
 	return func(b *Bot) { b.gauth = gauth }
+}
+
+// WithUserTracker attaches the per-user state tracker for the web dashboard.
+func WithUserTracker(t *userstate.Tracker) Option {
+	return func(b *Bot) { b.track = t }
+}
+
+// UserStates snapshots every tracked user for the dashboard.
+func (b *Bot) UserStates() []userstate.Info {
+	if b.track == nil {
+		return nil
+	}
+	return b.track.List()
 }
 
 // New wires a Telegram bot. (api can be a fake in tests.)
@@ -324,6 +341,7 @@ func (b *Bot) handleEvent(ev engine.Event) {
 			delete(b.cards, string(acts.ID))
 			delete(b.sessionChats, string(acts.ID))
 			b.mu.Unlock()
+			b.trackLive(chat, false, string(acts.ID))
 			// The session finished cleanly: its durable queue metadata is no
 			// longer needed (the history record keeps the final state), so
 			// remove it instead of leaving an "interrupted" ghost.

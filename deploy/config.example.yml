@@ -53,3 +53,13 @@ logging:
 
 paths:
   data_dir: /var/lib/telemeetbot
+
+# Light web dashboard (opt-in): Telegram Login for auth, the same admin
+# allow-list for authorization, and a browser control surface mirroring the
+# Telegram dashboard (start/stop sessions, playback, logs, users).
+# Register your bot's domain first: @BotFather -> /setdomain.
+dashboard:
+  enabled: false
+  addr: ":8080"                      # listen address
+  public_base_url: ""                # e.g. https://bot.example.com (hint only)
+  session_hours: 24                  # login cookie lifetime
