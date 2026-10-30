@@ -24,6 +24,7 @@ package logx
 import (
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -114,6 +115,42 @@ func NewRecorder(max int) *Recorder {
 	}
 }
 
+// redactors are applied to every recorded message: secret material (bot
+// token, OAuth secrets, API hashes) must never land in the ring buffer or on
+// a dashboard screen. Set once at startup; never mutated afterwards.
+var redactors atomic.Value // []string
+
+// SetRedactors registers literal strings to redact from captured logs.
+// Empty/short values are ignored (a 3-char secret would corrupt messages).
+// Safe to call before or while recording: readers pick the new list up
+// atomically on the next entry.
+func SetRedactors(secrets ...string) {
+	var keep []string
+	for _, s := range secrets {
+		if len(strings.TrimSpace(s)) >= 8 {
+			keep = append(keep, s)
+		}
+	}
+	if len(keep) == 0 {
+		return
+	}
+	redactors.Store(keep)
+}
+
+// redact applies every registered redactor to msg.
+func redact(msg string) string {
+	v := redactors.Load()
+	if v == nil {
+		return msg
+	}
+	for _, secret := range v.([]string) {
+		if strings.Contains(msg, secret) {
+			msg = strings.ReplaceAll(msg, secret, "[redacted]")
+		}
+	}
+	return msg
+}
+
 // Record appends one entry to the ring and fans it out. It never blocks:
 // fan-out runs on the caller's goroutine but every send is non-blocking with
 // drop-on-full per subscriber.
@@ -121,6 +158,7 @@ func (r *Recorder) Record(e Entry) {
 	if e.Time.IsZero() {
 		e.Time = time.Now()
 	}
+	e.Message = redact(e.Message)
 	r.mu.Lock()
 	r.entries[r.next] = e
 	r.next = (r.next + 1) % r.max

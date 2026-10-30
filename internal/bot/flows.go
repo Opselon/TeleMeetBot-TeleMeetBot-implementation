@@ -208,6 +208,8 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 			b.sendText(chatID, fmt.Sprintf("Your Telegram ID: <code>%d</code>", userID), nil)
 		case "ping":
 			b.sendText(chatID, "🏓 pong — "+esc(health.FormatUptime(time.Since(b.started))), nil)
+		case "history":
+			b.sendText(chatID, historyView(b.st.Records()), mainMenuKB())
 		default:
 			b.sendText(chatID, "Unknown command. Use the dashboard buttons.", mainMenuKB())
 		}

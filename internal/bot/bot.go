@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -113,6 +114,13 @@ type Bot struct {
 	// track is the per-user state tracker feeding the web dashboard. Nil is
 	// valid (tests); every update site is guarded.
 	track *userstate.Tracker
+	// limiter is the per-user token bucket guarding user-initiated updates.
+	limiter *rateLimiter
+	// updateQueue feeds the bounded worker pool (nil in tests that call
+	// handleUpdate directly).
+	updateQueue chan tgbotapi.Update
+	// gcLast is the last rate-limiter GC time (unix seconds, atomic).
+	gcLast atomic.Int64
 }
 
 // Option customizes a Bot after the required dependencies are wired.
@@ -167,6 +175,7 @@ func New(api API, cfg *config.Config, eng Engine, st *store.Store, ms Meetings, 
 		sessionChats: map[string]int64{},
 		menus:        map[int64]int{},
 		pending:      map[int64][]*pendingMedia{},
+		limiter:      newRateLimiter(),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -187,16 +196,59 @@ func (b *Bot) Run(ctx context.Context) error {
 	}
 	updates := b.api.Updates(b.cfg.Telegram.PollTimeoutSeconds)
 	b.log.Infof("telegram bot @%s is polling", b.api.BotUsername())
+
+	// Bounded worker pool: Telegram updates are handled by a fixed set of
+	// workers instead of an unbounded goroutine per update. A burst of
+	// callbacks (or a malicious flood) can no longer multiply goroutines
+	// without limit; the queue absorbs spikes, and overflow drops the
+	// oldest update with a warning rather than blocking the poll loop
+	// (blocking would stall the whole bot, dropping is the honest cost).
+	workers := b.cfg.Telegram.UpdateWorkers
+	if workers <= 0 {
+		workers = 8
+	}
+	queueSize := workers * 32
+	b.updateQueue = make(chan tgbotapi.Update, queueSize)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case upd, ok := <-b.updateQueue:
+					if !ok {
+						return
+					}
+					b.handleUpdate(ctx, &upd)
+				}
+			}
+		}()
+	}
+	defer wg.Wait()
+
 	for {
 		select {
 		case <-ctx.Done():
+			// Close the queue so workers drain what is already accepted and
+			// exit; in-flight updates finish (shutdown stays graceful).
+			close(b.updateQueue)
+			wg.Wait()
 			return nil
 		case upd, ok := <-updates:
 			if !ok {
 				return errors.New("telegram update channel closed")
 			}
-			// Handle inline, but never forever: sessions can take minutes.
-			go b.handleUpdate(ctx, &upd)
+			select {
+			case b.updateQueue <- upd:
+			default:
+				// Queue full: shed the update, never block polling. The
+				// Telegram cursor has already advanced, so this update is
+				// genuinely dropped — say so in the log.
+				b.log.Warnf("[PIPELINE:bot] update queue full (%d), dropping update", queueSize)
+			}
 		}
 	}
 }
@@ -455,9 +507,32 @@ func (b *Bot) Broadcast(text string) {
 func (b *Bot) handleUpdate(ctx context.Context, upd *tgbotapi.Update) {
 	defer func() {
 		if r := recover(); r != nil {
-			b.log.Errorf("panic handling update: %v", r)
+			b.log.Errorf("[PIPELINE:bot] panic handling update (recovered): %v", r)
 		}
 	}()
+	// Per-user rate limit on user-initiated updates. System-originated
+	// updates (no From) pass through. Exceeding the bucket drops the update
+	// with a throttled warning — never an error to the sender, since the
+	// next successful action retries whatever they were doing.
+	var userID int64
+	switch {
+	case upd.Message != nil && upd.Message.From != nil:
+		userID = upd.Message.From.ID
+	case upd.CallbackQuery != nil && upd.CallbackQuery.From != nil:
+		userID = upd.CallbackQuery.From.ID
+	}
+	now := time.Now()
+	if !b.limiter.allow(userID, now) {
+		if b.limiter.shouldNotice(userID, now) {
+			b.log.Warnf("[PIPELINE:bot] rate limit: user %d is sending too fast, dropping updates", userID)
+		}
+		return
+	}
+	// Keep the bucket map bounded (once an hour is plenty).
+	lastGC := b.gcLast.Load()
+	if now.Unix()-lastGC > 3600 && b.gcLast.CompareAndSwap(lastGC, now.Unix()) {
+		b.limiter.gc(now, 2*time.Hour)
+	}
 	switch {
 	case upd.Message != nil && upd.Message.Chat != nil:
 		b.handleMessage(upd.Message)

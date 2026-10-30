@@ -114,7 +114,9 @@ type TelegramConfig struct {
 	// PollTimeoutSeconds is the long-poll timeout used for getUpdates.
 	PollTimeoutSeconds int `yaml:"poll_timeout_seconds"`
 	// LocalBotAPI configures the embedded or supervised local telegram-bot-api server.
-	LocalBotAPI localbotapi.Config `yaml:"local_bot_api"`
+	LocalBotAPI localbotapi.Config `yaml:"local_bot_api"` // UpdateWorkers is the bounded pool size handling Telegram updates
+	// (0 = default 8). A fixed pool caps goroutine fan-out under bursts.
+	UpdateWorkers int `yaml:"update_workers"`
 }
 
 // ServerConfig is the local HTTP surface (health checks only, no remote login).
@@ -417,6 +419,9 @@ func (c *Config) normalize() {
 	}
 	if c.Telegram.PollTimeoutSeconds <= 0 {
 		c.Telegram.PollTimeoutSeconds = 30
+	}
+	if c.Telegram.UpdateWorkers < 0 {
+		c.Telegram.UpdateWorkers = 0
 	}
 	if c.Dash.Enabled && strings.TrimSpace(c.Dash.Addr) == "" {
 		c.Dash.Addr = ":8080"
