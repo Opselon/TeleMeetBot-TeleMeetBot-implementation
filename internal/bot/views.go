@@ -268,11 +268,36 @@ func sessionCardText(st engine.Status) string {
 		sb.WriteString("\n")
 	}
 	if st.DownloadProgress.Active {
-		stage := downloadStageLabel(st.DownloadProgress.Stage)
-		if st.DownloadProgress.Total > 0 {
+		stage := st.DownloadProgress.Stage
+		if stage == "" {
+			stage = "download"
+		}
+		spin := spinner()
+		// Animated headline + bar. Frames advance on every card refresh, so
+		// a download renders as a live spinner, a sweeping comet while the
+		// transfer has not started reporting, and a filled bar with a bright
+		// head once bytes move.
+		switch stage {
+		case "validate", "connect":
+			label := "Preparing"
+			if stage == "connect" {
+				label = "Connecting"
+			}
+			sb.WriteString(fmt.Sprintf("⬇️ %s <b>%s</b>%s\n", spin, label, pulsingDots()))
+			sb.WriteString(renderComet(10) + "\n")
+		case "verify", "finalize":
+			label := "Verifying"
+			if stage == "finalize" {
+				label = "Finalizing"
+			}
+			sb.WriteString(fmt.Sprintf("⬇️ %s <b>%s</b>%s\n", spin, label, pulsingDots()))
+			sb.WriteString(renderComet(10) + "\n")
+		default:
 			pct := st.DownloadProgress.Percent
-			bar := renderProgressBar(pct, 10)
-			line := fmt.Sprintf("📥 %s: %s <b>%d%%</b>", stage, bar, pct)
+			if pct < 0 {
+				pct = 0
+			}
+			line := fmt.Sprintf("⬇️ %s <b>Downloading:</b> %s <b>%d%%</b>", spin, renderAnimatedBar(pct, 10), pct)
 			if st.DownloadProgress.ETASeconds > 0 {
 				line += fmt.Sprintf(" · ⏳ <b>%s</b>", formatETA(st.DownloadProgress.ETASeconds))
 			}
@@ -283,14 +308,6 @@ func sessionCardText(st engine.Status) string {
 					float64(st.DownloadProgress.Total)/(1024*1024),
 					float64(st.DownloadProgress.Speed)/(1024*1024)))
 			}
-		} else if st.DownloadProgress.Bytes > 0 {
-			sb.WriteString(fmt.Sprintf("📥 %s: 💾 <b>%.1f MiB</b>", stage, float64(st.DownloadProgress.Bytes)/(1024*1024)))
-			if st.DownloadProgress.Speed > 0 {
-				sb.WriteString(fmt.Sprintf(" · ⚡️ <b>%.1f MiB/s</b>", float64(st.DownloadProgress.Speed)/(1024*1024)))
-			}
-			sb.WriteString("\n")
-		} else {
-			sb.WriteString(fmt.Sprintf("📥 %s…\n", stage))
 		}
 	}
 	if st.FallbackReason != "" {
