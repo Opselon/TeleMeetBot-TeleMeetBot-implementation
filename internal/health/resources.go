@@ -30,6 +30,10 @@ type ServerResources struct {
 	StorageUsagePercent int
 	StorageAvailable    bool
 
+	// Net is the process network namespace's I/O — inside Docker this is
+	// the container's own upload/download, not the host's.
+	Net NetStats
+
 	CollectedAt time.Time
 }
 
@@ -96,6 +100,7 @@ func StartResourceMonitor(ctx context.Context, dataDir string) {
 			case <-ticker.C:
 				c.mu.Lock()
 				c.sampleLocked(false)
+				c.sampleNetLocked(time.Now())
 				c.mu.Unlock()
 			}
 		}
@@ -122,6 +127,7 @@ func GetServerResources() ServerResources {
 		return c.cached
 	}
 	c.sampleLocked(false)
+	c.sampleNetLocked(time.Now())
 	return c.cached
 }
 
@@ -167,6 +173,10 @@ func FormatServerResourcesFrom(res ServerResources) string {
 		sb.WriteString(fmt.Sprintf("💽 Storage: %.1f / %s GiB used (%d%%)", res.StorageUsedGiB, formatStorageTotal(res.StorageTotalGiB), res.StorageUsagePercent))
 	} else {
 		sb.WriteString("💽 Storage: N/A")
+	}
+	if line := formatNetLine(res.Net); line != "" {
+		sb.WriteString("\n")
+		sb.WriteString(line)
 	}
 	return sb.String()
 }
