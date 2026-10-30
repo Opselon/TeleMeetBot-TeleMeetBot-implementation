@@ -17,6 +17,19 @@ func downloadProxyFor(c *config.Config) string {
 	return strings.TrimSpace(c.Browser.Proxy)
 }
 
+// downloadFallbacksFor resolves the fallback egresses for media downloads.
+// An explicit download.fallback_proxies list wins; otherwise the historical
+// single-proxy behaviour is kept (no fallbacks).
+func downloadFallbacksFor(c *config.Config) []string {
+	var out []string
+	for _, p := range c.Download.FallbackProxies {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // FromConfig maps the application config to engine option structs.
 func FromConfig(c *config.Config) (BrowserConfig, MediaOptions, MeetOptions) {
 	b := BrowserConfig{
@@ -58,6 +71,7 @@ func FromConfig(c *config.Config) (BrowserConfig, MediaOptions, MeetOptions) {
 		DownloadFFmpeg:     c.Download.FFmpegPath,
 		DownloadAllowXcode: c.Download.AllowTranscode,
 		DownloadProxy:      downloadProxyFor(c),
+		DownloadFallbacks:  downloadFallbacksFor(c),
 
 		// The anchor for a relative download dir, so an operator writing
 		// "downloads" gets <data_dir>/downloads rather than a CWD-relative
