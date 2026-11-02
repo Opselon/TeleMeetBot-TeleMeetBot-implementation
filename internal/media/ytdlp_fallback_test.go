@@ -80,6 +80,8 @@ func TestProxyBlockedClassifier(t *testing.T) {
 		"ERROR: [youtube] DIjPGEQKbH8: Sign in to confirm you're not a bot. This helps protect our community.",
 		"ERROR: [youtube] DIjPGEQKbH8: Sign in to confirm you’re not a bot. This helps protect our community.",
 		"ERROR: [youtube] DIjPGEQKbH8: Unable to download API page: HTTP Error 429: Too Many Requests",
+		"ERROR: [youtube] Pu-Ny1L8yDU: Unable to download API page: TLS/SSL connection has been closed (EOF) (_ssl.c:992) (caused by SSLError('TLS/SSL connection has been closed (EOF) (_ssl.c:992)'))",
+		"WARNING: [youtube] Unable to download webpage: TLS/SSL connection has been closed (EOF)",
 	}
 	for _, s := range blocked {
 		if !proxyBlocked([]byte(s)) {

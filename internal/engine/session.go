@@ -533,8 +533,10 @@ func (s *Session) run() {
 	// Download & Stream: fetch the media to disk BEFORE the tab is opened so
 	// the media tab loads a local, always-available file. The download honours
 	// its own size/time/concurrency limits and starts the expiry clock on
-	// completion; a failure here is terminal for Download mode, a fallback
-	// signal for Auto, and a no-op for Browser.
+	// completion. If download extraction fails (e.g. YouTube bot-blocks yt-dlp
+	// or drops TLS connections on datacenter/proxy egress), fall back to
+	// direct browser playback in Chromium rather than killing the live session.
+	// Chromium in the media tab plays YouTube and web links natively.
 	if mode := s.playMode; mode == mediateam.ModeDownload || mode == mediateam.ModeAuto {
 		prepareErr := s.prepareLocalMedia()
 		if s.prepareRun != nil {
@@ -546,16 +548,9 @@ func (s *Session) run() {
 			}
 		}
 		if prepareErr != nil {
-			if mode == mediateam.ModeDownload {
-				if s.ctx.Err() == nil {
-					s.setError(prepareErr)
-				}
-				return
-			}
-			// Auto: keep the browser pipeline, record why. No retry loop —
-			// the browser path is the primary, this was the fallback.
-			s.log.Warnf("[PIPELINE:session] session %s: download fallback failed, continuing with browser playback: %v", s.ID, prepareErr)
-			s.setDetail("download unavailable: " + truncateStr(prepareErr.Error(), 80))
+			s.log.Warnf("[PIPELINE:session] session %s: download extraction failed (%v), falling back to browser playback", s.ID, prepareErr)
+			s.setDetail("download unavailable, playing via browser: " + truncateStr(prepareErr.Error(), 80))
+			s.emit(EventState, "download unavailable, streaming via browser")
 		}
 	}
 

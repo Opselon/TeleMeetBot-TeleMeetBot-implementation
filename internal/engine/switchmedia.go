@@ -147,27 +147,27 @@ func (s *Session) applySwitch(target MediaTarget, stale func() bool) error {
 		if mgr != nil && mgr.Enabled() {
 			res, err := s.runDownloadWithID(context.Background(), mgr, target, dlID)
 			if err != nil {
-				return fmt.Errorf("download switch media: %w", err)
-			}
-			if stale() {
+				s.logger().Warnf("[PIPELINE:switch] session %s: download switch media failed (%v), falling back to direct browser navigation", s.ID, err)
+			} else if stale() {
 				// Never adopted: no lease was taken, so Remove is the right
 				// (unconditional) cleanup for this superseded download.
 				s.freeUnleasedResult(res, "switch superseded")
 				return errSwitchSuperseded
+			} else {
+				// The switch generation still owns the tab: lease the new file
+				// before the session adopts it.
+				s.leaseMedia(res)
+				newLocal = &localMedia{
+					id:        res.ID,
+					url:       res.LocalURL,
+					path:      res.Path,
+					expiresAt: res.ExpiresAt,
+					via:       res.Via,
+					bytes:     res.Bytes,
+				}
+				navURL = res.LocalURL
+				navKind = MediaDirect
 			}
-			// The switch generation still owns the tab: lease the new file
-			// before the session adopts it.
-			s.leaseMedia(res)
-			newLocal = &localMedia{
-				id:        res.ID,
-				url:       res.LocalURL,
-				path:      res.Path,
-				expiresAt: res.ExpiresAt,
-				via:       res.Via,
-				bytes:     res.Bytes,
-			}
-			navURL = res.LocalURL
-			navKind = MediaDirect
 		}
 	}
 

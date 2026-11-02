@@ -49,7 +49,17 @@ func proxyBlocked(stderr []byte) bool {
 	}
 	return strings.Contains(t, "sign in to confirm you're not a bot") ||
 		strings.Contains(t, "sign in to confirm you’re not a bot") ||
-		strings.Contains(t, "http error 429")
+		strings.Contains(t, "http error 429") ||
+		strings.Contains(t, "http error 403") ||
+		strings.Contains(t, "unable to download api page") ||
+		strings.Contains(t, "unable to download webpage") ||
+		strings.Contains(t, "tls/ssl connection has been closed") ||
+		strings.Contains(t, "connection has been closed") ||
+		strings.Contains(t, "connection reset") ||
+		strings.Contains(t, "sslerror") ||
+		strings.Contains(t, "ssleoferror") ||
+		strings.Contains(t, "proxyerror") ||
+		strings.Contains(t, "unable to connect to proxy")
 }
 
 // stderrOf pulls the embedded yt-dlp stderr text out of a wrapped fetch
@@ -123,6 +133,12 @@ func (m *Manager) ytdlpArgs(u, id, quality, subLang, proxy string) []string {
 		"--retry-sleep", "file_access:1",
 		"--socket-timeout", "30", // a hung socket must not pin the download
 		"--force-ipv4", // the WARP egress has no working IPv6 route; AAAA attempts fail 100%
+		// Work around YouTube Innertube API datacenter blocking and TLS drops:
+		// Emulate mobile (android/ios) client API endpoints which are not subject
+		// to the web client bot challenges and TLS EOF resets. Passed as separate
+		// flags to avoid shell metacharacters in argv.
+		"--extractor-args", "youtube:player_client=android,ios,web",
+		"--extractor-args", "youtube:player_skip=configs",
 		// Maximize download throughput across network interface:
 		// Multi-threaded fragment fetching + optimized HTTP chunk and buffer sizes.
 		"--concurrent-fragments", "8",
