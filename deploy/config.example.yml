@@ -36,6 +36,23 @@ media:
   seek_step_seconds: 10
   loop: false
 
+# Download & Stream: fetch media to disk with yt-dlp and play the local file.
+# Works with zero configuration on an ordinary network: the ladder tries a
+# DIRECT connection first and only reaches the proxies below when the direct
+# route is refused by the source ("Sign in to confirm you're not a bot" or a
+# TLS EOF). Set download.proxy only if your network needs it; it no longer
+# inherits browser.proxy.
+download:
+  enabled: true
+  ttl_minutes: 60
+  max_size_mb: 2048
+  min_free_mb: 256
+  timeout_seconds: 600
+  max_concurrent: 1
+  allow_transcode: true
+  proxy: ""
+  fallback_proxies: []
+
 meet:
   guest_name: "TeleMeet Bot"
   present_mode: "tab"               # tab (headless-safe) or screen (needs Xvfb)

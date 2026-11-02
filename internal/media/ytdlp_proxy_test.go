@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -34,9 +33,10 @@ func newYtdlpTestManager(t *testing.T, opts Options, fn func(context.Context, []
 	return m
 }
 
-// Defect 1: the download left the box on the bare datacenter IP, so YouTube
-// answered "Sign in to confirm you're not a bot" and the session died with
-// "yt-dlp: exit status 1". The configured proxy must reach the argv.
+// The proxy contract is per-ROUTE now: the ladder tries the direct route
+// first, so the primary proxy is only present on the argv of the run that
+// carries it. The fake returns an egress-shaped refusal for the direct route
+// (exactly the shape that advances the ladder) and succeeds over the proxy.
 func TestYTDLPProxyIsPassed(t *testing.T) {
 	dir := t.TempDir()
 	opts := DefaultOptions(dir)
@@ -44,11 +44,19 @@ func TestYTDLPProxyIsPassed(t *testing.T) {
 	var got []string
 	m := newYtdlpTestManager(t, opts, func(_ context.Context, args []string) ([]byte, []byte, error) {
 		got = append([]string(nil), args...)
-		return nil, nil, exec.ErrNotFound
+		// Direct route: YouTube bot-checks the unproxied egress.
+		if !hasProxy(args, opts.Proxy) {
+			return nil, []byte("ERROR: [youtube] X: Sign in to confirm you're not a bot"), youtubeBotCheck
+		}
+		// Over the configured proxy: succeed.
+		writeStub(t, dir+"/vid.mp4")
+		return []byte("136,1280,720,30,avc1.64001f,mp4a.40.2,mp4,1500\n"), nil, nil
 	})
-	_, _ = m.Download(context.Background(), DownloadRequest{
+	if _, err := m.Download(context.Background(), DownloadRequest{
 		URL: "https://www.youtube.com/watch?v=abcdefghijk", Kind: "youtube", ID: "vid",
-	})
+	}); err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
 	idx := -1
 	for i, a := range got {
 		if a == "--proxy" {

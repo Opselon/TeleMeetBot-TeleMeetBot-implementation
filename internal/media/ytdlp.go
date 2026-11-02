@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -90,12 +91,25 @@ func transientFailure(err error, stderr []byte) bool {
 		strings.Contains(t, "no such file or directory")
 }
 
-// egresses returns the ordered list of egresses a YouTube download may use:
-// the configured primary proxy first, then each fallback. The empty string
-// means "direct connection" and is only present when the operator configured
-// no proxy at all.
+// egresses returns the ordered ladder of egresses a YouTube download may use.
+//
+// DIRECT FIRST. The empty string means "direct connection" — no proxy, no
+// custom DNS, nothing an end user would have to configure. Verified live:
+// unproxied egress extracts and downloads YouTube cleanly on an ordinary
+// server, while a proxy that YouTube has throttled (rotating free pools are
+// the textbook case) is what actually returns "Sign in to confirm you're not
+// a bot" and "TLS/SSL connection has been closed (EOF)". Running the direct
+// route first therefore satisfies both directions at once: a zero-config
+// install works out of the box, and a partially-blocked proxy stops being
+// able to take the whole feature down.
+//
+// Configured proxies follow in operator order (primary first, then each
+// fallback) and are only reached when the direct route returns an
+// egress-shaped refusal. An operator whose network genuinely needs a proxy
+// therefore keeps exactly the previous behaviour; one whose proxy is the
+// problem instead gets a working download.
 func (m *Manager) egresses() []string {
-	var out []string
+	out := []string{""} // direct, always first
 	if p := strings.TrimSpace(m.opts.Proxy); p != "" {
 		out = append(out, p)
 	}
@@ -104,15 +118,250 @@ func (m *Manager) egresses() []string {
 			out = append(out, p)
 		}
 	}
-	if len(out) == 0 {
-		out = append(out, "")
+	return out
+}
+
+// egressLabel renders one ladder entry for a log line. The direct entry is
+// labelled "direct" rather than printed as an empty string, so an operator
+// reading the log can tell "no proxy was used" apart from "proxy unknown".
+func egressLabel(proxy string) string {
+	if strings.TrimSpace(proxy) == "" {
+		return "direct"
+	}
+	return proxy
+}
+
+// ytdlpClientCapabilities guards the client configuration passed to the
+// YouTube extractor against an installed yt-dlp that does not understand it.
+// `player_client` landed in yt-dlp 2024.03.05 and the ability to LIST a
+// client's own supported values landed later still, so a binary from a distro
+// backport or a pinned older release silently rejects the argv with a
+// non-obvious error. Ask yt-dlp itself which clients it supports (and only
+// fall back to the documented ladder when it cannot say) rather than assuming
+// the shipped binary understands every flag we pass.
+//
+// Probe shape: `yt-dlp --list-extractor-args youtube` prints the arguments
+// the youtube extractor accepts plus, on new-enough builds, the values each
+// accepts. On older builds it exits 0 with only the argument names, so the
+// returned list is only a subset guard: unknown-clients are filtered, and
+// when the list itself is missing we keep the configured order as-is.
+type ytdlpClientCapabilities struct {
+	// clients is the set of client names yt-dlp reported support for. Empty
+	// means "the probe could not enumerate" — callers must keep the
+	// configured list unchanged rather than discarding it.
+	clients map[string]bool
+}
+
+// ytdlpMinClientListVersion is the first release known to enumerate accepted
+// client values for `player_client`. Older builds only print argument names;
+// for those the configured list is used as-is.
+const ytdlpMinClientListVersion = "2025.01.15"
+
+// parseYTDLPVersion extracts the dotted release number from a `yt-dlp
+// --version` line ("2026.10.26" from "2026.10.26@master"). Exactly three
+// numeric components; anything else (a tag prefix, a four-part build number,
+// garbage) reports not-ok so the caller never assumes support.
+func parseYTDLPVersion(line string) (string, bool) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return "", false
+	}
+	// Strip a channel/build suffix: "2026.10.26@master" -> "2026.10.26".
+	if i := strings.IndexAny(line, "@ "); i > 0 {
+		line = line[:i]
+	}
+	parts := strings.Split(line, ".")
+	if len(parts) != 3 {
+		return "", false
+	}
+	for _, p := range parts {
+		if p == "" {
+			return "", false
+		}
+		for _, r := range p {
+			if r < '0' || r > '9' {
+				return "", false
+			}
+		}
+	}
+	return line, true
+}
+
+// ytdlpVersionAtLeast reports whether the reported version is not older than
+// target. Both must parse (three dotted numeric components); a version that
+// cannot be parsed reports false so an unknown binary is never assumed to be
+// newer than something it may not support.
+func ytdlpVersionAtLeast(reported, target string) bool {
+	r, ok := parseYTDLPVersion(reported)
+	if !ok {
+		return false
+	}
+	t, ok := parseYTDLPVersion(target)
+	if !ok {
+		return false
+	}
+	rp := strings.Split(r, ".")
+	tp := strings.Split(t, ".")
+	for i := range tp {
+		if i >= len(rp) {
+			return false
+		}
+		ri, _ := strconv.Atoi(rp[i])
+		ti, _ := strconv.Atoi(tp[i])
+		if ri != ti {
+			return ri > ti
+		}
+	}
+	return true
+}
+
+// youtubeClientOrder is the documented client ladder: mobile clients first
+// (they are not subject to the web client's bot challenges), then the web
+// client last as a fallback. Mirror this order in whatever survives filtering.
+var youtubeClientOrder = []string{"android", "ios", "web"}
+
+// configuredYouTubeClients returns the client list the argv should carry,
+// filtered by what the installed yt-dlp reports it supports. unsupported is
+// the subset of requested clients the binary rejected (for diagnostics).
+func configuredYouTubeClients(requested []string, caps *ytdlpClientCapabilities) (kept, unsupported []string) {
+	if caps == nil || len(caps.clients) == 0 {
+		return dedupeClients(requested), nil
+	}
+	for _, c := range dedupeClients(requested) {
+		if caps.clients[strings.ToLower(strings.TrimSpace(c))] {
+			kept = append(kept, c)
+			continue
+		}
+		unsupported = append(unsupported, c)
+	}
+	return kept, unsupported
+}
+
+// dedupeClients removes repeats and blanks while preserving order.
+func dedupeClients(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, c := range in {
+		c = strings.ToLower(strings.TrimSpace(c))
+		if c == "" || seen[c] {
+			continue
+		}
+		// "youtube:player_client=android,ios,web" may arrive as one argv
+		// token; split it on commas so a partially-populated extract still
+		// filters correctly.
+		for _, part := range strings.Split(c, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" || seen[part] {
+				continue
+			}
+			seen[part] = true
+			out = append(out, part)
+		}
 	}
 	return out
 }
 
+// playerClientArgValue extracts the client list from a `--extractor-args
+// youtube:player_client=...` argv pair, or "" when the pair is absent.
+func playerClientArgValue(args []string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] != "--extractor-args" {
+			continue
+		}
+		v := args[i+1]
+		if !strings.HasPrefix(v, "youtube:") {
+			continue
+		}
+		for _, kv := range strings.Split(strings.TrimPrefix(v, "youtube:"), ";") {
+			kv = strings.TrimSpace(kv)
+			if after, ok := stringsCutPrefix(kv, "player_client="); ok {
+				return after
+			}
+		}
+	}
+	return ""
+}
+
+// stringsCutPrefix is strings.CutPrefix for Go 1.19-era compatibility of the
+// helper set (the module builds across several Go versions).
+func stringsCutPrefix(s, prefix string) (string, bool) {
+	if !strings.HasPrefix(s, prefix) {
+		return s, false
+	}
+	return s[len(prefix):], true
+}
+
+// probeYouTubeClientCapabilities asks the installed yt-dlp which YouTube
+// clients it supports. Failures are never fatal — the probe returns an empty
+// capability set, and the caller falls back to the configured client list.
+func (m *Manager) probeYouTubeClientCapabilities(ctx context.Context, bin string) *ytdlpClientCapabilities {
+	defer func() {
+		if r := recover(); r != nil {
+			m.log.Warnf("[PIPELINE:download] youtube client probe panicked (%v); using configured client list", r)
+		}
+	}()
+	// One short-lived subprocess, bounded hard: a probe must never hang the
+	// download it is supposed to protect.
+	pctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	args := []string{"--list-extractor-args", "youtube"}
+	var stdout strings.Builder
+	cmd := exec.CommandContext(pctx, bin, args...)
+	setProcessGroup(cmd)
+	cmd.Stdout = &boundedWriter{w: &stdout, max: 512 * 1024}
+	cmd.Stderr = nil
+	if err := cmd.Run(); err != nil {
+		// Older binaries reject --list-extractor-args entirely; that is not
+		// an error worth surfacing, just a probe without an answer.
+		m.log.Infof("[ PIPELINE:download] youtube client probe unavailable (%v); keeping configured client list", err)
+		return &ytdlpClientCapabilities{}
+	}
+	caps := &ytdlpClientCapabilities{clients: map[string]bool{}}
+	// Typical output: "    player_client: android, ios, web, ...". Any
+	// comma-separated list attached to player_client counts.
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "player_client") {
+			continue
+		}
+		rest := strings.TrimPrefix(line, "player_client")
+		rest = strings.TrimLeft(rest, " \t=:")
+		for _, c := range strings.FieldsFunc(rest, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' }) {
+			c = strings.ToLower(strings.TrimSpace(c))
+			if c != "" {
+				caps.clients[c] = true
+			}
+		}
+	}
+	return caps
+}
+
+// youtubeExtractorArgs builds the `--extractor-args youtube:...` pairs for
+// one run: mobile clients first (not subject to the web client's bot
+// challenges), web last, and player_skip=configs to avoid the challenge-script
+// round trips the JS engine would otherwise have to solve. Each key gets its
+// own argv pair — a ";" separator would trip the shell-free argv contract.
+// `caps` may be nil.
+func youtubeExtractorArgs(caps *ytdlpClientCapabilities) (pairs []string, dropped []string) {
+	kept, dropped := configuredYouTubeClients(youtubeClientOrder, caps)
+	if len(kept) == 0 {
+		// Every requested client was reported unsupported: keep the documented
+		// order anyway. yt-dlp's own list can lag the extractor (a client
+		// listed as unknown still works when the extractor accepts it), and an
+		// argv with no clients at all is a guaranteed extraction failure.
+		kept = youtubeClientOrder
+		dropped = nil
+	}
+	pairs = []string{
+		"--extractor-args", "youtube:player_client=" + strings.Join(kept, ","),
+		"--extractor-args", "youtube:player_skip=configs",
+	}
+	return pairs, dropped
+}
+
 // ytdlpArgs builds the vetted argv for one yt-dlp run. proxy is the egress
 // that run must use; the empty string means a direct connection (no --proxy
-// flag at all, matching the historical behaviour).
+// flag at all).
 func (m *Manager) ytdlpArgs(u, id, quality, subLang, proxy string) []string {
 	args := []string{
 		"--no-playlist", // one item, never a playlist avalanche
@@ -134,12 +383,18 @@ func (m *Manager) ytdlpArgs(u, id, quality, subLang, proxy string) []string {
 		"--retry-sleep", "file_access:1",
 		"--socket-timeout", "30", // a hung socket must not pin the download
 		"--force-ipv4", // the WARP egress has no working IPv6 route; AAAA attempts fail 100%
-		// Work around YouTube Innertube API datacenter blocking and TLS drops:
-		// Emulate mobile (android/ios) client API endpoints which are not subject
-		// to the web client bot challenges and TLS EOF resets. Passed as separate
-		// flags to avoid shell metacharacters in argv.
-		"--extractor-args", "youtube:player_client=android,ios,web",
-		"--extractor-args", "youtube:player_skip=configs",
+	}
+	// Work around YouTube Innertube API datacenter blocking and TLS drops:
+	// emulate mobile (android/ios) client API endpoints which are not subject
+	// to the web client bot challenges and TLS EOF resets. The client list is
+	// validated against the installed yt-dlp's own reported capabilities; a
+	// probe failure keeps the documented ladder unchanged.
+	ext, droppedClients := youtubeExtractorArgs(m.ytdlpCaps)
+	args = append(args, ext...)
+	if len(droppedClients) > 0 {
+		m.log.Warnf("[PIPELINE:download] %s: yt-dlp does not list youtube client(s) %q; using %q", id, droppedClients, ext)
+	}
+	args = append(args,
 		// Maximize download throughput across network interface:
 		// Multi-threaded fragment fetching + optimized HTTP chunk and buffer sizes.
 		"--concurrent-fragments", "8",
@@ -149,10 +404,11 @@ func (m *Manager) ytdlpArgs(u, id, quality, subLang, proxy string) []string {
 		"--progress",
 		"--progress-delta", "0.5",
 		"--progress-template", "download:%(progress.downloaded_bytes)s/%(progress.total_bytes)s/%(progress.total_bytes_estimate)s/%(progress.speed)s",
-	}
-	// Datacenter egress is bot-blocked by YouTube, so the download must leave
-	// through the same proxy Chromium uses. Omitting it is the difference
-	// between "Sign in to confirm you're not a bot" and a working download.
+	)
+	// Datacenter egress is bot-blocked by YouTube, so a configured proxy still
+	// wins for the run that carries it — but the ladder tries the direct route
+	// first, so a proxy that YouTube has throttled can no longer take the
+	// whole feature down (see egresses).
 	if p := strings.TrimSpace(proxy); p != "" {
 		args = append(args, "--proxy", p)
 	}
@@ -201,6 +457,21 @@ func (m *Manager) ytdlpArgs(u, id, quality, subLang, proxy string) []string {
 	return args
 }
 
+// ensureYTDLPClientCaps fills m.ytdlpCaps once. The YouTube extractor's client
+// list is only useful when the installed yt-dlp understands the clients the
+// argv names, so the binary is asked (once) which it supports. Sync.Once
+// guards the field: concurrent downloads share the probe result, and a test
+// that installs ytdlpCapsProbe before the first fetch still wins.
+func (m *Manager) ensureYTDLPClientCaps(ctx context.Context, bin string) {
+	m.ytdlpCapsOnce.Do(func() {
+		if m.ytdlpCapsProbe != nil {
+			m.ytdlpCaps = m.ytdlpCapsProbe(ctx, bin)
+			return
+		}
+		m.ytdlpCaps = m.probeYouTubeClientCapabilities(ctx, bin)
+	})
+}
+
 // fetchYTDLP runs yt-dlp to fetch url into the managed directory.
 //
 // Security: yt-dlp receives exactly two vetted arguments — the output template
@@ -215,6 +486,11 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality, subLang string
 			Hint: "install yt-dlp (https://github.com/yt-dlp/yt-dlp#installation) to enable Download & Stream for this source",
 		}
 	}
+	// Validate the YouTube client configuration against the installed binary
+	// once per manager (cheap, bounded, and the argv depends on the answer).
+	// A probe failure is explicitly non-fatal: the documented client ladder
+	// stays in the argv and the download proceeds.
+	m.ensureYTDLPClientCaps(ctx, bin)
 	// The output template is server-generated and id is alphanumeric; the
 	// final name (with the container yt-dlp picked) is discovered afterwards
 	// by listing the managed directory.
@@ -245,26 +521,26 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality, subLang string
 		}
 	}
 
-	// Egress ladder: the primary proxy first, then each configured fallback.
-	// YouTube rate-limits a single datacenter egress at the API layer (the
-	// extractor then dies with "Unable to download API page: N bytes read
-	// (caused by <IncompleteRead>)") even though the video itself is
-	// perfectly downloadable over a different route, so a blocked egress is
-	// retried over the next one instead of failing the whole session. Only
-	// egress-shaped failures advance the ladder; a genuine verdict such as
-	// "unsupported URL" or "Requested format is not available" fails fast on
+	// Egress ladder: DIRECT FIRST, then the configured primary proxy and each
+	// fallback. Verified live: an unproxied route extracts and downloads
+	// YouTube cleanly on an ordinary server, while a proxy YouTube has
+	// throttled (rotating free pools are the textbook case) is what returns
+	// "Sign in to confirm you're not a bot" or "TLS/SSL connection has been
+	// closed (EOF)". So the direct route runs first — a zero-config install
+	// works out of the box — and a configured proxy is only reached when the
+	// direct route returned an egress-shaped refusal. Genuine verdicts
+	// ("unsupported URL", "Requested format is not available") fail fast on
 	// the first route. stderr carries the last run's diagnosis so the ladder
 	// decision below sees the real failure text.
 	routes := m.egresses()
 	var res *ytdlpResult
 	var last error
 	var stderr []byte
+	var attempted []string
 	for ri, proxy := range routes {
 		args := m.ytdlpArgs(u, id, quality, subLang, proxy)
-		label := proxy
-		if label == "" {
-			label = "direct"
-		}
+		label := egressLabel(proxy)
+		attempted = append(attempted, label)
 		for attempt := 0; attempt <= maxExecRetries; attempt++ {
 			if err := ctx.Err(); err != nil {
 				return nil, err
@@ -287,7 +563,9 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality, subLang string
 				res, rerr = m.collectYTDLP(ctx, id, stdout, runStderr)
 				if rerr == nil {
 					if ri > 0 {
-						m.log.Infof("[PIPELINE:download] %s: extracted via fallback egress %s (primary %s was blocked)", id, label, primaryLabel(m.opts.Proxy))
+						m.log.Infof("[PIPELINE:download] %s: downloaded via fallback egress %s (direct and %d earlier route(s) were rejected)", id, label, ri)
+					} else {
+						m.log.Infof("[PIPELINE:download] %s: downloaded via direct egress (no proxy required)", id)
 					}
 					return res, nil
 				}
@@ -321,7 +599,7 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality, subLang string
 		}
 		if ri+1 < len(routes) && proxyBlocked(stderr) {
 			m.MarkEgressBlocked(proxy)
-			m.log.Warnf("[PIPELINE:download] %s: egress %s blocked by the source (%s); trying next egress %s", id, label, truncateForLog(strings.TrimSpace(string(stderr)), 120), routes[ri+1])
+			m.log.Warnf("[PIPELINE:download] %s: egress %s blocked by the source (%s); trying next egress %s", id, label, truncateForLog(strings.TrimSpace(string(stderr)), 120), egressLabel(routes[ri+1]))
 			continue
 		}
 		// A real verdict (or a route error that is not egress-shaped): the
@@ -336,16 +614,14 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality, subLang string
 	if last == nil {
 		last = errors.New("yt-dlp produced no usable file")
 	}
+	// The caller (engine, and through it the Telegram card) shows this error
+	// to the user as the reason Download & Stream failed. Attach the ladder
+	// that was tried so the message is diagnostic rather than a bare retry
+	// status — but only the route names: stderr already carried the source's
+	// own text and proxy URLs are identifiers, not credentials. The last
+	// route is the one the failure came from, so it is named explicitly.
+	last = fmt.Errorf("%w [egress ladder tried: %s]", last, strings.Join(attempted, " → "))
 	return nil, last
-}
-
-// primaryLabel renders the primary egress for a log line ("direct" when none
-// is configured).
-func primaryLabel(p string) string {
-	if p = strings.TrimSpace(p); p != "" {
-		return p
-	}
-	return "direct"
 }
 
 // ytDLPJoinOK is the nil sentinel the output-path check compares against.

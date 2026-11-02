@@ -100,6 +100,15 @@ type Manager struct {
 	// ytdlpFn/ffmpegFn override the subprocess invocation (tests).
 	ytdlpFn  func(ctx context.Context, args []string) ([]byte, []byte, error)
 	ffmpegFn func(ctx context.Context, args []string) ([]byte, []byte, error)
+	// ytdlpCaps is the installed yt-dlp's reported YouTube client support.
+	// nil means "not probed yet"; the argv then carries the documented client
+	// ladder unchanged. Filled lazily by fetchYTDLP so a Manager built for a
+	// unit test (or one whose yt-dlp is absent) never pays for a probe.
+	ytdlpCaps *ytdlpClientCapabilities
+	// ytdlpCapsProbe overrides the capability probe (tests).
+	ytdlpCapsProbe func(ctx context.Context, bin string) *ytdlpClientCapabilities
+	// ytdlpCapsOnce makes the capability probe run exactly once per manager.
+	ytdlpCapsOnce sync.Once
 	// retryDelay overrides the sleep between yt-dlp attempts (tests).
 	retryDelay func(attempt int) time.Duration
 	// inspect cache: derived format metadata with explicit expiry. It holds

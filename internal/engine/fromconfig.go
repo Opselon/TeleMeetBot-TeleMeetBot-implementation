@@ -7,14 +7,22 @@ import (
 	"github.com/Opselon/TeleMeetBot/internal/config"
 )
 
-// downloadProxyFor resolves the egress for media downloads: an explicit
-// download.proxy wins, otherwise the operator's browser.proxy is reused. One
-// setting is enough for a VPS where Chromium already needs a proxy.
+// downloadProxyFor resolves the egress for media downloads.
+//
+// DIRECT-BY-DEFAULT: an explicit download.proxy wins; when it is unset the
+// download runs DIRECT rather than inheriting browser.proxy. Verified live:
+// unproxied egress extracts and downloads YouTube cleanly on an ordinary
+// server, while inheriting a proxy YouTube has throttled (rotating free pools
+// are the textbook case) is exactly what produces "Sign in to confirm you're
+// not a bot" and "TLS/SSL connection has been closed (EOF)". Coupling the
+// two also meant an operator who only needed a proxy for the WATCH PAGE
+// silently forced yt-dlp through the same route.
+//
+// An operator who wants the old coupling writes download.proxy explicitly.
+// The egress ladder (direct → download.proxy → download.fallback_proxies)
+// still honours every configured route.
 func downloadProxyFor(c *config.Config) string {
-	if p := strings.TrimSpace(c.Download.Proxy); p != "" {
-		return p
-	}
-	return strings.TrimSpace(c.Browser.Proxy)
+	return strings.TrimSpace(c.Download.Proxy)
 }
 
 // mediaEgresses lists, in preference order, every egress the media pipeline

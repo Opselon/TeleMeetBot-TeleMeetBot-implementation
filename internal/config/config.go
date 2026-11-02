@@ -74,11 +74,15 @@ type DownloadConfig struct {
 	// AllowTranscode permits ffmpeg to remux containers Chromium cannot
 	// decode (mkv/avi/ogv) into mp4.
 	AllowTranscode bool `yaml:"allow_transcode"`
-	// Proxy is handed to yt-dlp (and the plain-HTTP fetcher). YouTube
-	// bot-blocks datacenter egress, so a VPS download without a proxy fails
-	// with "Sign in to confirm you're not a bot". Empty means a direct
-	// connection. Defaults to browser.proxy when unset, since that is the
-	// egress the operator already had to configure for Chromium.
+	// Proxy is the egress handed to yt-dlp (and the plain-HTTP fetcher).
+	// DIRECT-BY-DEFAULT: empty means a direct connection, which is the
+	// configuration that works on an ordinary network with zero manual setup.
+	// The download ladder tries the direct route FIRST and only reaches this
+	// proxy when the direct route returns an egress-shaped refusal ("Sign in
+	// to confirm you're not a bot", "TLS/SSL connection has been closed"),
+	// so a proxy that YouTube has throttled can no longer take the whole
+	// feature down. This key no longer inherits browser.proxy: an operator
+	// who needs the old coupling writes it here explicitly.
 	Proxy string `yaml:"proxy"`
 	// FallbackProxies are tried, in order, when the primary Proxy fails to
 	// extract a YouTube URL. YouTube rate-limits or hard-blocks a single

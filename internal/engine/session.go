@@ -136,6 +136,14 @@ type Session struct {
 	// handling and panic recovery can be exercised without a browser.
 	acquireRun func() (release func(), err error)
 
+	// openRun is the media-tab half of run()'s second stage. It is nil in
+	// production, where openMedia opens a real Chromium tab; package tests
+	// may substitute a fake so the download-fallback path can be exercised
+	// end to end (fallback decision → media "opened" → Meet stages) without
+	// a browser. The fake must NOT set s.browser: the whole point is that
+	// the session proceeds with no Chromium at all.
+	openRun func() error
+
 	// Playlist queue fields
 	queueMu     sync.RWMutex
 	queue       []QueueItem
@@ -211,6 +219,16 @@ type Status struct {
 	FallbackReason string
 	// PlayMode is the Download & Stream mode of the session.
 	PlayMode string
+	// PlaybackMethod reports how the CURRENT media is actually being played:
+	// "download" (a local file fetched by the media manager), "browser"
+	// (the remote URL loaded directly in Chromium) or "" before playback
+	// starts. It is the honest answer to "did the download work?" — the
+	// mode says what was REQUESTED, the method says what happened. When a
+	// Download-mode session falls back to browser playback after an
+	// extraction failure, PlayMode still reads "download" while
+	// PlaybackMethod reads "browser", so the card can never mistake a
+	// fallback for a successful download.
+	PlaybackMethod string
 	// LocalFile reports the downloaded media backing the session, if any.
 	LocalFile localFileStatus
 	// DownloadProgress reports real-time metrics while media is being fetched.
@@ -307,6 +325,13 @@ func (s *Session) Snapshot() Status {
 	s.mu.RLock()
 	if s.localFile != nil {
 		st.SelectedFormat = s.localFile.selected.Describe()
+		st.PlaybackMethod = "download"
+	} else if s.playMode == mediateam.ModeDownload || s.playMode == mediateam.ModeAuto {
+		// A Download/Auto session with no local file is playing the remote URL
+		// directly — i.e. it fell back to the browser after the download
+		// failed, or the download is still pending. The method must say
+		// "browser" either way: there is no local file.
+		st.PlaybackMethod = "browser"
 	}
 	s.mu.RUnlock()
 	s.queueMu.RUnlock()
@@ -549,14 +574,26 @@ func (s *Session) run() {
 		}
 		if prepareErr != nil {
 			s.log.Warnf("[PIPELINE:session] session %s: download extraction failed (%v), falling back to browser playback", s.ID, prepareErr)
-			s.setDetail("download unavailable, playing via browser: " + truncateStr(prepareErr.Error(), 80))
+			// The detail line is the user-facing diagnostic for the fallback.
+			// It names the failure honestly and states the outcome, so an
+			// operator can tell "the download failed and we recovered" apart
+			// from "the download worked". Never claim success here.
+			s.setDetail("download failed, playing via browser: " + truncateStr(prepareErr.Error(), 80))
 			s.emit(EventState, "download unavailable, streaming via browser")
 		}
 	}
 
 	s.setState(StateJoining, "[2/6] Loading media")
 	s.log.Infof("[PIPELINE:session] [STEP 2/6] session %s: opening media tab (url=%s kind=%s)...", s.ID, s.MediaURL, s.MediaKind)
-	if err := s.openMedia(); err != nil {
+	var err error
+	if s.openRun != nil {
+		// Test seam: the fake stands in for the whole media-tab open, so the
+		// fallback path runs past stage 2 without Chromium.
+		err = s.openRun()
+	} else {
+		err = s.openMedia()
+	}
+	if err != nil {
 		if s.ctx.Err() == nil {
 			s.setError(err)
 		}

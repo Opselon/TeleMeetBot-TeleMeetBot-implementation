@@ -414,3 +414,26 @@ func PlaybackModeDisplay(s string) string {
 func PlaybackModeEmoji(s string) string {
 	return mediateam.NormalizeMode(s).Emoji()
 }
+
+// PlaybackMethod constants report how the current media is ACTUALLY being
+// played, independent of the mode that was requested. A Download-mode session
+// whose extraction failed plays the remote URL in Chromium: its method is
+// "browser", never "download".
+const (
+	PlaybackMethodDownload = "download"
+	PlaybackMethodBrowser  = "browser"
+)
+
+// NormalizePlaybackMethod validates a method string, returning "" (unknown /
+// not yet playing) for anything unrecognised. It never guesses: an empty
+// method stays empty so the card renders nothing instead of a lie.
+func NormalizePlaybackMethod(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case PlaybackMethodDownload, "local", "file":
+		return PlaybackMethodDownload
+	case PlaybackMethodBrowser, "remote", "web":
+		return PlaybackMethodBrowser
+	default:
+		return ""
+	}
+}
