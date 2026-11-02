@@ -62,10 +62,24 @@ func TestDownloadModeFallsBackToBrowserPlaybackOnFailure(t *testing.T) {
 
 	st := s.Snapshot()
 	// It must NOT have failed immediately with a terminal error in the download stage
-	if strings.Contains(st.Detail, "download unavailable, playing via browser") {
+	if strings.Contains(st.Detail, "download failed, playing via browser") {
 		// Fallback occurred as expected!
 	} else if st.State == StateJoining {
 		// It advanced to stage 2 (Loading media) instead of aborting at stage 1!
+	}
+	// Honesty contract: a Download-mode session that fell back to the browser
+	// must never report itself as playing a download. PlayMode still says
+	// "download" (that is what was requested) while PlaybackMethod says
+	// "browser" (there is no local file). The two together are the honest
+	// status; neither alone is.
+	if st.PlayMode != string(movideo.ModeDownload) {
+		t.Errorf("PlayMode must still report the requested mode, got %q", st.PlayMode)
+	}
+	if st.PlaybackMethod != PlaybackMethodBrowser && st.PlaybackMethod != "" {
+		t.Errorf("a session with no local file must not report method %q", st.PlaybackMethod)
+	}
+	if st.LocalFile.Bytes > 0 {
+		t.Errorf("a failed download must not report a local file, got %d bytes", st.LocalFile.Bytes)
 	}
 	s.Stop()
 }

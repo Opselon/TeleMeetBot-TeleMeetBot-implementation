@@ -262,8 +262,19 @@ func sessionCardText(st engine.Status) string {
 	if st.PlayMode != "" {
 		mode := engine.NormalizePlaybackMode(st.PlayMode)
 		sb.WriteString(fmt.Sprintf("%s Mode: <b>%s</b>", engine.PlaybackModeEmoji(mode), esc(engine.PlaybackModeDisplay(mode))))
-		if st.LocalFile.Bytes > 0 {
-			sb.WriteString(fmt.Sprintf(" · 💾 %.1f MiB", float64(st.LocalFile.Bytes)/(1024*1024)))
+		// The method line is the honest verdict on the download: it prints
+		// "💾 via download" only when a local file is actually playing, and
+		// "🌐 via browser" when a Download-mode session is streaming the
+		// remote URL because the fetch failed or is still pending. A
+		// fallback must never render as a successful download.
+		switch engine.NormalizePlaybackMethod(st.PlaybackMethod) {
+		case engine.PlaybackMethodDownload:
+			sb.WriteString(" · 💾 via <b>download</b>")
+			if st.LocalFile.Bytes > 0 {
+				sb.WriteString(fmt.Sprintf(" (%.1f MiB)", float64(st.LocalFile.Bytes)/(1024*1024)))
+			}
+		case engine.PlaybackMethodBrowser:
+			sb.WriteString(" · 🌐 via <b>browser</b>")
 		}
 		sb.WriteString("\n")
 	}

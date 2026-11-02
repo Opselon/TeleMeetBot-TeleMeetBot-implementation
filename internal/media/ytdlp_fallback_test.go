@@ -12,6 +12,11 @@ import (
 // and the session went straight to error. That failure is a per-IP rate limit
 // on the egress, not a verdict on the video: the same URL extracts fine over a
 // different route. A configured fallback must be used.
+// DIRECT FIRST: the ladder must try the unproxied route before any configured
+// proxy, so a zero-config install works and a throttled proxy cannot take the
+// whole feature down. The fake bot-checks the direct route (the exact shape
+// that historically killed a bare-datacenter download), the configured proxy
+// is then used, and only when BOTH lose does the Tor fallback run.
 func TestYTDLPFallsBackToAlternateEgress(t *testing.T) {
 	dir := t.TempDir()
 	opts := DefaultOptions(dir)
@@ -21,11 +26,18 @@ func TestYTDLPFallsBackToAlternateEgress(t *testing.T) {
 	var calls [][]string
 	m := newYtdlpTestManager(t, opts, func(_ context.Context, args []string) ([]byte, []byte, error) {
 		calls = append(calls, append([]string(nil), args...))
-		// First egress: YouTube truncates the innertube response mid-body.
+		// Direct route: YouTube bot-checks the unproxied egress. This must
+		// NOT terminate the download — it is an egress-shaped refusal and the
+		// ladder advances to the configured proxy.
+		if !hasProxy(args, opts.Proxy) && !hasProxy(args, opts.FallbackProxies[0]) {
+			return nil, []byte("ERROR: [youtube] X: Sign in to confirm you're not a bot"), exec.ErrNotFound
+		}
+		// Configured primary proxy: YouTube truncates the innertube response
+		// mid-body.
 		if hasProxy(args, opts.Proxy) {
 			return nil, []byte("ERROR: [youtube] DIjPGEQKbH8: Unable to download API page: 15036 bytes read (caused by <IncompleteRead: 15036 bytes read>); please report this issue"), exec.ErrNotFound
 		}
-		// Second egress: extraction succeeds and the file lands on disk.
+		// Tor fallback: extraction succeeds and the file lands on disk.
 		writeStub(t, dir+"/vid.mp4")
 		return []byte("136,1280,720,30,avc1.64001f,mp4a.40.2,mp4,1500\n"), nil, nil
 	})
@@ -35,15 +47,37 @@ func TestYTDLPFallsBackToAlternateEgress(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Download failed: %v", err)
 	}
-	if len(calls) < 2 {
-		t.Fatalf("expected the fallback egress to be tried, got %d call(s)", len(calls))
+	if len(calls) < 3 {
+		t.Fatalf("expected direct, primary and fallback runs, got %d call(s)", len(calls))
 	}
-	if !hasProxy(calls[0], opts.Proxy) {
-		t.Fatalf("first run must use the primary proxy, argv: %q", calls[0])
+	// Each route may run up to maxExecRetries+1 attempts, so assert on the
+	// DISTINCT routes in order rather than on positional call indices.
+	firstProxy := ""
+	for _, c := range calls {
+		if p := proxyOf(c); p != "" {
+			firstProxy = p
+			break
+		}
+	}
+	if firstProxy != opts.Proxy {
+		t.Fatalf("the first proxied run must use the configured proxy %q, got %q", opts.Proxy, firstProxy)
+	}
+	if hasProxy(calls[0], opts.Proxy) || hasProxy(calls[0], opts.FallbackProxies[0]) {
+		t.Fatalf("first run must be the DIRECT route (no --proxy), argv: %q", calls[0])
 	}
 	if !hasProxy(calls[len(calls)-1], opts.FallbackProxies[0]) {
 		t.Fatalf("last run must use the fallback proxy, argv: %q", calls[len(calls)-1])
 	}
+}
+
+// proxyOf returns the --proxy value carried by argv, or "" for a direct run.
+func proxyOf(argv []string) string {
+	for i, a := range argv {
+		if a == "--proxy" && i+1 < len(argv) {
+			return argv[i+1]
+		}
+	}
+	return ""
 }
 
 // The defect (session s-7d2d1b03): the Tor fallback route extracted the video

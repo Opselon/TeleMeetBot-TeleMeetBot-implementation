@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -419,6 +420,13 @@ func ResolveBrowser(cfg BrowserConfig, log Logger) (string, error) {
 // newPage creates a page and applies the UA override so pages do not see a
 // HeadlessChrome user agent.
 func newPage(b *rod.Browser, cfg BrowserConfig) (*rod.Page, error) {
+	if b == nil {
+		// A nil browser means acquisition was faked or failed silently: say so
+		// instead of dereferencing the pointer and crashing the whole session
+		// goroutine. Every caller surfaces this as a normal stage error, which
+		// is exactly how a missing tab should be reported.
+		return nil, errors.New("no browser available: Chromium was not launched")
+	}
 	p, err := b.Page(proto.TargetCreateTarget{})
 	if err != nil {
 		return nil, err

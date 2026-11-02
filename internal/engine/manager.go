@@ -339,10 +339,12 @@ func (m *Manager) initMediaManager() error {
 	opts.YTDLPPath = m.mediaCfg.DownloadYTDLP
 	opts.FFmpegPath = m.mediaCfg.DownloadFFmpeg
 	opts.Proxy = strings.TrimSpace(m.mediaCfg.DownloadProxy)
-	if opts.Proxy == "" {
-		// Same egress Chromium already uses: one proxy setting is enough.
-		opts.Proxy = strings.TrimSpace(m.browserCfg.Proxy)
-	}
+	// DIRECT-BY-DEFAULT: download egress does NOT inherit browser.proxy. A
+	// proxy that YouTube throttled (rotating free pools are the textbook
+	// case) is what produces "Sign in to confirm you're not a bot" and the
+	// TLS EOF resets; forcing every download through it broke zero-config
+	// installs whose direct route worked. The ladder (direct → download.proxy
+	// → fallback_proxies) still honours every configured route.
 	opts.FallbackProxies = append(opts.FallbackProxies[:0], m.mediaCfg.DownloadFallbacks...)
 	opts.AllowTranscode = m.mediaCfg.DownloadAllowXcode
 	// Anchor the download dir on the data dir when the operator left it
