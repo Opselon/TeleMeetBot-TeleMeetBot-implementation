@@ -122,6 +122,20 @@ type Session struct {
 	// exercised without Chromium.
 	mediaRun func(action string, arg float64) (mediaStatus, error)
 
+	// prepareRun is the browser-free half of the Download & Stream
+	// preparation (fetch the media to disk before the media tab opens). It
+	// is nil in production, where prepareLocalMedia runs the real media
+	// manager; package tests may substitute a fake so run()'s error and
+	// panic handling for the download stage can be exercised without
+	// Chromium and without a download toolchain.
+	prepareRun func() error
+
+	// acquireRun is the browser-acquisition half of run()'s first stage.
+	// It is nil in production, where the manager launches a real Chromium;
+	// package tests may substitute a fake so run()'s state machine, error
+	// handling and panic recovery can be exercised without a browser.
+	acquireRun func() (release func(), err error)
+
 	// Playlist queue fields
 	queueMu     sync.RWMutex
 	queue       []QueueItem
@@ -389,15 +403,53 @@ func (s *Session) meetTab() *rod.Page {
 }
 
 // run is the session state machine.
+//
+// One panic anywhere in the engine goroutine must not silently kill the
+// session: the deferred cleanup() still releases the browser, the pages and
+// the leases, but without a recovery the panic would be swallowed by the
+// goroutine, the session would stay in whatever non-terminal state it was
+// in, its meeting's dedup slot would stay occupied, and nothing would ever
+// tell the operator, the bot card or the dashboard what happened. The
+// recovery turns the panic into an ordinary terminal error (the engine's
+// own event and log surfaces carry the digest), so the meeting can be
+// restarted and the diagnostics are discoverable instead of vanishing.
 func (s *Session) run() {
 	defer s.cleanup()
+	defer func() {
+		if r := recover(); r != nil {
+			err := fmt.Errorf("session crashed: %v", r)
+			if s.ctx != nil && s.ctx.Err() != nil {
+				// A panic during cancellation is usually the cancellation
+				// itself racing a rod call; report it as cancelled, the
+				// honest terminal state for a stop in flight.
+				s.setError(errors.New("session stopped during teardown"))
+			} else {
+				s.setError(err)
+			}
+			// The stack digest goes to the log; stderr still gets the full
+			// trace from the runtime's own panic reporting path.
+			s.log.Errorf("[PIPELINE:session] session %s: %v", s.ID, r)
+		}
+	}()
 	s.setState(StateStarting, "[1/6] Launching Chromium")
 	s.log.Infof("[PIPELINE:session] [STEP 1/6] session %s: starting Chromium browser...", s.ID)
 
 	// Prefer a pre-warmed browser (WarmUp enabled): same isolation guarantees
 	// (fresh profile dir), skips the cold process start. On any warm-path
 	// failure fall back to a cold launch.
-	if b, release, ok := s.mgr.acquireWarmBrowser(); ok {
+	if s.acquireRun != nil {
+		// Test seam: the fake stands in for browser acquisition, so run()'s
+		// state machine, error handling and panic recovery can be exercised
+		// without launching Chromium.
+		release, err := s.acquireRun()
+		if err != nil {
+			if s.ctx.Err() == nil {
+				s.setError(fmt.Errorf("start chromium: %w", err))
+			}
+			return
+		}
+		defer release()
+	} else if b, release, ok := s.mgr.acquireWarmBrowser(); ok {
 		s.log.Infof("[PIPELINE:session] [STEP 1/6] session %s: using warm Chromium (cache warm)", s.ID)
 		defer release()
 		s.mu.Lock()
@@ -444,17 +496,26 @@ func (s *Session) run() {
 	// completion; a failure here is terminal for Download mode, a fallback
 	// signal for Auto, and a no-op for Browser.
 	if mode := s.playMode; mode == mediateam.ModeDownload || mode == mediateam.ModeAuto {
-		if err := s.prepareLocalMedia(); err != nil {
+		prepareErr := s.prepareLocalMedia()
+		if s.prepareRun != nil {
+			// Test seam: the fake stands in for the whole preparation, so
+			// run()'s handling of a failing or panicking download stage can
+			// be exercised without Chromium or a download toolchain.
+			if perr := s.prepareRun(); perr != nil && prepareErr == nil {
+				prepareErr = perr
+			}
+		}
+		if prepareErr != nil {
 			if mode == mediateam.ModeDownload {
 				if s.ctx.Err() == nil {
-					s.setError(err)
+					s.setError(prepareErr)
 				}
 				return
 			}
 			// Auto: keep the browser pipeline, record why. No retry loop —
 			// the browser path is the primary, this was the fallback.
-			s.log.Warnf("[PIPELINE:session] session %s: download fallback failed, continuing with browser playback: %v", s.ID, err)
-			s.setDetail("download unavailable: " + truncateStr(err.Error(), 80))
+			s.log.Warnf("[PIPELINE:session] session %s: download fallback failed, continuing with browser playback: %v", s.ID, prepareErr)
+			s.setDetail("download unavailable: " + truncateStr(prepareErr.Error(), 80))
 		}
 	}
 
@@ -565,12 +626,24 @@ func (s *Session) cleanup() {
 		})
 	}()
 	media, meet := s.mediaTab(), s.meetTab()
-	if media != nil {
-		_ = media.Close()
+	// Each release is independently panic-safe: a page whose CDP connection
+	// is already gone (browser crashed, or a teardown racing this cleanup)
+	// raises through rod instead of returning an error, and one broken page
+	// must not prevent the other page, the queue leases and the done signal
+	// from being released too.
+	closePage := func(p *rod.Page) {
+		if p == nil {
+			return
+		}
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.Warnf("[PIPELINE:session] session %s: page close raised (already gone?): %v", s.ID, r)
+			}
+		}()
+		_ = p.Close()
 	}
-	if meet != nil {
-		_ = meet.Close()
-	}
+	closePage(media)
+	closePage(meet)
 	s.releaseLocalMedia("session stop or close")
 	s.cleanupQueue()
 	s.mu.Lock()
