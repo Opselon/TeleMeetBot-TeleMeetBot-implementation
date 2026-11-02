@@ -21,7 +21,12 @@ type Config struct {
 	ClientSecret       string
 	RedirectURL        string
 	TokenEncryptionKey string
-	Scopes             []string
+	// StateSigningKey optionally pins the OAuth state secret instead of the
+	// generated, persisted one. Empty means "generate and keep it in
+	// <baseDir>/secrets/oauth_state.key". A pinned key survives restarts by
+	// construction and lets a fleet share one secret.
+	StateSigningKey string
+	Scopes          []string
 }
 
 // UserProfile holds the persistent, authenticated Google profile for a Telegram user.

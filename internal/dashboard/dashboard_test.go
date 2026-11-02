@@ -163,6 +163,9 @@ func doJSON(t *testing.T, h http.Handler, method, path string, body interface{},
 		rdr = strings.NewReader("")
 	}
 	r := httptest.NewRequest(method, path, rdr)
+	// The dashboard's own client (ui.go api()) always sends JSON; the CSRF
+	// JSON gate requires it, so the test helper must too.
+	r.Header.Set("Content-Type", "application/json")
 	if cookie != "" {
 		r.AddCookie(&http.Cookie{Name: cookieName, Value: cookie})
 	}

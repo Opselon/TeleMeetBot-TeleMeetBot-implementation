@@ -250,8 +250,11 @@ func (h *harness) message(userID int64, text string) {
 	msg := &tgbotapi.Message{
 		MessageID: 1,
 		From:      &tgbotapi.User{ID: userID},
-		Chat:      &tgbotapi.Chat{ID: userID},
-		Text:      text,
+		// The harness's chats stand in for the operator's private chat,
+		// where every documented flow (and the first-start admin claim)
+		// happens.
+		Chat: &tgbotapi.Chat{ID: userID, Type: "private"},
+		Text: text,
 	}
 	// Telegram marks commands with a bot_command entity; mirror that here.
 	if strings.HasPrefix(text, "/") {
@@ -270,7 +273,7 @@ func (h *harness) callback(userID int64, data string) {
 		From: &tgbotapi.User{ID: userID},
 		Message: &tgbotapi.Message{
 			MessageID: 10,
-			Chat:      &tgbotapi.Chat{ID: userID},
+			Chat:      &tgbotapi.Chat{ID: userID, Type: "private"},
 		},
 		Data: data,
 	})

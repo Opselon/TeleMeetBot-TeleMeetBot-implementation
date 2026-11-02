@@ -214,3 +214,50 @@ func initCipherKey(baseDir, explicitKey string) ([]byte, error) {
 
 	return newKey, nil
 }
+
+// initStateSecret retrieves or generates the persistent 32-byte HMAC key for
+// the OAuth state parameter. It mirrors initCipherKey: an explicit key wins,
+// otherwise the key lives (and survives restarts) next to the cipher key in
+// <baseDir>/secrets/oauth_state.key with 0600 permissions.
+//
+// The state secret signs the state that ties a callback to the user who
+// started the flow. It used to be regenerated per process, so any restart
+// inside the ten-minute flow window failed every in-flight sign-in with
+// "signature verification failed" — the user did everything right and was
+// told the sign-in was broken. The pendingStates map stays in memory on
+// purpose (a state must be single-use and must NOT survive a restart); the
+// signing key is what has to survive.
+func initStateSecret(baseDir, explicitKey string) ([]byte, error) {
+	if strings.TrimSpace(explicitKey) != "" {
+		k := strings.TrimSpace(explicitKey)
+		if decoded, err := hex.DecodeString(k); err == nil && len(decoded) == 32 {
+			return decoded, nil
+		}
+		h := sha256.Sum256([]byte(k))
+		return h[:], nil
+	}
+
+	secretsDir := filepath.Join(baseDir, "secrets")
+	if err := os.MkdirAll(secretsDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create secrets dir: %w", err)
+	}
+
+	keyFile := filepath.Join(secretsDir, "oauth_state.key")
+	if existing, err := os.ReadFile(keyFile); err == nil {
+		if decoded, err := hex.DecodeString(strings.TrimSpace(string(existing))); err == nil && len(decoded) == 32 {
+			return decoded, nil
+		}
+	}
+
+	newKey, err := generateRandomBytes(32)
+	if err != nil {
+		return nil, fmt.Errorf("generate fresh state secret: %w", err)
+	}
+
+	hexKey := hex.EncodeToString(newKey)
+	if err := os.WriteFile(keyFile, []byte(hexKey), 0o600); err != nil {
+		return nil, fmt.Errorf("persist state secret: %w", err)
+	}
+
+	return newKey, nil
+}

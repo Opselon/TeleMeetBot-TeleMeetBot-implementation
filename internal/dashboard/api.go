@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -35,18 +36,121 @@ func securityHeaders(w http.ResponseWriter) {
 		"default-src 'self'; script-src 'self' https://telegram.org 'unsafe-inline'; style-src 'unsafe-inline'; img-src https: data:; connect-src 'self'")
 }
 
+// requireCSRF is the second half of the dashboard's request forgery
+// defense, applied to every state-changing POST. The first half is the
+// SameSite=Strict session cookie; this one is defense in depth for the
+// day that is not enough (a relaxed SameSite, a legacy browser that
+// ignores it, or a same-site injection).
+//
+// Two independent checks, both of which a browser-issued cross-site
+// request cannot pass:
+//
+//  1. Origin/Referer must equal the request's own Host when either is
+//     present. A cross-site form or fetch always carries a foreign Origin.
+//  2. Content-Type must be application/json. The dashboard's own client
+//     sends nothing else on these routes; a plain HTML form cannot set a
+//     Content-Type header at all and defaults to
+//     application/x-www-form-urlencoded or text/plain, so the native form
+//     attack dies here.
+//
+// Both are deliberately stateless: no server-side token store, no second
+// cookie, nothing to expire or synchronize. A SameSite=Strict cookie plus
+// an origin check plus a JSON content-type gate is the standard layered
+// minimum, and it costs the page nothing — api() already sends JSON.
+//
+// requireJSON is a separate option for routes that carry a JSON body, so
+// the login route (which legitimately receives a form-encoded widget
+// payload) can take the origin check alone.
+func (s *Server) requireCSRF(requireJSON bool, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := checkCSRF(r, requireJSON); err != nil {
+			s.log.Warnf("[PIPELINE:dashboard] rejected %s %s: %v", r.Method, r.URL.Path, err)
+			s.writeErr(w, http.StatusForbidden, "%v", err)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// errCSRF names a refusal reason without describing what a legitimate
+// request looked like.
+type errCSRF string
+
+func (e errCSRF) Error() string { return string(e) }
+
+const (
+	csrfOriginMismatch  = errCSRF("origin does not match this host")
+	csrfRefererMismatch = errCSRF("referer does not match this host")
+	csrfContentType     = errCSRF("content-type must be application/json")
+	csrfMethod          = errCSRF("method not allowed")
+)
+
+// checkCSRF reports why a state-changing request must be refused. An
+// absent Origin/Referer (a non-browser client or an older one) is not
+// fatal on its own — but such a client is not running the attacker's
+// form, and the JSON gate still applies to the body-carrying routes.
+func checkCSRF(r *http.Request, requireJSON bool) error {
+	if r.Method != http.MethodPost {
+		return csrfMethod
+	}
+	// 1. Origin when present; some older browsers send only Referer.
+	if origin := r.Header.Get("Origin"); origin != "" {
+		if !sameOrigin(origin, r) {
+			return csrfOriginMismatch
+		}
+	} else if ref := r.Header.Get("Referer"); ref != "" {
+		if !sameOrigin(ref, r) {
+			return csrfRefererMismatch
+		}
+	}
+	// 2. The JSON gate: a plain HTML form cannot set a Content-Type
+	// header, so it lands here.
+	if requireJSON {
+		if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(strings.ToLower(strings.TrimSpace(ct)), "application/json") {
+			return csrfContentType
+		}
+	}
+	return nil
+}
+
+// sameOrigin reports whether the given Origin/Referer header value names
+// the same host the request was actually addressed to. An unparseable or
+// scheme-less value is treated as foreign rather than letting a malformed
+// header bypass the check.
+func sameOrigin(headerValue string, r *http.Request) bool {
+	u, err := url.Parse(strings.TrimSpace(headerValue))
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return strings.EqualFold(u.Host, r.Host)
+}
+
+// guardAPI wraps an authenticated POST route with the CSRF checks (origin
+// and JSON content-type), so no route can be wired with authentication
+// but without forgery protection.
+func (s *Server) guardAPI(next http.HandlerFunc) http.HandlerFunc {
+	return s.requireAuth(s.requireCSRF(true, next))
+}
+
+// guardLogin wraps the login POST with the origin check only: the
+// Telegram widget delivers its signed payload as form data, so a JSON
+// content-type would reject the only legitimate login flow.
+func (s *Server) guardLogin(next http.HandlerFunc) http.HandlerFunc {
+	return s.requireCSRF(false, next)
+}
+
 // handler builds the router (separate for tests).
 func (s *Server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.root)
-	mux.HandleFunc("/api/auth/telegram", s.handleTelegramAuth)
-	mux.HandleFunc("/api/auth/logout", s.requireAuth(s.handleLogout))
+	mux.HandleFunc("/api/auth/telegram", s.guardLogin(s.handleTelegramAuth))
+	mux.HandleFunc("/api/auth/logout", s.guardAPI(s.handleLogout))
 	mux.HandleFunc("/api/state", s.requireAuth(s.handleState))
 	mux.HandleFunc("/api/logs", s.requireAuth(s.handleLogs))
 	mux.HandleFunc("/api/logs/stream", s.requireAuth(s.handleLogStream))
-	mux.HandleFunc("/api/session/start", s.requireAuth(s.handleSessionStart))
-	mux.HandleFunc("/api/session/stop", s.requireAuth(s.handleSessionStop))     // ?id=
-	mux.HandleFunc("/api/session/action", s.requireAuth(s.handleSessionAction)) // ?id= + body
+	mux.HandleFunc("/api/session/start", s.guardAPI(s.handleSessionStart))
+	mux.HandleFunc("/api/session/stop", s.guardAPI(s.handleSessionStop))     // ?id=
+	mux.HandleFunc("/api/session/action", s.guardAPI(s.handleSessionAction)) // ?id= + body
 	return s.withSecurity(mux)
 }
 
@@ -112,6 +216,11 @@ func (s *Server) handleTelegramAuth(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, http.StatusTooManyRequests, "too many failed logins; try again in a few minutes")
 		return
 	}
+	// Reclaim the failure entries of IPs that walked away: unauthenticated
+	// clients come and go in numbers (NAT pools, health checkers, scans),
+	// and GC-ing on the login path keeps the map bounded without a separate
+	// goroutine. Skip it when nothing is recorded.
+	s.gcLoginFailuresIfDue(time.Now())
 	// Accept both a JSON body of the widget fields and query parameters
 	// (the widget's redirect mode delivers them as query params).
 	fields := map[string]string{}

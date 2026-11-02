@@ -135,9 +135,23 @@ func (b *Bot) expireFlows() {
 
 // authorizeUser enforces the admin allow-list (fail-closed) and implements the
 // "first /start claims the bot" onboarding.
-func (b *Bot) authorizeUser(userID, chatID int64) bool {
+//
+// The claim path requires a private chat: a bot added to a group before it is
+// configured would otherwise hand sole admin to whichever member types /start
+// first — the operator would lose the bot before ever opening it. An existing
+// admin is never gated on chat type, so management from a group still works
+// exactly as before.
+func (b *Bot) authorizeUser(userID, chatID int64, chatType string) bool {
 	if b.cfg.IsAdmin(userID) {
 		return true
+	}
+	if chatType != "private" {
+		// The claim is only possible from a private chat; in a group, answer
+		// with the same denial the allow-list would give, so a fresh bot in
+		// a group is not silently uncontrollable and does not leak its
+		// unconfigured state either.
+		_, _ = b.api.Send(chatID, fmt.Sprintf("⛔️ <b>Access denied</b>\n\nYour Telegram ID: <code>%d</code>\nAsk the operator to add it to <code>telegram.admins</code> in the config.\nAdmin claims are only accepted in a private chat — open me directly.", userID), nil)
+		return false
 	}
 	if b.cfg.ClaimAdmin(userID) {
 		if err := b.cfg.Save(b.cfgPath); err != nil {
@@ -160,7 +174,7 @@ func (b *Bot) handleMessage(m *tgbotapi.Message) {
 	chatID := m.Chat.ID
 	text := strings.TrimSpace(m.Text)
 	// Auth first: no commands, no flow input for strangers.
-	if !b.authorizeUser(userID, chatID) {
+	if !b.authorizeUser(userID, chatID, m.Chat.Type) {
 		return
 	}
 
@@ -635,7 +649,7 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 	userID := q.From.ID
 	chatID := q.Message.Chat.ID
 	msgID := q.Message.MessageID
-	if !b.authorizeUser(userID, chatID) {
+	if !b.authorizeUser(userID, chatID, q.Message.Chat.Type) {
 		b.log.Warnf("[PIPELINE:bot] unauthorized callback query from user=%d chat=%d data=%q", userID, chatID, q.Data)
 		return
 	}
