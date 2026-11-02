@@ -2,6 +2,7 @@ package media
 
 import (
 	"testing"
+	"time"
 )
 
 // The registry is the bridge between the download ladder and the media
@@ -70,4 +71,71 @@ func TestEgressBlockedNilManager(t *testing.T) {
 		t.Fatalf("nil manager must report no blocked egresses, got %q", got)
 	}
 	m.MarkEgressBlocked("socks5://172.17.0.1:9050") // must not panic
+}
+
+// A rotating egress (Tor, a rotating residential pool) is the reason the
+// registry must expire: the refusal came from ONE exit circuit, and the next
+// run lands on a different IP that YouTube has never seen. A permanent mark
+// would retire the whole proxy for one transient 403, and every later session
+// would avoid the one route that actually works. After egressBlockTTL the
+// entry must drop out of both the lookup and the snapshot.
+func TestEgressBlockedRegistryExpires(t *testing.T) {
+	dir := t.TempDir()
+	m, err := NewManager(DefaultOptions(dir), &testLog{t: t})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	t.Cleanup(func() { m.Close() })
+
+	now := time.Now()
+	m.egressNow = func() time.Time { return now }
+
+	m.MarkEgressBlocked("socks5://172.17.0.1:9050")
+	if !m.EgressBlocked("socks5://172.17.0.1:9050") {
+		t.Fatal("a fresh mark must report blocked")
+	}
+	if got := len(m.BlockedEgresses()); got != 1 {
+		t.Fatalf("a fresh mark must appear in the snapshot, got %d", got)
+	}
+
+	// Advance past the deadline: the route is usable again.
+	now = now.Add(egressBlockTTL + time.Second)
+	if m.EgressBlocked("socks5://172.17.0.1:9050") {
+		t.Fatal("an expired mark must stop reporting blocked")
+	}
+	if got := len(m.BlockedEgresses()); got != 0 {
+		t.Fatalf("an expired mark must drop out of the snapshot, got %d", got)
+	}
+
+	// Re-marking after expiry is a new entry, not a resurrection of the old
+	// one: a route that lost again gets a fresh deadline.
+	m.MarkEgressBlocked("socks5://172.17.0.1:9050")
+	if !m.EgressBlocked("socks5://172.17.0.1:9050") {
+		t.Fatal("a re-mark after expiry must report blocked again")
+	}
+}
+
+// Repeated refusals inside the TTL window must not extend the deadline
+// silently — the operator's log line should not repeat, and the original
+// deadline stands.
+func TestEgressBlockedRegistryRenamesAreIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	m, err := NewManager(DefaultOptions(dir), &testLog{t: t})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	t.Cleanup(func() { m.Close() })
+
+	now := time.Now()
+	m.egressNow = func() time.Time { return now }
+
+	m.MarkEgressBlocked("http://172.17.0.1:3339")
+	first := m.blockedEgresses["http://172.17.0.1:3339"]
+	m.MarkEgressBlocked("http://172.17.0.1:3339")
+	if got := m.blockedEgresses["http://172.17.0.1:3339"]; got != first {
+		t.Fatalf("a live mark must keep its original deadline: first=%v again=%v", first, got)
+	}
+	if got := len(m.BlockedEgresses()); got != 1 {
+		t.Fatalf("redundant marks must stay one entry, got %d", got)
+	}
 }
