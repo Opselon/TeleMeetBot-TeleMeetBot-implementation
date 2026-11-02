@@ -49,6 +49,9 @@ type Session struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
+	// doneOnce guarantees cleanup() closes done exactly once even when the
+	// session goroutine panics mid-cleanup.
+	doneOnce sync.Once
 
 	mu       sync.RWMutex
 	state    string
@@ -541,7 +544,26 @@ func (s *Session) run() {
 }
 
 // cleanup releases pages and finalises the state.
+//
+// It is the single exit path for run(): every return (error, cancel, watch
+// loop exit) and every panic inside the session goroutine reaches it through
+// the deferred call. It therefore owns closing s.done exactly once — the
+// engine's own Manager.Stop, Manager.StopAll, the dashboard's stop endpoint
+// and the bot's shutdown path all wait on Done(), so a session that never
+// closes it makes every stop time out at its bounded deadline and reports a
+// spurious "did not stop in time" failure.
 func (s *Session) cleanup() {
+	defer func() {
+		// Close done exactly once, after every resource release so a caller
+		// waiting on Done() observes a fully released session. The channel
+		// is nil for hand-built sessions that never went through Start;
+		// closing a nil channel would panic.
+		s.doneOnce.Do(func() {
+			if s.done != nil {
+				close(s.done)
+			}
+		})
+	}()
 	media, meet := s.mediaTab(), s.meetTab()
 	if media != nil {
 		_ = media.Close()
