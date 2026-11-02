@@ -388,6 +388,46 @@ func (s *Session) logger() Logger {
 	return noopLogger{}
 }
 
+// bindPageCtx returns a page whose every CDP call is bound to the session's
+// lifetime. rod's Page.Context returns a bound copy of the page, so a stop
+// issued while the page is inside a Navigate/Eval cancels that call through
+// the context instead of blocking until the page's own Timeout expires.
+//
+// Without this, s.cancel() was a no-op for every rod call in openMedia,
+// openMeet and prepareMedia: a stop mid-join blocked in the dashboard HTTP
+// handler for its full 15 s budget and then reported failure even though the
+// session died a moment later. The probe files (mediaprobe.go:173,
+// watchprobe.go:88) already use this pattern; the session pages are the ones
+// that lacked it.
+//
+// A page that is not a real rod page (the codebase's hand-built sessions use
+// a bare &rod.Page{} as an "open but never evaluated" sentinel, which has no
+// helpersLock and panics inside rod's Context) is returned unchanged, as is
+// a nil page or a session without a context.
+func (s *Session) bindPageCtx(p *rod.Page) *rod.Page {
+	if p == nil || !s.pageBindable(p) {
+		return p
+	}
+	s.mu.RLock()
+	ctx := s.ctx
+	s.mu.RUnlock()
+	if ctx == nil {
+		return p
+	}
+	return p.Context(ctx) // rod returns a bound copy; the original is untouched
+}
+
+// pageBindable reports whether p is a real rod page that Context() can be
+// called on. The minimal check is the helpersLock rod itself takes in
+// Page.Context: a bare zero-value Page (the hand-built sentinel) has none.
+func (s *Session) pageBindable(p *rod.Page) bool {
+	// A zero-value Page cannot be bound: rod's Context dereferences its
+	// helpersLock. Detect it by the same field rod depends on, via the page's
+	// String() representation (a real page renders "<page:id>", the zero
+	// value renders "<page:>").
+	return p.String() != "<page:>"
+}
+
 // mediaTab returns the media page (nil until the tab exists).
 func (s *Session) mediaTab() *rod.Page {
 	s.mu.RLock()
@@ -917,6 +957,11 @@ func (s *Session) openMedia() error {
 	if err != nil {
 		return fmt.Errorf("open media tab: %w", err)
 	}
+	// Bound every CDP call on this page to the session's lifetime: a stop
+	// issued while the media tab is mid-Navigate must cancel the navigation
+	// instead of blocking on the page's own timeout (mediaprobe.go:173 shows
+	// the Context-bound pattern; the session pages historically had none).
+	p = s.bindPageCtx(p)
 	s.mu.Lock()
 	s.mediaPage = p
 	s.mu.Unlock()
@@ -1006,6 +1051,7 @@ func (s *Session) openMeet() error {
 	if err != nil {
 		return fmt.Errorf("open meet tab: %w", err)
 	}
+	p = s.bindPageCtx(p)
 	s.mu.Lock()
 	s.meetPage = p
 	s.mu.Unlock()
