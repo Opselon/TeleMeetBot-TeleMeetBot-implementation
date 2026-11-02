@@ -14,6 +14,7 @@ import (
 
 	"github.com/Opselon/TeleMeetBot/internal/googleauth"
 	"github.com/Opselon/TeleMeetBot/internal/health"
+	"github.com/Opselon/TeleMeetBot/internal/netcap"
 )
 
 // Logger is the minimal logging surface.
@@ -224,11 +225,88 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		"disk_free_gb":    round1(snap.DiskFreeGB),
 		"config":          snap.ConfigPath,
 	}
+	// The network capability block is diagnostics: route identifiers and
+	// outcomes only, never credentials. It is emitted whenever the engine
+	// provided a view, including an all-unknown view (nothing measured yet),
+	// so an operator can tell "not measured" apart from "not reported".
+	if net := networkPayload(snap.Network); net != nil {
+		payload["network"] = net
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	_ = enc.Encode(payload)
+}
+
+// networkPayload renders the network capability summary as JSON. It returns
+// nil only when no route was configured AND nothing was measured — the
+// zero-config install, where a "network" key with an empty ladder would be
+// noise. Every measured route appears with its outcome and a human-readable
+// reason; proxy URLs are identifiers, not credentials.
+func networkPayload(s netcap.Summary) map[string]interface{} {
+	if s.LastProbeAt.IsZero() && len(s.Proxies) == 0 && s.Direct.Outcome == netcap.OutcomeUnknown && s.Recommended.Route == "" {
+		return nil
+	}
+	out := map[string]interface{}{
+		"direct":     outcomePayload(s.Direct),
+		"route":      routePayload(s.Recommended),
+		"probe_at":   s.LastProbeAt.UTC().Format(time.RFC3339),
+		"ladder":     ladderPayload(s),
+		"suppressed": s.Suppressed,
+	}
+	return out
+}
+
+// outcomePayload renders one measured route.
+func outcomePayload(r netcap.Result) map[string]interface{} {
+	m := map[string]interface{}{
+		"outcome": r.Outcome.String(),
+	}
+	if r.HTTPStatus != 0 {
+		m["http_status"] = r.HTTPStatus
+	}
+	if r.Reason != "" {
+		m["reason"] = r.Reason
+	}
+	if !r.CheckedAt.IsZero() {
+		m["checked_at"] = r.CheckedAt.UTC().Format(time.RFC3339)
+	}
+	return m
+}
+
+// routePayload renders the selected playback route.
+func routePayload(rec netcap.Recommendation) map[string]interface{} {
+	m := map[string]interface{}{
+		"via":    "direct",
+		"reason": rec.Reason,
+	}
+	if rec.Route == netcap.RouteProxy {
+		m["via"] = "proxy"
+		m["proxy"] = rec.Proxy
+	}
+	return m
+}
+
+// ladderPayload renders the configured egress ladder in operator order.
+func ladderPayload(s netcap.Summary) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(s.Proxies)+1)
+	out = append(out, map[string]interface{}{
+		"route":   "direct",
+		"outcome": s.Direct.Outcome.String(),
+	})
+	for _, p := range s.Proxies {
+		entry := map[string]interface{}{
+			"route":   "proxy",
+			"proxy":   p.Proxy,
+			"outcome": p.Outcome.String(),
+		}
+		if p.Reason != "" {
+			entry["reason"] = p.Reason
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {

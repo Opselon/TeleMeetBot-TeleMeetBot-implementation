@@ -16,6 +16,7 @@ import (
 	"github.com/Opselon/TeleMeetBot/internal/config"
 	"github.com/Opselon/TeleMeetBot/internal/engine"
 	"github.com/Opselon/TeleMeetBot/internal/health"
+	"github.com/Opselon/TeleMeetBot/internal/netcap"
 )
 
 // Check is one diagnostic result.
@@ -154,6 +155,16 @@ func Doctor(cfg *config.Config, cfgPath string, opts DoctorOptions) Report {
 	} else {
 		netOK, netDetail := checkNetwork()
 		r.Checks = append(r.Checks, Check{"network", netOK, netDetail})
+	}
+
+	// 6b. Adaptive media egress capability. This is the check that answers
+	// "will Download & Stream work on THIS network without configuration?"
+	// Unlike the connectivity check above it measures the media egress
+	// ladder (direct first, then configured proxies) and reports the route
+	// the pipeline would select. It is bounded, never fatal and explicitly
+	// advisory: an unknown outcome is reported as such, never as a failure.
+	if !opts.SkipNetwork {
+		r.Checks = append(r.Checks, checkMediaEgress(cfg, opts))
 	}
 
 	// 7. Real capture probe
@@ -298,7 +309,79 @@ func checkNetwork() (bool, string) {
 	return ok, strings.Join(parts, ", ")
 }
 
-// runCmd runs an installer command showing its output.
+// checkMediaEgress measures the adaptive media egress capability for this
+// configuration: the direct route first, then every configured proxy, in
+// operator order. It is the doctor's answer to "will Download & Stream work
+// on this network without configuration?".
+//
+// The check is deliberately ADVISORY: it never fails the doctor report,
+// because a network the probe cannot classify is not a defect — it is the
+// ordinary state of an unprobed install. It reports the measured outcome of
+// every route and the route the pipeline would select right now. When the
+// capability probe cannot run at all (no network, cancelled context), the
+// check says so plainly instead of claiming anything.
+func checkMediaEgress(cfg *config.Config, opts DoctorOptions) Check {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// The ladder the engine would probe: direct first (zero-config default,
+	// needing no configuration), then the operator's download proxies in
+	// order. browser.proxy joins through FromConfig's MediaEgresses, but the
+	// download ladder is what the capability layer measures.
+	var proxies []string
+	seen := map[string]bool{}
+	add := func(p string) {
+		if p = strings.TrimSpace(p); p != "" && !seen[p] {
+			seen[p] = true
+			proxies = append(proxies, p)
+		}
+	}
+	add(cfg.Download.Proxy)
+	for _, p := range cfg.Download.FallbackProxies {
+		add(p)
+	}
+
+	c := netcap.New()
+	if err := c.WaitProbed(ctx, netcap.NewProbeConfig(strings.TrimSpace(cfg.Download.Proxy), proxies, "doctor")); err != nil {
+		// A cancelled or timed-out probe is a diagnostic result, not a
+		// failure of the install.
+		return Check{Name: "media egress", OK: true, Detail: "capability probe unavailable (" + err.Error() + ")"}
+	}
+	sum := c.Summarize(strings.TrimSpace(cfg.Download.Proxy), proxies)
+	return Check{Name: "media egress", OK: true, Detail: formatEgressSummary(sum)}
+}
+
+// formatEgressSummary renders the capability summary as one doctor line:
+// the ladder, each route's outcome, and the selected route.
+func formatEgressSummary(s netcap.Summary) string {
+	var b strings.Builder
+	b.WriteString("direct=")
+	b.WriteString(s.Direct.Outcome.String())
+	for _, p := range s.Proxies {
+		b.WriteString(", ")
+		b.WriteString(p.Proxy)
+		b.WriteString("=")
+		b.WriteString(p.Outcome.String())
+	}
+	b.WriteString("; route=")
+	switch s.Recommended.Route {
+	case netcap.RouteProxy:
+		b.WriteString("proxy ")
+		b.WriteString(s.Recommended.Proxy)
+	default:
+		b.WriteString("direct")
+	}
+	if s.Recommended.Reason != "" {
+		b.WriteString(" (")
+		b.WriteString(s.Recommended.Reason)
+		b.WriteString(")")
+	}
+	if !s.LastProbeAt.IsZero() {
+		b.WriteString("; probed ")
+		b.WriteString(s.LastProbeAt.Format("15:04:05"))
+	}
+	return b.String()
+}
 func runCmd(name string, args ...string) error {
 	cmd := exec.Command(name, args...)
 	cmd.Stdout = os.Stdout
