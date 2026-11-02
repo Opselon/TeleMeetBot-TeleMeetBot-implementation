@@ -114,6 +114,30 @@ root cause, the impact, the applied correction, and the regression test.
 | Regression test | `internal/dashboard/login_widget_test.go` — `TestLoginPageDefinesOnTelegramAuth` asserts the handler is defined, precedes the widget script, posts to the endpoint, and forwards the signed fields; `TestLoginPageWithoutBotUsername` keeps the disabled path honest. **Verified to fail on the pre-fix code** (definition stripped → `page references onTelegramAuth but never defines window.onTelegramAuth — web login is dead code`). |
 | Status | **Fixed** — commit `17fd47f` |
 
+### M1 — P1: `fileServer.forget()` deleted by path against a token-keyed map
+
+| | |
+| --- | --- |
+| Path | `internal/media/fileserver.go:137-147` — `forget()` |
+| Root cause | The loop is `for tok, p := range f.tokens { if p == path { delete(f.tokens, path) … } }` but the map is `map[token]path`: the deletion used the *value* as the key, so it never matched anything. The dead `_ = filepath.Separator` / `_ = tok` lines are the remains of an earlier incarnation. |
+| Reproduction | Call `serve()` for the same path repeatedly (re-download, replay): every call minted another valid token and none was ever removed. A replaced file answered under every token it had ever been served under; a reaped file left its tokens resolvable. Reconstructed deterministically in the regression test. |
+| Impact | An unbounded memory leak for the process lifetime plus stale tokens that keep granting access to loopback-served media, defeating the registration scheme the file server exists to provide. |
+| Correction | `delete(f.tokens, tok)` uses the loop variable's key. `serve()` is also idempotent per path: re-serving the same path returns the existing URL instead of minting a second token, so repeated downloads cannot grow the map at all. |
+| Regression test | `internal/media/fileserver_test.go` — `TestFileServerForgetRemovesTokens` asserts the map is empty and the URL no longer resolves after `forget`; `TestFileServerServeIsIdempotentPerPath` bounds re-registration and checks `forget` removes only its own path's tokens. **Verified to fail on the pre-fix code** (restoring `delete(f.tokens, path)` leaves the token resolvable and both tests fail). |
+| Status | **Fixed** — commit `08add0b` |
+
+### M2 — P1: orphaned ffmpeg children and unbounded subprocess output
+
+| | |
+| --- | --- |
+| Path | `internal/media/ytdlp.go:505-521` — `runExec` |
+| Root cause | `exec.CommandContext` without a process group: on timeout/cancellation Go SIGKILLs only `cmd.Process` (yt-dlp). yt-dlp's ffmpeg child survives, holding the output file open so the cleanup cannot remove it, and continuing to consume CPU after the fetch has already been reported as failed. Both captured streams were also unbounded (`strings.Builder` with no cap). |
+| Reproduction | Start a Download-mode session on a source whose merge exceeds `opts.Timeout`; after the timeout, `ps -ef \| grep ffmpeg` shows the orphan still writing into the managed directory. Reconstructed in the regression test with a script that spawns a parked child. |
+| Impact | Zombie transcodes on every timed-out or cancelled download — CPU burned, partial files pinned, disk space consumed that the janitor cannot reclaim while the handle is open. A hostile source could also grow the captured output buffers without limit. |
+| Correction | The command runs in its own process group (`SysProcAttr{Setpgid: true}`, the same pattern `internal/localbotapi` already uses), `cmd.Cancel` SIGKILLs the whole group, and platform halves live in `proc_unix.go`/`proc_windows.go` to keep the Windows build path identical to the established one. Both streams are bounded at 4 MiB. |
+| Regression test | `internal/media/exec_kill_test.go` — `TestRunExecKillsProcessGroup` cancels the parent and asserts the spawned child is gone within 5 s (**without the group kill it hangs for the test's full 90 s timeout with the child still alive** — verified by temporarily removing it); `TestBoundedWriterBoundsMemory` pins the output cap; `TestRunExecStillCapturesOutput` keeps normal capture working. |
+| Status | **Fixed** — commit `1ef2d28` |
+
 ---
 
 ## 4. Rejected / unverified claims
@@ -245,3 +269,5 @@ across all 16 packages green.
 | `705ef2d` | E3 — SSRF dial gate + E4 — 30 s download cliff | P0 ×2 | `internal/media/manager.go`, `internal/media/fetch.go`, `internal/media/dialgate_test.go` (new), `internal/media/httptimeout_test.go` (new) |
 | `17fd47f` | E5 — dead web login | P1 | `internal/dashboard/ui.go`, `internal/dashboard/login_widget_test.go` (new) |
 | `ad11a33` | F1 — swallowed panics in the session goroutine | P2 | `internal/engine/session.go`, `internal/engine/panic_test.go` (new) |
+| `08add0b` | M1 — `fileServer.forget` deleted by path against a token-keyed map | P1 | `internal/media/fileserver.go`, `internal/media/fileserver_test.go` (new) |
+| `1ef2d28` | M2 — orphaned ffmpeg children + unbounded subprocess output | P1 | `internal/media/ytdlp.go`, `internal/media/proc_*.go`, `internal/media/exec_kill_test.go` (new) |
