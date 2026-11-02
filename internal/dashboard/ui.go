@@ -131,6 +131,27 @@ func indexHTML(botUsername, publicBaseURL string) string {
 	widget := ""
 	if strings.TrimSpace(botUsername) != "" {
 		widget = fmt.Sprintf(`
+<script>
+// Telegram Login Widget callback. Defined BEFORE the widget script so the
+// iframe's postMessage handshake always finds it: the widget's
+// data-onauth attribute calls window.onTelegramAuth(user), and if it is
+// undefined when the user completes the Telegram authorization the button
+// renders but does nothing and the dashboard is unreachable through the
+// only login flow the page offers. The backend (/api/auth/telegram)
+// verifies the payload's HMAC against the bot token and the admin
+// allow-list; this function only delivers the signed fields.
+window.onTelegramAuth=function(user){
+ if(!user||!user.id){return}
+ var fd=new FormData();
+ ["id","first_name","last_name","username","photo_url","auth_date","hash"].forEach(function(k){
+   if(user[k]!==undefined&&user[k]!==null){fd.append(k,user[k])}
+ });
+ fetch("/api/auth/telegram",{method:"POST",body:fd})
+   .then(function(r){if(!r.ok){return r.json().then(function(e){throw new Error((e&&e.error)||"login failed")})}return r.json()})
+   .then(function(){location.reload()})
+   .catch(function(e){alert("Telegram sign-in failed: "+(e&&e.message||e))});
+};
+</script>
 <script src="https://telegram.org/js/telegram-widget.js?22" data-telegram-login="%s" data-size="large" data-userpic="false" data-radius="8" data-request-access="write" data-onauth="onTelegramAuth(user)"></script>`, botUsername)
 	}
 	baseHint := ""
