@@ -34,7 +34,18 @@ const maxRedirects = 5
 // when the server reports it; otherwise the running count enforces the limit
 // mid-stream.
 func (m *Manager) fetchDirect(ctx context.Context, u *url.URL, id string) (*directResult, error) {
-	if m.opts.HTTPTimeout > 0 {
+	// The whole fetch — headers and body — runs under the download
+	// deadline. This used to be opts.HTTPTimeout (30s), which as a
+	// Client.Timeout covers the *entire response body*: any direct download
+	// slower than 30 seconds died as a client timeout even though the
+	// transfer was perfectly healthy. opts.Timeout is the documented bound
+	// for one whole download (default 10 minutes), the same limit yt-dlp
+	// already runs under.
+	if m.opts.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, m.opts.Timeout)
+		defer cancel()
+	} else if m.opts.HTTPTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, m.opts.HTTPTimeout)
 		defer cancel()
@@ -292,7 +303,13 @@ const defaultUserAgent = "TeleMeetBot/1.0 (media fetcher)"
 // clientWithDialer builds an HTTP client whose dialer enforces the SSRF
 // destination gate at connect time, so even a DNS rebinding between the
 // pre-flight resolve and the actual connect cannot reach a private address.
-func clientWithDialer(timeout time.Duration, gate func(network, addr string) bool) *http.Client {
+//
+// The client carries no whole-body Client.Timeout: the caller owns the
+// download deadline (see fetchDirect, which bounds per-request stages).
+// A client-level timeout would cancel a large but perfectly healthy
+// transfer the moment it exceeded the ceiling, which is exactly what the
+// historical 30s default did to every direct download.
+func clientWithDialer(_ time.Duration, gate func(network, addr string) bool) *http.Client {
 	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -305,7 +322,10 @@ func clientWithDialer(timeout time.Duration, gate func(network, addr string) boo
 		IdleConnTimeout:     60 * time.Second,
 		TLSHandshakeTimeout: 15 * time.Second,
 	}
-	return &http.Client{Timeout: timeout, Transport: tr}
+	// ResponseHeaderTimeout bounds waiting for the server's headers; the
+	// body is streamed under the caller's own deadline.
+	tr.ResponseHeaderTimeout = 60 * time.Second
+	return &http.Client{Transport: tr}
 }
 
 // checkRedirect is installed on the manager's client so every redirect target

@@ -131,9 +131,12 @@ type Manager struct {
 	leases map[string]map[string]time.Time // entryID -> {ownerID: acquiredAt}
 }
 
-// NewManager builds a download manager. opts must be resolved and validated
-// by the caller (see Options.Validate); NewManager itself is forgiving so a
-// misconfiguration degrades to "downloads disabled" rather than a panic.
+// NewManager builds the download manager. The returned manager shares one
+// HTTP client whose dialer enforces the SSRF destination gate at connect
+// time, so even a DNS rebinding between the pre-flight resolve in
+// ValidateResolvedDestination and the actual connect cannot reach a private
+// address: the pre-flight validates the host's current records, the dialer
+// validates the address it actually dials.
 func NewManager(opts Options, log Logger) (*Manager, error) {
 	if log == nil {
 		log = noopLogger{}
@@ -148,12 +151,16 @@ func NewManager(opts Options, log Logger) (*Manager, error) {
 		opts:     opts,
 		log:      log,
 		entries:  newEntryStore(opts.Dir),
-		client:   clientWithDialer(opts.HTTPTimeout, nil),
 		inflight: map[string]struct{}{},
 		leases:   map[string]map[string]time.Time{},
 	}
-	// Load the manifest eagerly: a restart must know what it manages (and
-	// quarantine a corrupt file) before the first download or sweep runs.
+	// SSRF gate at the dial layer: the same IsBlockedIP verdict the pre-flight
+	// resolve applies, enforced again on the address the transport actually
+	// connects to. Passing nil here (the historical behaviour) left the
+	// download connection itself unguarded, so a host whose DNS crossed into
+	// a private range between the resolve and the connect — or a multi-IP
+	// host — could reach the loopback/link-local/cloud-metadata ranges.
+	m.client = clientWithDialer(opts.HTTPTimeout, m.dialGate)
 	if err := m.entries.load(); err != nil {
 		log.Warnf("[PIPELINE:download] cannot read manifest: %v", err)
 	}
@@ -168,6 +175,38 @@ func NewManager(opts Options, log Logger) (*Manager, error) {
 
 // Opts returns a copy of the options.
 func (m *Manager) Opts() Options { return m.opts }
+
+// dialGate is the SSRF verdict for the HTTP client's DialContext: it
+// inspects the address the transport is about to connect to and refuses
+// every blocked range (loopback, link-local, private, cloud metadata,
+// CGNAT, non-routable). It runs on the resolved address at connect time,
+// so it closes the gap between the pre-flight DNS check and the actual
+// connection — including DNS rebinding and hosts with mixed records.
+//
+// A hostname that cannot be parsed as an IP is resolved through m.resolver
+// (the same overridable lookup the pre-flight uses) and every address it
+// yields must be public; an unresolvable or all-private host is refused
+// rather than dialed.
+func (m *Manager) dialGate(network, addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	host = strings.Trim(host, "[]")
+	if ip := net.ParseIP(host); ip != nil {
+		return !IsBlockedIP(ip)
+	}
+	ips, err := m.resolver()(host)
+	if err != nil || len(ips) == 0 {
+		return false
+	}
+	for _, ip := range ips {
+		if ip == nil || IsBlockedIP(ip) {
+			return false
+		}
+	}
+	return true
+}
 
 // SetTTL overrides the expiry lifetime. Test seam: production reads the TTL
 // from the config (default one hour) and never changes it at runtime.
