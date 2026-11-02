@@ -119,6 +119,11 @@ type Manager struct {
 	// in tests.
 	diskFree func(path string) (int64, bool)
 
+	// blockedEgresses records proxies a source refused (see
+	// MarkEgressBlocked). blockedMu guards only this map.
+	blockedMu       sync.Mutex
+	blockedEgresses map[string]time.Time
+
 	mu       sync.Mutex
 	inflight map[string]struct{}
 
@@ -401,6 +406,71 @@ func (m *Manager) deleteEntryNow(entryID, why string) error {
 
 // Enabled reports whether downloads are on.
 func (m *Manager) Enabled() bool { return m.opts.Enabled }
+
+// MarkEgressBlocked records that YouTube (or any source) refused an egress:
+// every failure classified egress-shaped by proxyBlocked() is reported here so
+// the engine can stop launching the media browser through a route the source
+// has already rejected. The set is advisory, not a gate: a "blocked" marking
+// only steers the browser to a different proxy, it never disables the manager.
+// Entries live for the process lifetime and never shrink — the block is per-IP
+// and long-lived, which is exactly the horizon a session runs on. Restarting
+// the process clears it, which is the correct reset point.
+func (m *Manager) MarkEgressBlocked(proxy string) {
+	if m == nil {
+		return
+	}
+	p := strings.TrimSpace(proxy)
+	if p == "" {
+		return
+	}
+	m.blockedMu.Lock()
+	defer m.blockedMu.Unlock()
+	if m.blockedEgresses == nil {
+		m.blockedEgresses = make(map[string]time.Time, 8)
+	}
+	if _, ok := m.blockedEgresses[p]; ok {
+		return
+	}
+	m.blockedEgresses[p] = time.Now()
+	m.log.Warnf("[PIPELINE:download] egress %s marked blocked by the source; the media browser will avoid it", p)
+}
+
+// EgressBlocked reports whether MarkEgressBlocked recorded a refusal for this
+// proxy. The empty string (a direct connection) is never reported as blocked:
+// there is no alternative to "direct", so the caller must keep the answer
+// meaningful rather than failing closed on a nil proxy.
+func (m *Manager) EgressBlocked(proxy string) bool {
+	if m == nil {
+		return false
+	}
+	p := strings.TrimSpace(proxy)
+	if p == "" {
+		return false
+	}
+	m.blockedMu.Lock()
+	defer m.blockedMu.Unlock()
+	_, ok := m.blockedEgresses[p]
+	return ok
+}
+
+// BlockedEgresses returns a snapshot of the proxies the sources refused. The
+// engine uses it to report which routes lost; ordering is not stable. Returns
+// nil when nothing was ever marked, so len()==0 is the reliable emptiness test.
+func (m *Manager) BlockedEgresses() []string {
+	if m == nil {
+		return nil
+	}
+	m.blockedMu.Lock()
+	defer m.blockedMu.Unlock()
+	if len(m.blockedEgresses) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m.blockedEgresses))
+	for p := range m.blockedEgresses {
+		out = append(out, p)
+	}
+	return out
+}
 
 // gateSlot returns the concurrency semaphore, creating it lazily.
 func (m *Manager) gateSlot() chan struct{} {

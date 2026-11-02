@@ -33,6 +33,12 @@ type launchOptions struct {
 	// access to a cache directory with a lock file, and per-session profiles
 	// keep cookies/storage isolated, so the cache never carries meeting state.
 	cacheDir string
+	// mediaProxy overrides opts.browser.Proxy for this launch. It is set by
+	// Manager.applyMediaEgress when the download registry has proof the
+	// configured proxy is rejected by the sources (YouTube bot-checks the
+	// datacenter IP for the watch page exactly as it does for the innertube
+	// API). Empty keeps browser.Proxy as configured.
+	mediaProxy string
 }
 
 // detectProxy finds an explicit or ambient SOCKS5 proxy (e.g. Tor on 127.0.0.1:9050 or
@@ -168,11 +174,33 @@ func launchFlags(cfg BrowserConfig, meet MeetOptions, forMeet bool) []string {
 	return append(out, cfg.ExtraArgs...)
 }
 
+// primaryEgressLabel renders the configured (blocked) primary egress for the
+// launch log line; "direct" when none is configured.
+func primaryEgressLabel(opts launchOptions) string {
+	if p := strings.TrimSpace(opts.browser.Proxy); p != "" {
+		return p
+	}
+	return "direct"
+}
+
+// mediaBrowserCfg returns the browser config whose proxy is the media-tab
+// override when one was chosen (see Manager.applyMediaEgress), otherwise the
+// launch's own config unchanged.
+func mediaBrowserCfg(opts launchOptions) BrowserConfig {
+	cfg := opts.browser
+	if p := strings.TrimSpace(opts.mediaProxy); p != "" {
+		// A proxy that lost to YouTube once must not be handed to the media
+		// tab again; the override replaces it for this whole launch.
+		cfg.Proxy = p
+	}
+	return cfg
+}
+
 // launchBrowser starts Chromium with the flags needed to join Meet and share a
 // tab automatically (no screen picker dialog, no user gesture). The returned
 // close function must be called exactly once (it is idempotent).
 func launchBrowser(opts launchOptions, log Logger) (*rod.Browser, func(), error) {
-	cfg := opts.browser
+	cfg := mediaBrowserCfg(opts)
 	bin, err := ResolveBrowser(cfg, log)
 	if err != nil {
 		return nil, nil, err
@@ -192,7 +220,11 @@ func launchBrowser(opts launchOptions, log Logger) (*rod.Browser, func(), error)
 		l.Proxy(proxy)
 		bypass := "meet.google.com;*.google.com;accounts.google.com;localhost;127.0.0.1;<local>;172.16.0.0/12;10.0.0.0/8;192.168.0.0/16"
 		l.Set("proxy-bypass-list", bypass)
-		log.Infof("[PIPELINE:browser] media proxy enabled: %s (Meet bypassed)", proxy)
+		if opts.mediaProxy != "" {
+			log.Infof("[PIPELINE:browser] media proxy enabled: %s (primary %s was blocked by the source; Meet bypassed)", proxy, primaryEgressLabel(opts))
+		} else {
+			log.Infof("[PIPELINE:browser] media proxy enabled: %s (Meet bypassed)", proxy)
+		}
 	}
 
 	for _, f := range launchFlags(cfg, opts.meet, opts.forMeet) {

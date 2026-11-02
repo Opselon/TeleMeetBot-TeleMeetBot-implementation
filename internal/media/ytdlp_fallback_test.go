@@ -46,6 +46,56 @@ func TestYTDLPFallsBackToAlternateEgress(t *testing.T) {
 	}
 }
 
+// The defect (session s-7d2d1b03): the Tor fallback route extracted the video
+// cleanly, then YouTube rejected the googlevideo body mid-transfer for that
+// circuit ("ERROR: unable to download video data: HTTP Error 403: Forbidden").
+// The historical classifier did not recognise a body-shaped rejection as
+// egress-shaped, so the ladder treated it as a real verdict and the session
+// died. A mid-body 403 is a property of the route (Tor's rotating exit pool
+// lands on throttled IPs), not of the video: the next attempt rotates to a
+// fresh circuit and must be given the chance.
+func TestYTDLPMidBody403AdvancesEgressLadder(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.Proxy = "http://172.17.0.1:3339"
+	opts.FallbackProxies = []string{"socks5://172.17.0.1:9050"}
+
+	var calls [][]string
+	m := newYtdlpTestManager(t, opts, func(_ context.Context, args []string) ([]byte, []byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		// Primary egress: API-level block, advances immediately.
+		if hasProxy(args, opts.Proxy) {
+			return nil, []byte("ERROR: [youtube] Pu-Ny1L8yDU: Sign in to confirm you’re not a bot"), exec.ErrNotFound
+		}
+		// Fallback egress: extraction succeeds (the URL is reachable) but the
+		// media body is rejected for this route. A bounded retry over the same
+		// rotating egress must be possible, and the failure must be classified
+		// egress-shaped so it never reads as a verdict on the video.
+		return nil, []byte("ERROR: unable to download video data: HTTP Error 403: Forbidden"), exec.ErrNotFound
+	})
+
+	if _, err := m.Download(context.Background(), DownloadRequest{
+		URL: "https://www.youtube.com/watch?v=abcdefghijk", Kind: "youtube", ID: "vid",
+	}); err == nil {
+		t.Fatal("expected the download to fail when every egress is rejected")
+	}
+	// The primary was tried, then the fallback: a body 403 must not fail on
+	// the first route while a configured fallback is still untried.
+	if len(calls) < 2 {
+		t.Fatalf("expected the fallback egress to be reached, got %d call(s)", len(calls))
+	}
+	if !hasProxy(calls[len(calls)-1], opts.FallbackProxies[0]) {
+		t.Fatalf("the last attempt must run over the fallback egress, argv: %q", calls[len(calls)-1])
+	}
+	// The registry must now carry BOTH routes so the media browser does not
+	// open the YouTube tab through an egress the source just rejected.
+	for _, p := range []string{opts.Proxy, opts.FallbackProxies[0]} {
+		if !m.EgressBlocked(p) {
+			t.Errorf("egress %s must be marked blocked after a source rejection", p)
+		}
+	}
+}
+
 // A genuine extractor verdict ("Requested format is not available") says the
 // URL is the problem, not the route. It must NOT burn the fallbacks: three
 // slow runs over proxies that cannot help are worse than one fast failure.
@@ -82,6 +132,11 @@ func TestProxyBlockedClassifier(t *testing.T) {
 		"ERROR: [youtube] DIjPGEQKbH8: Unable to download API page: HTTP Error 429: Too Many Requests",
 		"ERROR: [youtube] Pu-Ny1L8yDU: Unable to download API page: TLS/SSL connection has been closed (EOF) (_ssl.c:992) (caused by SSLError('TLS/SSL connection has been closed (EOF) (_ssl.c:992)'))",
 		"WARNING: [youtube] Unable to download webpage: TLS/SSL connection has been closed (EOF)",
+		// A mid-body rejection: YouTube throttles the googlevideo transfer for
+		// this exact egress ("unable to download video data: HTTP Error 403").
+		// That is a property of the route, not of the video, so the egress
+		// ladder must treat it as egress-shaped and advance.
+		"ERROR: [youtube] Pu-Ny1L8yDU: unable to download video data: HTTP Error 403: Forbidden",
 	}
 	for _, s := range blocked {
 		if !proxyBlocked([]byte(s)) {
