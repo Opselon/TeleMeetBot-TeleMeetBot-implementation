@@ -28,7 +28,13 @@ func New(baseDir string, cfg Config, log Logger) (*Manager, error) {
 		return nil, fmt.Errorf("initialize token cipher key: %w", err)
 	}
 
-	stateSecret, err := generateRandomBytes(32)
+	// The state secret signs the OAuth state parameter across the whole
+	// redirect flow. It must survive a restart: the flow takes up to ten
+	// minutes (stateTTL) and a deploy or a crash inside that window would
+	// otherwise fail every in-flight sign-in with "signature verification
+	// failed" — the user did everything right and is told the sign-in is
+	// broken. Persist it beside the cipher key the same way.
+	stateSecret, err := initStateSecret(baseDir, cfg.StateSigningKey)
 	if err != nil {
 		return nil, fmt.Errorf("initialize state secret: %w", err)
 	}
