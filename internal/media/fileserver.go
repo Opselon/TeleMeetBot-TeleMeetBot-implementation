@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +26,10 @@ type fileServer struct {
 func newFileServer() *fileServer { return &fileServer{tokens: map[string]string{}} }
 
 // serve registers a file and returns its loopback URL.
+//
+// Registration is idempotent per path: re-serving the same path returns the
+// existing URL instead of minting a second token, so repeated downloads or
+// replays of the same file cannot grow the token map without bound.
 func (f *fileServer) serve(e Entry) string {
 	if f == nil {
 		return ""
@@ -35,10 +38,15 @@ func (f *fileServer) serve(e Entry) string {
 	if err != nil {
 		return ""
 	}
-	token := newToken()
 	f.mu.Lock()
+	defer f.mu.Unlock()
+	for tok, p := range f.tokens {
+		if p == e.Path {
+			return base + "/d/" + tok
+		}
+	}
+	token := newToken()
 	f.tokens[token] = e.Path
-	f.mu.Unlock()
 	return base + "/d/" + token
 }
 
@@ -121,7 +129,10 @@ func (f *fileServer) pathOf(url string) string {
 	return path
 }
 
-// forget drops a file registration (used when a file is reaped).
+// forget drops every token registration for a path (used when a file is
+// reaped). The map is keyed by token, so the deletion must use the loop
+// variable's key, not the path: deleting by path was a silent no-op that left
+// stale tokens resolvable and grew the map for the process lifetime.
 func (f *fileServer) forget(path string) {
 	if f == nil {
 		return
@@ -130,9 +141,7 @@ func (f *fileServer) forget(path string) {
 	defer f.mu.Unlock()
 	for tok, p := range f.tokens {
 		if p == path {
-			delete(f.tokens, path)
-			_ = filepath.Separator
-			_ = tok
+			delete(f.tokens, tok)
 		}
 	}
 }
