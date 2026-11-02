@@ -17,6 +17,29 @@ func downloadProxyFor(c *config.Config) string {
 	return strings.TrimSpace(c.Browser.Proxy)
 }
 
+// mediaEgresses lists, in preference order, every egress the media pipeline
+// may use: the browser proxy first (Chromium's own route, which the download
+// also defaults to), then each configured download fallback. The engine uses
+// it to pick a media-tab route the source has not already rejected — YouTube
+// bot-blocks a datacenter IP for BOTH the innertube API and the watch page,
+// so a proxy that lost once must not be handed to the media browser again.
+func mediaEgresses(c *config.Config) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(p string) {
+		if p = strings.TrimSpace(p); p != "" && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	add(c.Browser.Proxy)
+	add(c.Download.Proxy)
+	for _, p := range c.Download.FallbackProxies {
+		add(p)
+	}
+	return out
+}
+
 // downloadFallbacksFor resolves the fallback egresses for media downloads.
 // An explicit download.fallback_proxies list wins; otherwise the historical
 // single-proxy behaviour is kept (no fallbacks).
@@ -72,6 +95,7 @@ func FromConfig(c *config.Config) (BrowserConfig, MediaOptions, MeetOptions) {
 		DownloadAllowXcode: c.Download.AllowTranscode,
 		DownloadProxy:      downloadProxyFor(c),
 		DownloadFallbacks:  downloadFallbacksFor(c),
+		MediaEgresses:      mediaEgresses(c),
 
 		// The anchor for a relative download dir, so an operator writing
 		// "downloads" gets <data_dir>/downloads rather than a CWD-relative

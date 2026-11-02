@@ -53,6 +53,7 @@ func proxyBlocked(stderr []byte) bool {
 		strings.Contains(t, "http error 403") ||
 		strings.Contains(t, "unable to download api page") ||
 		strings.Contains(t, "unable to download webpage") ||
+		strings.Contains(t, "unable to download video data") ||
 		strings.Contains(t, "tls/ssl connection has been closed") ||
 		strings.Contains(t, "connection has been closed") ||
 		strings.Contains(t, "connection reset") ||
@@ -319,11 +320,17 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality, subLang string
 			}
 		}
 		if ri+1 < len(routes) && proxyBlocked(stderr) {
+			m.MarkEgressBlocked(proxy)
 			m.log.Warnf("[PIPELINE:download] %s: egress %s blocked by the source (%s); trying next egress %s", id, label, truncateForLog(strings.TrimSpace(string(stderr)), 120), routes[ri+1])
 			continue
 		}
 		// A real verdict (or a route error that is not egress-shaped): the
-		// remaining fallbacks cannot help either.
+		// remaining fallbacks cannot help either. Still record an egress-shaped
+		// final failure: the engine's media browser consults this registry to
+		// avoid opening the YouTube tab through the very route that just lost.
+		if proxyBlocked(stderr) {
+			m.MarkEgressBlocked(proxy)
+		}
 		break
 	}
 	if last == nil {

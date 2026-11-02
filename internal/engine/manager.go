@@ -86,6 +86,14 @@ type MediaOptions struct {
 	// bytes read (caused by <IncompleteRead>)"). Empty keeps the historical
 	// single-proxy behaviour.
 	DownloadFallbacks []string
+	// MediaEgresses is the ordered list of every egress the media pipeline
+	// may use (browser proxy first, then the download fallbacks). The engine
+	// consumes it to launch the media browser on a route the source has not
+	// already rejected: YouTube's bot check is per-IP and applies to the
+	// watch page as much as to the innertube API, so a proxy that lost once
+	// must not be given to the media tab again. Empty means the configured
+	// browser proxy is the only route (the historical behaviour).
+	MediaEgresses []string
 	// DownloadBaseDir is the anchor for a relative DownloadDir (the config's
 	// paths.data_dir). Empty means "resolve against the process CWD".
 	DownloadBaseDir string
@@ -602,6 +610,7 @@ func (m *Manager) pruneFinishedLocked() {
 // acquireBrowser returns a browser for a session plus a release function.
 func (m *Manager) acquireBrowser() (*rod.Browser, func(), error) {
 	opts := launchOptions{browser: m.browserCfg, meet: m.meetCfg, forMeet: true}
+	m.applyMediaEgress(&opts)
 
 	if !m.browserCfg.PerSession {
 		m.sharedMu.Lock()
@@ -700,6 +709,38 @@ func (m *Manager) launch(opts launchOptions) (*rod.Browser, func(), error) {
 	return launchBrowser(opts, m.log)
 }
 
+// applyMediaEgress chooses the egress this browser's media tab will use. The
+// configured browser proxy is preferred (it is the route the operator picked
+// and the one the download manager defaults to), but when the download
+// registry has proof that route is rejected by the sources — YouTube
+// bot-checks a datacenter IP for the watch page exactly as hard as it does
+// for the innertube API, which is what turns a Download & Stream fallback into
+// a dead browser tab — the first non-blocked entry of MediaEgresses takes
+// over. When every configured egress is blocked the configured one is kept:
+// the registry is advisory, never a reason to fail a launch.
+func (m *Manager) applyMediaEgress(opts *launchOptions) {
+	configured := strings.TrimSpace(opts.browser.Proxy)
+	if configured == "" {
+		return // direct connection: there is no alternative to "direct"
+	}
+	if m.mediaMgr == nil || !m.mediaMgr.EgressBlocked(configured) {
+		return
+	}
+	for _, p := range m.mediaCfg.MediaEgresses {
+		if p == configured {
+			continue
+		}
+		if !m.mediaMgr.EgressBlocked(p) {
+			opts.mediaProxy = p
+			m.log.Warnf("[PIPELINE:browser] primary media egress %s is blocked by the source; launching the media browser via %s instead", configured, p)
+			return
+		}
+	}
+	// Every configured egress lost at least once: keep the configured one so
+	// the session still has a route, and say so instead of failing silently.
+	m.log.Warnf("[PIPELINE:browser] primary media egress %s is blocked and no unblocked alternative is configured; keeping it", configured)
+}
+
 // WarmUp pre-launches one idle Chromium so the next session skips the cold
 // start. The warm browser is only a started process with a blank page: no
 // meeting is joined, no camera/mic is enabled, nothing is presented. It is
@@ -716,6 +757,7 @@ func (m *Manager) WarmUp() error {
 		return fmt.Errorf("warm-up profile: %w", err)
 	}
 	opts := launchOptions{browser: m.browserCfg, meet: m.meetCfg, forMeet: true, userData: dir}
+	m.applyMediaEgress(&opts)
 	if m.cachePool != nil {
 		cacheDir, err := m.cachePool.acquire()
 		if err == nil {
