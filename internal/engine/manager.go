@@ -247,6 +247,12 @@ type Manager struct {
 	warmMu       sync.Mutex
 	warm         *warmBrowser
 	warmDisabled bool
+
+	// launchFn launches one browser. It is nil in production, where
+	// launchBrowser runs the real rod launcher; package tests substitute a
+	// fake so the browser lifecycle (the shared-browser refcount, the cache
+	// pool handoff, the close semantics) can be exercised without Chromium.
+	launchFn func(opts launchOptions) (*rod.Browser, func(), error)
 }
 
 // warmBrowser holds a pre-launched, idle browser waiting for a session.
@@ -608,7 +614,7 @@ func (m *Manager) acquireBrowser() (*rod.Browser, func(), error) {
 					opts.cacheDir = d
 				}
 			}
-			b, closeFn, err := launchBrowser(opts, m.log)
+			b, closeFn, err := m.launch(opts)
 			if err != nil {
 				if cacheDir != "" && m.cachePool != nil {
 					m.cachePool.release(cacheDir)
@@ -626,16 +632,23 @@ func (m *Manager) acquireBrowser() (*rod.Browser, func(), error) {
 			}
 		}
 		m.shared.refs++
-		refs := m.shared.refs
 		var once sync.Once
 		return m.shared.browser, func() {
 			once.Do(func() {
 				m.sharedMu.Lock()
 				defer m.sharedMu.Unlock()
-				refs--
-				if refs <= 0 && m.shared != nil {
-					m.shared.close()
-					m.shared = nil
+				// Decrement the STRUCT field, not a per-acquire copy. The
+				// historical code snapshotted refs into a local and decremented
+				// the copy, so the first acquirer of a shared browser (whose
+				// captured value is 1) closed it while later sessions were
+				// still using it, and the struct counter never reached zero at
+				// all — every release after that under-counted.
+				if m.shared != nil {
+					m.shared.refs--
+					if m.shared.refs <= 0 {
+						m.shared.close()
+						m.shared = nil
+					}
 				}
 			})
 		}, nil
@@ -671,12 +684,20 @@ func (m *Manager) acquireBrowser() (*rod.Browser, func(), error) {
 		}
 	}
 
-	b, closeFn, err := launchBrowser(opts, m.log)
+	b, closeFn, err := m.launch(opts)
 	if err != nil {
 		return nil, nil, err
 	}
 	var once sync.Once
 	return b, func() { once.Do(closeFn) }, nil
+}
+
+// launch runs the real browser launcher unless a test seam replaced it.
+func (m *Manager) launch(opts launchOptions) (*rod.Browser, func(), error) {
+	if m.launchFn != nil {
+		return m.launchFn(opts)
+	}
+	return launchBrowser(opts, m.log)
 }
 
 // WarmUp pre-launches one idle Chromium so the next session skips the cold
