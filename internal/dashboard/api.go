@@ -216,6 +216,11 @@ func (s *Server) handleTelegramAuth(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, http.StatusTooManyRequests, "too many failed logins; try again in a few minutes")
 		return
 	}
+	// Reclaim the failure entries of IPs that walked away: unauthenticated
+	// clients come and go in numbers (NAT pools, health checkers, scans),
+	// and GC-ing on the login path keeps the map bounded without a separate
+	// goroutine. Skip it when nothing is recorded.
+	s.gcLoginFailuresIfDue(time.Now())
 	// Accept both a JSON body of the widget fields and query parameters
 	// (the widget's redirect mode delivers them as query params).
 	fields := map[string]string{}

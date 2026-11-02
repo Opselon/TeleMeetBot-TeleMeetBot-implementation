@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -107,6 +108,10 @@ type Server struct {
 
 	mu       sync.Mutex
 	failures map[string][]time.Time // ip -> failed attempts
+	// lastLoginGC bounds the login-path sweep (gcLoginFailuresIfDue);
+	// lastEvict amortizes the hard-cap evictions in recordLoginFailure.
+	lastLoginGC time.Time
+	lastEvict   time.Time
 
 	server *http.Server
 }
@@ -257,6 +262,15 @@ func (s *Server) clientIP(r *http.Request) string {
 	return host
 }
 
+// maxLoginFailureIPs is the hard cap on tracked source addresses (see
+// recordLoginFailure). loginGCEvery bounds the reclaim sweeps: both exist so
+// an unauthenticated rotation of source IPs cannot grow the map without
+// limit, and so the sweep is never charged to a single login attempt.
+const (
+	maxLoginFailureIPs = 4096
+	loginGCEvery       = 5 * time.Minute
+)
+
 // loginAllowed reports whether this IP may still attempt a login.
 func (s *Server) loginAllowed(ip string) bool {
 	s.mu.Lock()
@@ -273,9 +287,79 @@ func (s *Server) loginAllowed(ip string) bool {
 }
 
 func (s *Server) recordLoginFailure(ip string) {
+	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.failures[ip] = append(s.failures[ip], time.Now())
+	s.failures[ip] = append(s.failures[ip], now)
+	// A hard cap against address rotation: an unauthenticated client can
+	// manufacture distinct source IPs, and the map is the only state that
+	// grows with them. The eviction is amortized (see loginGCEvery), so a
+	// login storm cannot make the hot path O(n^2); the sweep that follows
+	// brings the map back under the cap.
+	if len(s.failures) > maxLoginFailureIPs && now.Sub(s.lastEvict) >= loginGCEvery {
+		s.evictOldestFailuresLocked(now)
+	}
+}
+
+// gcLoginFailuresIfDue runs the reclaims at most once per loginGCEvery, which
+// is what keeps the map bounded on an unattended process without paying O(n)
+// on every login attempt.
+func (s *Server) gcLoginFailuresIfDue(now time.Time) {
+	s.mu.Lock()
+	size := len(s.failures)
+	if size == 0 || now.Sub(s.lastLoginGC) < loginGCEvery {
+		s.mu.Unlock()
+		return
+	}
+	s.lastLoginGC = now
+	over := size > maxLoginFailureIPs
+	s.mu.Unlock()
+
+	s.gcLoginFailures(now)
+	if over {
+		s.mu.Lock()
+		s.evictOldestFailuresLocked(now)
+		s.mu.Unlock()
+	}
+}
+
+// gcLoginFailures prunes IPs with no attempt inside the window so the map
+// cannot grow forever with one-off source addresses. Every entry the guard
+// keeps is still limiting; entries from IPs that walked away are reclaimed.
+// This mirrors internal/bot's rateLimiter.gc.
+func (s *Server) gcLoginFailures(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for ip, ts := range s.failures {
+		if len(ts) == 0 || now.Sub(ts[len(ts)-1]) > loginFailureWindow {
+			delete(s.failures, ip)
+		}
+	}
+}
+
+// evictOldestFailuresLocked drops the oldest entries past the hard cap. An
+// eviction can only relieve a limit that has already expired: it removes the
+// entries whose most recent attempt is the oldest, and an IP still inside its
+// window is never the oldest one removed. Caller holds s.mu.
+func (s *Server) evictOldestFailuresLocked(now time.Time) {
+	if len(s.failures) <= maxLoginFailureIPs {
+		return
+	}
+	s.lastEvict = now
+	type entry struct {
+		ip string
+		at time.Time
+	}
+	all := make([]entry, 0, len(s.failures))
+	for ip, ts := range s.failures {
+		if len(ts) > 0 {
+			all = append(all, entry{ip: ip, at: ts[len(ts)-1]})
+		}
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].at.Before(all[j].at) })
+	for _, e := range all[:len(all)-maxLoginFailureIPs] {
+		delete(s.failures, e.ip)
+	}
 }
 
 // Start listens until ctx is cancelled, then shuts down gracefully.
