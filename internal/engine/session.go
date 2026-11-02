@@ -280,6 +280,13 @@ func (s *Session) Snapshot() Status {
 	st.Shuffle = s.shuffle
 	st.AutoAdvance = s.autoAdvance
 	st.Observed = s.observedQ
+	// captionPolicy/captionLang/qualityPolicy are written under queueMu
+	// (applyItemCaptionLocked/applyItemQualityLocked from Next/Previous),
+	// so they must be read inside the same critical section — reading them
+	// after the unlock above raced those writes (race detector: queue_test
+	// TestSessionQueueConcurrency).
+	st.CaptionPolicy = NormalizeCaptionPolicy(s.captionPolicy)
+	st.CaptionLang = s.captionLang
 	s.mu.RLock()
 	if s.localFile != nil {
 		st.SelectedFormat = s.localFile.selected.Describe()
@@ -291,8 +298,6 @@ func (s *Session) Snapshot() Status {
 	st.HasPrevious = st.QueueIndex > 0
 
 	st.LocalFile = s.localFileStatus()
-	st.CaptionPolicy = NormalizeCaptionPolicy(s.captionPolicy)
-	st.CaptionLang = s.captionLang
 	st.Caption = s.captionState
 	return st
 }
