@@ -6,6 +6,8 @@ import (
 	"os"
 	"runtime"
 	"time"
+
+	"github.com/Opselon/TeleMeetBot/internal/netcap"
 )
 
 // Snapshot is a point-in-time view of the service.
@@ -22,6 +24,12 @@ type Snapshot struct {
 	DiskFreeGB  float64
 	DiskTotalGB float64
 	PID         int
+	// Network reports the adaptive network capability view: which egress
+	// routes were measured, what the measurements said, and which route the
+	// media pipeline should select. It is deliberately a value type with no
+	// credentials — only route identifiers and outcomes — so the public
+	// health endpoint can carry it safely. Zero value = not measured.
+	Network netcap.Summary
 }
 
 // DiskUsage reports free/total space on the config data filesystem.

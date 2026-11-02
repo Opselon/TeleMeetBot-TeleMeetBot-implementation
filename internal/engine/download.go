@@ -246,6 +246,14 @@ func (s *Session) runDownloadWithID(ctx context.Context, mgr *mediateam.Manager,
 		SubLang: s.captionLangForDownload(),
 	})
 	if err != nil {
+		// A download failure the media manager classified as egress-shaped is
+		// ground truth the capability layer cannot see from a cheap probe:
+		// the probe measures the transport, this measured the source's actual
+		// refusal. Invalidate the cached capability so the next demand
+		// re-probes instead of trusting a now-stale verdict. This never
+		// fails the download, never blocks, and is a no-op when the manager
+		// has no blocked-egress evidence.
+		s.invalidateNetworkCapability()
 		return nil, err
 	}
 	return &downloadResult{
@@ -259,6 +267,29 @@ func (s *Session) runDownloadWithID(ctx context.Context, mgr *mediateam.Manager,
 		Selected:    res.Selected,
 		Subtitle:    res.Subtitle,
 	}, nil
+}
+
+// invalidateNetworkCapability drops the cached network capability when the
+// download pipeline gathered evidence a probe could not. It is safe to call
+// on every download failure: when no egress was marked blocked it is a
+// no-op, and when the capability is absent (tests) it is still a no-op.
+func (s *Session) invalidateNetworkCapability() {
+	// The session reaches the shared capability through the manager that
+	// owns it; nil-safe by construction.
+	if s.mgr == nil {
+		return
+	}
+	nc := s.mgr.Netcap()
+	if nc == nil {
+		return
+	}
+	// Only an egress-shaped failure invalidates: a genuine extractor verdict
+	// ("unsupported URL", "format unavailable") says nothing about the
+	// network and must not cost a re-probe.
+	if mm := s.mgr.MediaManager(); mm != nil && len(mm.BlockedEgresses()) == 0 {
+		return
+	}
+	nc.Invalidate()
 }
 
 // releaseLocalMedia removes the session's active downloaded media and frees

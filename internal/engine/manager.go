@@ -23,6 +23,7 @@ import (
 	"github.com/go-rod/rod/lib/proto"
 
 	mediateam "github.com/Opselon/TeleMeetBot/internal/media"
+	"github.com/Opselon/TeleMeetBot/internal/netcap"
 )
 
 // BrowserConfig is the browser subset of the app configuration.
@@ -261,6 +262,15 @@ type Manager struct {
 	// fake so the browser lifecycle (the shared-browser refcount, the cache
 	// pool handoff, the close semantics) can be exercised without Chromium.
 	launchFn func(opts launchOptions) (*rod.Browser, func(), error)
+
+	// netcap is the adaptive network capability layer: it answers "which
+	// egress works right now" with short-lived, cached, concurrency-safe
+	// probes, so a download can prefer the direct route and fall back to a
+	// configured proxy only when a classified failure justifies it. It can
+	// never block or fail a session: every question it is asked returns
+	// immediately, and an unknown answer always means "no evidence", never
+	// "don't try".
+	netcap *netcap.Capability
 }
 
 // warmBrowser holds a pre-launched, idle browser waiting for a session.
@@ -296,6 +306,7 @@ func NewManager(browser BrowserConfig, media MediaOptions, meet MeetOptions, log
 		events:      make(chan Event, 128),
 		sessions:    map[SessionID]*Session{},
 		maxSessions: 1,
+		netcap:      netcap.New(),
 	}
 	if dir := strings.TrimSpace(browser.CacheDir); dir != "" {
 		mgr.cachePool = newBrowserCachePool(dir)
@@ -372,6 +383,61 @@ func (m *Manager) SetMediaTTLForTest(d time.Duration) {
 
 // MediaManager returns the Download & Stream manager (nil when disabled).
 func (m *Manager) MediaManager() *mediateam.Manager { return m.mediaMgr }
+
+// Netcap returns the shared network capability layer. It is never nil for a
+// manager built by NewManager. Callers may ask it questions at any time;
+// every question returns immediately and never blocks meeting startup.
+func (m *Manager) Netcap() *netcap.Capability { return m.netcap }
+
+// netcapProxies returns the configured egress ladder the capability layer
+// should probe: the download proxies in operator order. The direct route is
+// always probed and always first, independent of this list (the direct leg
+// is the zero-config default and needs no configuration to be measured).
+func (m *Manager) netcapProxies() []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(p string) {
+		if p = strings.TrimSpace(p); p != "" && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	add(m.mediaCfg.DownloadProxy)
+	for _, p := range m.mediaCfg.DownloadFallbacks {
+		add(p)
+	}
+	return out
+}
+
+// netcapPreferred returns the egress an explicit operator preference would
+// pick: the configured download proxy. Empty means "no preference, let the
+// capability layer measure and decide".
+func (m *Manager) netcapPreferred() string {
+	return strings.TrimSpace(m.mediaCfg.DownloadProxy)
+}
+
+// ObserveNetwork is the non-blocking entry point a session or background
+// sweep calls when a fresh capability reading would be useful. It starts a
+// probe when none ran recently and returns immediately — the answer arrives
+// asynchronously and is served from the cache. Meeting startup must never
+// wait on it.
+func (m *Manager) ObserveNetwork(ctx context.Context) {
+	if m.netcap == nil {
+		return
+	}
+	m.netcap.EnsureProbed(ctx, netcap.NewProbeConfig(m.netcapPreferred(), m.netcapProxies(), "demand"))
+}
+
+// NetworkSummary is the diagnostic view exposed through /healthz and the
+// doctor: the capability ladder, the selected route, and when it was last
+// measured. It reports route identifiers and outcomes only — never
+// credentials.
+func (m *Manager) NetworkSummary() netcap.Summary {
+	if m.netcap == nil {
+		return netcap.Summary{}
+	}
+	return m.netcap.Summarize(m.netcapPreferred(), m.netcapProxies())
+}
 
 // SetMaxSessions caps concurrent sessions. The engine enforces the limit as a
 // hard fence so a session cannot be started past it even if a caller forgets to
@@ -552,6 +618,14 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (*Session, error)
 	if req.AutoPlay != nil {
 		s.autoAdvance = *req.AutoPlay
 	}
+
+	// Kick off a (non-blocking, cached, cooldown-bounded) measurement of the
+	// media egress capability. This never delays the meeting: it only seeds
+	// the cache so a later download decision has a fresh reading. It must
+	// run BEFORE the session goroutine starts, not inside it, so the probe
+	// context is the request's own and is never cancelled by a session
+	// teardown.
+	m.ObserveNetwork(ctx)
 
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	s.done = make(chan struct{})

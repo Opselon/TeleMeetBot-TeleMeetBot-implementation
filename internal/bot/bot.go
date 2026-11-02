@@ -18,6 +18,7 @@ import (
 	"github.com/Opselon/TeleMeetBot/internal/googleauth"
 	"github.com/Opselon/TeleMeetBot/internal/health"
 	"github.com/Opselon/TeleMeetBot/internal/media"
+	"github.com/Opselon/TeleMeetBot/internal/netcap"
 	"github.com/Opselon/TeleMeetBot/internal/store"
 	"github.com/Opselon/TeleMeetBot/internal/userstate"
 )
@@ -449,6 +450,13 @@ func (b *Bot) Snapshot() health.Snapshot {
 		DataDir:     dataDir,
 		DiskFreeGB:  freeGB,
 		DiskTotalGB: totalGB,
+	}
+	// The network capability view is advisory diagnostics: it never gates
+	// anything, and an engine that cannot provide it (a test fake) simply
+	// reports nothing rather than failing the health surface.
+	type networkSummarizer interface{ NetworkSummary() netcap.Summary }
+	if ns, ok := b.eng.(networkSummarizer); ok {
+		snap.Network = ns.NetworkSummary()
 	}
 	return snap
 }
