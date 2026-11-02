@@ -797,7 +797,15 @@ func (s *Session) watch() {
 			if st.Error != "" {
 				s.setDetail("player error: " + st.Error)
 			}
-			if st.Ended && !st.Paused {
+			// End-of-media: HTMLMediaElement sets paused=true when playback
+			// ends (the element is parked at its last frame), so gating on
+			// !st.Paused suppressed the advance for every native or
+			// downloaded file — auto-advance and repeat-one silently never
+			// fired on the direct path, only on YouTube, whose probe forces
+			// ended=true from getPlayerState()===0 while paused stays false.
+			// st.Ended alone is the correct trigger; the state guard below
+			// keeps the dispatch idempotent while the advance is in flight.
+			if st.Ended {
 				if s.snapshotState() == StateStreaming {
 					switch s.handleQueueEnded() {
 					case queueEndNext, queueEndWrap:
