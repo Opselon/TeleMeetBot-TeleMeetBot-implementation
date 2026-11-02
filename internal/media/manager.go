@@ -120,9 +120,14 @@ type Manager struct {
 	diskFree func(path string) (int64, bool)
 
 	// blockedEgresses records proxies a source refused (see
-	// MarkEgressBlocked). blockedMu guards only this map.
+	// MarkEgressBlocked), mapping proxy -> deadline after which the entry
+	// expires. blockedMu guards only this map. The deadline is computed via
+	// egressNow (time.Now in production) so tests can advance the clock.
 	blockedMu       sync.Mutex
 	blockedEgresses map[string]time.Time
+	// egressNow overrides the wall clock the blocked-egress registry uses.
+	// nil (the zero value) means time.Now. Test seam only.
+	egressNow func() time.Time
 
 	mu       sync.Mutex
 	inflight map[string]struct{}
@@ -407,14 +412,32 @@ func (m *Manager) deleteEntryNow(entryID, why string) error {
 // Enabled reports whether downloads are on.
 func (m *Manager) Enabled() bool { return m.opts.Enabled }
 
+// egressBlockTTL is how long a refused egress stays "blocked". YouTube's
+// per-IP bot check is long-lived for a static datacenter route, but a rotating
+// egress (Tor, a rotating residential pool) lands on a fresh IP on the next
+// run: a single mid-transfer 403 is NOT proof that the whole proxy is dead.
+// The TTL is the compromise — long enough that a session avoids a route that
+// just lost seconds ago, short enough that a rotating egress is usable again
+// on the next session. 10 minutes is roughly the horizon of one session's
+// download attempts, which is exactly what the registry exists to protect.
+const egressBlockTTL = 10 * time.Minute
+
+// egressClock returns the wall clock the registry runs on: the test seam when
+// one is installed, otherwise time.Now.
+func (m *Manager) egressClock() time.Time {
+	if m.egressNow != nil {
+		return m.egressNow()
+	}
+	return time.Now()
+}
+
 // MarkEgressBlocked records that YouTube (or any source) refused an egress:
 // every failure classified egress-shaped by proxyBlocked() is reported here so
 // the engine can stop launching the media browser through a route the source
 // has already rejected. The set is advisory, not a gate: a "blocked" marking
 // only steers the browser to a different proxy, it never disables the manager.
-// Entries live for the process lifetime and never shrink — the block is per-IP
-// and long-lived, which is exactly the horizon a session runs on. Restarting
-// the process clears it, which is the correct reset point.
+// Entries expire after egressBlockTTL, so a rotating egress that lost one
+// circuit is usable again later instead of being permanently retired.
 func (m *Manager) MarkEgressBlocked(proxy string) {
 	if m == nil {
 		return
@@ -423,16 +446,17 @@ func (m *Manager) MarkEgressBlocked(proxy string) {
 	if p == "" {
 		return
 	}
+	now := m.egressClock()
 	m.blockedMu.Lock()
 	defer m.blockedMu.Unlock()
 	if m.blockedEgresses == nil {
 		m.blockedEgresses = make(map[string]time.Time, 8)
 	}
-	if _, ok := m.blockedEgresses[p]; ok {
-		return
+	if until, ok := m.blockedEgresses[p]; ok && until.After(now) {
+		return // already marked and the mark is still live
 	}
-	m.blockedEgresses[p] = time.Now()
-	m.log.Warnf("[PIPELINE:download] egress %s marked blocked by the source; the media browser will avoid it", p)
+	m.blockedEgresses[p] = now.Add(egressBlockTTL)
+	m.log.Warnf("[PIPELINE:download] egress %s marked blocked by the source for %s; the media browser will avoid it", p, egressBlockTTL)
 }
 
 // EgressBlocked reports whether MarkEgressBlocked recorded a refusal for this
@@ -449,8 +473,18 @@ func (m *Manager) EgressBlocked(proxy string) bool {
 	}
 	m.blockedMu.Lock()
 	defer m.blockedMu.Unlock()
-	_, ok := m.blockedEgresses[p]
-	return ok
+	until, ok := m.blockedEgresses[p]
+	if !ok {
+		return false
+	}
+	if !m.egressClock().Before(until) {
+		// An expired mark means the route may be usable again (a rotating
+		// egress has long since moved to a different IP). Drop it so the
+		// snapshot and the lookup agree, and so the map cannot grow forever.
+		delete(m.blockedEgresses, p)
+		return false
+	}
+	return true
 }
 
 // BlockedEgresses returns a snapshot of the proxies the sources refused. The
@@ -460,14 +494,17 @@ func (m *Manager) BlockedEgresses() []string {
 	if m == nil {
 		return nil
 	}
+	now := m.egressClock()
 	m.blockedMu.Lock()
 	defer m.blockedMu.Unlock()
 	if len(m.blockedEgresses) == 0 {
 		return nil
 	}
 	out := make([]string, 0, len(m.blockedEgresses))
-	for p := range m.blockedEgresses {
-		out = append(out, p)
+	for p, until := range m.blockedEgresses {
+		if now.Before(until) {
+			out = append(out, p)
+		}
 	}
 	return out
 }
