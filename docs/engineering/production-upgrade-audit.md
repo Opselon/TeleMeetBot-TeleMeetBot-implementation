@@ -191,7 +191,7 @@ here rather than fixed in this phase to keep the diff focused on P0/P1.
 
 | ID | Sev | Path | Note |
 | --- | --- | --- | --- |
-| F1 | P2 | `internal/engine/session.go:539` `cleanup()` | `run()` has no panic recovery; a panic inside the session goroutine runs `cleanup()` (good — resources are released) but is silently swallowed and the meeting's dedup slot is not freed. `logx.CatchPanicFunc` is the established pattern in this codebase. |
+| F1 | P2 | `internal/engine/session.go:539` `cleanup()` | **Fixed** in `ad11a33` — `run()` recovers panics into a terminal error, `cleanup()` closes pages panic-safely. |
 | F2 | P2 | `internal/engine/audiotrack.go:805,889` | `ensureAudioTrack` can spend up to ~106 s in 10 s evals with no session-context check; a stop during that window does not interrupt it. |
 | F3 | P2 | `internal/engine/manager.go:687-727` | `WarmUp` holds `warmMu` for the whole launch; `ShutdownWarm` during a launch waits, then closes a warm browser the keep-warm loop may immediately relaunch. One orphan Chromium on a SIGTERM racing a launch. |
 | F4 | P2 | `internal/engine/queue.go` | `Next()` advances the cursor before `SwitchMedia` succeeds; a permanently-failing item emits `EventError` and leaves the cursor pointing at the unplayable item rather than skipping or staying put. Present, documented behaviour worth revisiting. |
@@ -244,3 +244,4 @@ across all 16 packages green.
 | `1249434` | E2 — `s.done` never closed | P1 | `internal/engine/session.go`, `internal/engine/done_test.go` (new) |
 | `705ef2d` | E3 — SSRF dial gate + E4 — 30 s download cliff | P0 ×2 | `internal/media/manager.go`, `internal/media/fetch.go`, `internal/media/dialgate_test.go` (new), `internal/media/httptimeout_test.go` (new) |
 | `17fd47f` | E5 — dead web login | P1 | `internal/dashboard/ui.go`, `internal/dashboard/login_widget_test.go` (new) |
+| `ad11a33` | F1 — swallowed panics in the session goroutine | P2 | `internal/engine/session.go`, `internal/engine/panic_test.go` (new) |
