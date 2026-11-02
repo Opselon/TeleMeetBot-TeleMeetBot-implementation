@@ -502,7 +502,12 @@ func (m *Manager) runFFmpeg(ctx context.Context, binary, in, out string) error {
 }
 
 // runExec runs a command with a bounded timeout and captures both streams.
-// No shell is involved: argv comes from vetted Go strings only.
+// No shell is involved: argv comes from vetted Go strings only. The command
+// runs in its own process group so a timeout or cancellation kills the
+// children yt-dlp/ffmpeg spawn, not just the parent: an orphaned transcode
+// keeps the output file open and burns CPU after the fetch has already been
+// reported as failed. Both captured streams are bounded so a hostile source
+// cannot exhaust memory with an enormous progress log.
 func runExec(ctx context.Context, binary string, args []string, timeout time.Duration, onLine func(string)) ([]byte, []byte, error) {
 	if timeout > 0 {
 		var cancel context.CancelFunc
@@ -510,13 +515,47 @@ func runExec(ctx context.Context, binary string, args []string, timeout time.Dur
 		defer cancel()
 	}
 	cmd := exec.CommandContext(ctx, binary, args...)
+	setProcessGroup(cmd)
+	// CommandContext kills only cmd.Process on ctx cancellation; the group
+	// kill below takes the spawned children (ffmpeg) with it.
+	cmd.Cancel = func() error { killProcessGroup(cmd); return nil }
 	lw := &lineWriter{onLine: onLine}
 	var stderr strings.Builder
-	cmd.Stdout = lw
-	cmd.Stderr = &stderr
+	cmd.Stdout = &boundedWriter{w: lw, max: maxExecOutputBytes}
+	cmd.Stderr = &boundedWriter{w: &stderr, max: maxExecOutputBytes}
 	err := cmd.Run()
 	lw.flush()
 	return []byte(lw.buf.String()), []byte(stderr.String()), normalizeExecError(err, ctx)
+}
+
+// maxExecOutputBytes bounds the subprocess output held in memory. yt-dlp's
+// progress lines and ffmpeg's stderr are diagnostic; 4 MiB is far beyond any
+// useful log and far below a hostile blob.
+const maxExecOutputBytes = 4 << 20
+
+// boundedWriter forwards to w until max bytes have been written, then drops
+// the rest (counting it, so the caller still sees a non-empty stream instead
+// of a silently truncated one). A hostile or runaway source cannot turn the
+// captured output into unbounded memory.
+type boundedWriter struct {
+	w   interface{ Write([]byte) (int, error) }
+	max int
+	n   int
+}
+
+func (b *boundedWriter) Write(p []byte) (int, error) {
+	if b.n >= b.max {
+		// Keep accounting without storing: the caller still sees how much
+		// was produced, and nothing more is buffered.
+		b.n += len(p)
+		return len(p), nil
+	}
+	if b.n+len(p) > b.max {
+		p = p[:b.max-b.n]
+	}
+	n, err := b.w.Write(p)
+	b.n += n
+	return n, err
 }
 
 // normalizeExecError maps an exec failure to a descriptive error, distinguishing
