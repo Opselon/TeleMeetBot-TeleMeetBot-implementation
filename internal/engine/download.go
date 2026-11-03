@@ -139,6 +139,9 @@ func (s *Session) prepareLocalMedia() error {
 		s.mu.Unlock()
 		s.logger().Infof("[PIPELINE:session] session %s: media already local (%s, mode=%s, expires %s)",
 			s.ID, humanBytesI(entry.Bytes), playMode, entry.ExpiresAt.Format(time.RFC3339))
+		// A Telegram-ingested file is a local file by construction: record it
+		// as a completed download so the phase agrees with the local file.
+		s.setPhase(PhaseDownloaded, "", "media already local (telegram)")
 		return nil
 	}
 	dlID := s.downloadID()
@@ -220,6 +223,10 @@ func (s *Session) prepareLocalMedia() error {
 	s.mu.Unlock()
 	s.logger().Infof("[PIPELINE:session] session %s: media downloaded via %s (%s, mode=%s, expires %s)",
 		s.ID, res.Via, humanBytesI(res.Bytes), playMode, res.ExpiresAt.Format(time.RFC3339))
+	// The download completed and the session now plays the local file: record
+	// the observation so the card can say "downloaded" (and the honest-method
+	// projection in Snapshot can confirm "via download").
+	s.setPhase(PhaseDownloaded, "", "download completed via "+res.Via)
 	return nil
 }
 
@@ -416,6 +423,11 @@ func (s *Session) fallbackToDownload() error {
 	}
 	s.setState(StateStreaming, "playing from downloaded media (auto fallback)")
 	s.log.Infof("[PIPELINE:session] session %s: auto fallback complete, playing local file", s.ID)
+	// The browser leg failed and the download leg recovered it: record the
+	// honest phase. It must NOT read as a plain "downloaded", because the
+	// user asked for browser playback and the download is the substitute —
+	// but it must also not read as "failed", because the media is playing.
+	s.setPhase(PhaseDownloaded, "The browser couldn't play this link, so it was downloaded instead — playback is live.", "auto fallback complete")
 	return nil
 }
 

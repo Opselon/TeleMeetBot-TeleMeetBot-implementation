@@ -270,28 +270,43 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 // sessionView is one session as the dashboard renders it.
 type sessionView struct {
-	ID       string                  `json:"id"`
-	State    string                  `json:"state"`
-	Detail   string                  `json:"detail"`
-	Error    string                  `json:"error,omitempty"`
-	Title    string                  `json:"title,omitempty"`
-	MeetURL  string                  `json:"meet_url,omitempty"`
-	MediaURL string                  `json:"media_url,omitempty"`
-	Paused   bool                    `json:"paused"`
-	Muted    bool                    `json:"muted"`
-	Volume   int                     `json:"volume"`
-	Rate     float64                 `json:"rate"`
-	Cur      float64                 `json:"cur"`
-	Dur      float64                 `json:"dur"`
-	Created  time.Time               `json:"created"`
-	Joined   time.Time               `json:"joined,omitempty"`
-	PlayMode string                  `json:"play_mode,omitempty"`
-	QueueLen int                     `json:"queue_len"`
-	QueueIdx int                     `json:"queue_idx"`
-	HasNext  bool                    `json:"has_next"`
-	HasPrev  bool                    `json:"has_prev"`
-	Stages   []engine.StageTiming    `json:"stages,omitempty"`
-	Download engine.DownloadProgress `json:"download,omitempty"`
+	ID       string    `json:"id"`
+	State    string    `json:"state"`
+	Detail   string    `json:"detail"`
+	Error    string    `json:"error,omitempty"`
+	Title    string    `json:"title,omitempty"`
+	MeetURL  string    `json:"meet_url,omitempty"`
+	MediaURL string    `json:"media_url,omitempty"`
+	Paused   bool      `json:"paused"`
+	Muted    bool      `json:"muted"`
+	Volume   int       `json:"volume"`
+	Rate     float64   `json:"rate"`
+	Cur      float64   `json:"cur"`
+	Dur      float64   `json:"dur"`
+	Created  time.Time `json:"created"`
+	Joined   time.Time `json:"joined,omitempty"`
+	PlayMode string    `json:"play_mode,omitempty"`
+	// PlaybackMethod is the honest verdict on which transport is playing:
+	// "download" only when a local file is actually playing, "browser"
+	// otherwise. A Download-mode session that fell back reports "browser".
+	PlaybackMethod string `json:"playback_method,omitempty"`
+	// Phase is the observed playback phase (downloading, downloaded, browser,
+	// fallback, failed, network_unavailable, recovering). It is the
+	// user-facing answer to what is happening to the media right now.
+	Phase string `json:"phase,omitempty"`
+	// PhaseUserReason is the actionable sentence recorded with the phase.
+	// It never contains raw error text or infrastructure detail, so the
+	// dashboard may render it verbatim.
+	PhaseUserReason string `json:"phase_user_reason,omitempty"`
+	// PhaseFailedMethod names the transport that failed for the
+	// failed/fallback phases ("download" | "browser"); empty elsewhere.
+	PhaseFailedMethod string                  `json:"phase_failed_method,omitempty"`
+	QueueLen          int                     `json:"queue_len"`
+	QueueIdx          int                     `json:"queue_idx"`
+	HasNext           bool                    `json:"has_next"`
+	HasPrev           bool                    `json:"has_prev"`
+	Stages            []engine.StageTiming    `json:"stages,omitempty"`
+	Download          engine.DownloadProgress `json:"download,omitempty"`
 }
 
 func viewOf(s *engine.Session) sessionView {
@@ -304,7 +319,10 @@ func viewOf(s *engine.Session) sessionView {
 		Title: st.Title, MeetURL: st.MeetURL, MediaURL: st.MediaURL,
 		Paused: st.Paused, Muted: st.Muted, Volume: st.Volume, Rate: st.Rate,
 		Cur: st.Cur, Dur: st.Dur, Created: st.Created, Joined: st.Joined,
-		PlayMode: st.PlayMode, QueueLen: st.QueueLength, QueueIdx: st.QueueIndex,
+		PlayMode: st.PlayMode, PlaybackMethod: st.PlaybackMethod,
+		Phase: st.Phase, PhaseUserReason: st.PhaseUserReason,
+		PhaseFailedMethod: st.PhaseFailedMethod,
+		QueueLen:          st.QueueLength, QueueIdx: st.QueueIndex,
 		HasNext: st.HasNext, HasPrev: st.HasPrevious,
 		Stages: st.Stages, Download: st.DownloadProgress,
 	}

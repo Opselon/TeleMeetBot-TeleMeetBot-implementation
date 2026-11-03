@@ -168,6 +168,10 @@ type Session struct {
 	observedQ observedQuality
 	// downloadProg tracks mid-fetch metrics for Download & Stream mode.
 	downloadProg DownloadProgress
+	// pv is the recorded playback-phase observation (see phase.go): the
+	// honest answer to "what is happening to the media right now?", written
+	// at each transition and read by every status surface. Guarded by mu.
+	pv phaseState
 	// Stage tracker: which [N/6] pipeline step is running and how long each
 	// completed step took. Guarded by mu; see stages.go.
 	stageStep    int
@@ -229,6 +233,30 @@ type Status struct {
 	// PlaybackMethod reads "browser", so the card can never mistake a
 	// fallback for a successful download.
 	PlaybackMethod string
+	// Phase is the observed playback phase (see phase.go): the user-facing
+	// answer to what is happening to the media right now — downloading,
+	// downloaded, browser (requested), fallback (download failed, browser
+	// is the substitute), failed, network_unavailable or recovering. It is
+	// recorded at the moment of each transition, never derived, so it can
+	// never disagree with the event that caused it.
+	Phase string `json:"phase,omitempty"`
+	// PhaseUserReason is the actionable, user-facing sentence recorded with
+	// the phase. It never contains infrastructure detail or raw error text.
+	PhaseUserReason string `json:"phase_user_reason,omitempty"`
+	// PhaseDetailReason is the operator diagnostic for the same transition.
+	// Rendered only by operator surfaces (logs, management console) — never
+	// to end users. It is excluded from JSON on purpose.
+	PhaseDetailReason string `json:"-"`
+	// PhaseFailedMethod records which transport failed for the failed/fallback
+	// phases ("download" | "browser"); empty elsewhere.
+	PhaseFailedMethod string `json:"phase_failed_method,omitempty"`
+	// PhaseHistory is the bounded, ordered story of the media's playback
+	// phases (oldest first). It exists so a terminal failure cannot hide the
+	// transition that came before it: "download failed, fell back to the
+	// browser, the browser could not start either" reads as three entries,
+	// not as only the last one. Diagnostics in each entry are operator-only.
+	PhaseHistory []PhaseTransition `json:"phase_history,omitempty"`
+
 	// LocalFile reports the downloaded media backing the session, if any.
 	LocalFile localFileStatus
 	// DownloadProgress reports real-time metrics while media is being fetched.
@@ -322,6 +350,11 @@ func (s *Session) Snapshot() Status {
 	// TestSessionQueueConcurrency).
 	st.CaptionPolicy = NormalizeCaptionPolicy(s.captionPolicy)
 	st.CaptionLang = s.captionLang
+	// One s.mu read hold for the whole phase/local-file section. Two entered
+	// reads (the historical shape) leaked a hold: RWMutex is not reentrant, so
+	// the first RLock was never paired with an RUnlock and every Snapshot
+	// permanently incremented the reader count — a writer could then never
+	// acquire the write lock and the whole Session froze.
 	s.mu.RLock()
 	if s.localFile != nil {
 		st.SelectedFormat = s.localFile.selected.Describe()
@@ -333,7 +366,45 @@ func (s *Session) Snapshot() Status {
 		// "browser" either way: there is no local file.
 		st.PlaybackMethod = "browser"
 	}
+	// The observed phase is a recorded event, not a derivation. It wins over
+	// the implied method whenever the two could disagree: a fallback records
+	// itself as a fallback, a download in flight records "downloading", and
+	// only a completed local playback records "downloaded".
+	pv := s.phaseViewOfLocked()
+	hist := s.phaseHistoryLocked()
 	s.mu.RUnlock()
+	st.Phase = pv.Phase
+	st.PhaseUserReason = pv.UserReason
+	st.PhaseDetailReason = pv.Detail
+	// The failed-method field rides along so surfaces can say what a fallback
+	// recovered from; it is empty outside failed/fallback phases.
+	if pv.FailedMethod != "" {
+		st.PhaseFailedMethod = pv.FailedMethod
+	}
+	// The history is the whole story: a terminal phase must not erase the
+	// transitions that led to it.
+	if len(hist) > 0 {
+		st.PhaseHistory = make([]PhaseTransition, len(hist))
+		for i, e := range hist {
+			st.PhaseHistory[i] = PhaseTransition{
+				Phase: e.Phase, UserReason: e.UserReason,
+				DetailReason: e.DetailReason, FailedMethod: e.FailedMethod,
+			}
+		}
+	}
+	// Honesty contract: a browser fallback must never render as a successful
+	// local download. The phase is observation, the derived method is
+	// inference — whenever the observed phase is a fallback (or an in-flight
+	// download that has not produced a file yet), the method must say what
+	// is ACTUALLY playing: the browser.
+	switch PlaybackPhase(pv.Phase) {
+	case PhaseFallback, PhaseDownloading:
+		if st.PlaybackMethod == PlaybackMethodDownload {
+			st.PlaybackMethod = PlaybackMethodBrowser
+		}
+	case PhaseDownloaded:
+		st.PlaybackMethod = PlaybackMethodDownload
+	}
 	s.queueMu.RUnlock()
 	st.Stages = s.StageTimings()
 	st.HasNext = st.QueueIndex >= 0 && st.QueueIndex+1 < st.QueueLength
@@ -563,6 +634,12 @@ func (s *Session) run() {
 	// direct browser playback in Chromium rather than killing the live session.
 	// Chromium in the media tab plays YouTube and web links natively.
 	if mode := s.playMode; mode == mediateam.ModeDownload || mode == mediateam.ModeAuto {
+		// The phase records the download intent BEFORE the fetch runs, so a
+		// card rendered while it is in flight says "downloading" instead of
+		// silently implying a finished file.
+		if mediateam.IsDownloadable(string(s.MediaKind)) {
+			s.setPhase(PhaseDownloading, "", "download stage starting")
+		}
 		prepareErr := s.prepareLocalMedia()
 		if s.prepareRun != nil {
 			// Test seam: the fake stands in for the whole preparation, so
@@ -573,18 +650,48 @@ func (s *Session) run() {
 			}
 		}
 		if prepareErr != nil {
+			// Classify once: the user message is what the card shows, the raw
+			// error is what the operator log keeps. A network-shaped failure
+			// is recorded as such so the user sees "network unavailable"
+			// rather than a generic failure.
+			uerr := mediateam.ClassifyUserError(prepareErr)
+			userMsg := fallbackUserMessage(uerr)
+			detail := prepareErr.Error()
+			code := ""
+			if uerr != nil {
+				code = uerr.Code
+			}
+			phase := PhaseFallback
+			if mediateam.IsUserCode(prepareErr, mediateam.UserCodeNetwork) {
+				phase = PhaseNetworkUnavailable
+			}
 			s.log.Warnf("[PIPELINE:session] session %s: download extraction failed (%v), falling back to browser playback", s.ID, prepareErr)
 			// The detail line is the user-facing diagnostic for the fallback.
 			// It names the failure honestly and states the outcome, so an
 			// operator can tell "the download failed and we recovered" apart
 			// from "the download worked". Never claim success here.
 			s.setDetail("download failed, playing via browser: " + truncateStr(prepareErr.Error(), 80))
+			s.setPhaseFailedWith("download", phase, code, userMsg, detail)
 			s.emit(EventState, "download unavailable, streaming via browser")
 		}
 	}
 
 	s.setState(StateJoining, "[2/6] Loading media")
 	s.log.Infof("[PIPELINE:session] [STEP 2/6] session %s: opening media tab (url=%s kind=%s)...", s.ID, s.MediaURL, s.MediaKind)
+	// A session that never entered the download stage plays the remote URL
+	// directly — record the honest phase ("browser", not a fallback) so the
+	// card can distinguish "played from the browser as requested" from
+	// "download failed, fell back to the browser".
+	if s.Phase() == PhaseNone || s.Phase() == PhaseDownloading {
+		if s.playMode == mediateam.ModeBrowser {
+			s.setPhase(PhaseBrowser, "", "browser mode: playing the remote URL directly")
+		} else if s.localFile == nil {
+			// Download/Auto whose download was skipped (unsupported kind) or
+			// already failed: whatever plays is the browser, and the phase
+			// must not imply a download that never happened.
+			s.setPhase(PhaseBrowser, "", "download not applicable; playing the remote URL directly")
+		}
+	}
 	var err error
 	if s.openRun != nil {
 		// Test seam: the fake stands in for the whole media-tab open, so the
@@ -595,6 +702,29 @@ func (s *Session) run() {
 	}
 	if err != nil {
 		if s.ctx.Err() == nil {
+			// The media tab failed to open at all: classify for the user and
+			// record the failure honestly. The session ends here, so this is
+			// a terminal phase — but the message still tells the user what to
+			// do next instead of dumping a CDP/yt-dlp diagnostic.
+			//
+			// Do NOT erase a download-fallback recorded moments ago: when the
+			// download failed AND the browser leg could not start either, the
+			// user must learn both facts, in order — the download failed, the
+			// browser could not recover it, the meeting ends. Reporting only
+			// the browser loss would hide the real first cause.
+			uerr := mediateam.ClassifyUserError(err)
+			user := mediateam.FriendlyUserMessage(err)
+			if u := uerr; u != nil && u.Code == mediateam.UserCodeNetwork {
+				user = "The server can't reach the media source right now. Please check the link and try again."
+			}
+			prevPhase := s.Phase()
+			prevReason := s.PhaseUserReason()
+			if prevPhase == PhaseFallback || prevPhase == PhaseNetworkUnavailable {
+				user = prevReason + " The browser playback could not start either, so the stream cannot continue."
+				s.setPhaseFailedWith(s.prevPhaseFailedSummary(), PhaseFailed, mediateam.UserCodeOf(err), user, "media tab failed after download fallback: "+err.Error())
+			} else {
+				s.setPhaseFailedWith("browser", "", mediateam.UserCodeOf(err), user, err.Error())
+			}
 			s.setError(err)
 		}
 		return
@@ -661,13 +791,38 @@ func (s *Session) run() {
 		// tried, and Auto never retries a failed fallback).
 		if s.playMode == mediateam.ModeAuto && s.localFile == nil {
 			s.log.Infof("[PIPELINE:session] session %s: auto fallback — downloading media after browser playback failed", s.ID)
+			s.setPhase(PhaseDownloading, "The browser couldn't play this link; downloading it instead…", "auto fallback after browser playback failure")
 			if ferr := s.fallbackToDownload(); ferr != nil {
 				s.log.Warnf("[PIPELINE:session] session %s: auto fallback download failed: %v", s.ID, ferr)
+				// Both legs lost: record the honest terminal phase with a
+				// user message that names what to do next. The share stays
+				// up and the session stays alive and recoverable.
+				uerr := mediateam.ClassifyUserError(ferr)
+				user := "Playback failed and the download fallback couldn't recover it. Use 🔀 Switch media to try another link — the meeting is still live."
+				if uerr != nil && uerr.Code == mediateam.UserCodeNetwork {
+					user = "The network to the media source is unavailable right now. Try again in a moment, or use 🔀 Switch media — the meeting is still live."
+				}
+				s.setPhaseFailedWith("download", PhaseFailed, mediateam.UserCodeOf(ferr), user, "auto fallback download failed: "+ferr.Error())
 			}
+		} else {
+			// record the browser-side play failure (terminal unless recovery
+			// repairs it: recoverMedia overwrites the phase when it succeeds).
+			uerr := mediateam.ClassifyUserError(err)
+			user := "The media couldn't start playing. Use 🔀 Switch media to try another link — the meeting is still live."
+			if uerr != nil && uerr.Code == mediateam.UserCodeNetwork {
+				user = "The network to the media source is unavailable right now. Playback will retry automatically; the meeting is still live."
+			}
+			s.setPhaseFailedWith("browser", PhaseFailed, mediateam.UserCodeOf(err), user, err.Error())
 		}
 		s.setDetail("[6/6] Sharing, media start retry: " + err.Error())
 	} else {
 		s.setDetail("[6/6] Streaming live")
+		// Playback is verified. Keep "downloaded"/"browser" as recorded by
+		// the download stage (or by the browser-mode entry above); a phase
+		// that says "failed" here would contradict a healthy stream.
+		if s.Phase() == PhaseFailed {
+			s.setPhase(PhaseBrowser, "", "playback recovered")
+		}
 	}
 	s.setState(StateStreaming, "[6/6] Streaming live")
 	s.log.Infof("[PIPELINE:session] [STEP 6/6] session %s: stream is live (share up, media playing)", s.ID)
@@ -885,19 +1040,50 @@ func (s *Session) watch() {
 			case reason == "":
 				recoveries = 0
 				exhaustedLogged = false
+				// Healthy again: whatever phase a previous failure recorded, a
+				// verified-healthy stream is not "failed" anymore. Restore the
+				// transport-truthful phase. (The phase was preserved across the
+				// recovery window on purpose: a recovering stream must not
+				// pretend nothing happened, and it stops recovering the moment
+				// it is healthy.)
+				if cur := s.Phase(); cur == PhaseRecovering || cur == PhaseFailed || cur == PhaseNetworkUnavailable {
+					if s.localFile != nil {
+						s.setPhase(PhaseDownloaded, "", "playback recovered, playing the local file")
+					} else {
+						s.setPhase(PhaseBrowser, "", "playback recovered, playing the remote URL")
+					}
+				}
 			case recoveries >= maxMediaRecoveries:
 				if !exhaustedLogged {
 					exhaustedLogged = true
 					s.log.Errorf("[PIPELINE:recovery] session %s: %s; %d recovery attempts already failed — share left up, run `--media-probe <link>` for the media diagnostics", s.ID, reason, recoveries)
 					s.setDetail("[6/6] Media unhealthy: " + reason)
+					// Recovery is exhausted: the media is not playing and will
+					// not repair itself. Record the failure honestly, with a
+					// user message that says the meeting survives and what the
+					// user can still do.
+					s.setPhaseFailedWith("browser", PhaseFailed, classifyHealthCode(reason),
+						"The media stopped playing and automatic recovery couldn't fix it. The meeting is still live — use 🔀 Switch media to try another link.",
+						"recovery exhausted: "+reason)
 				}
 			case time.Since(lastRecovery) >= 20*time.Second:
 				recoveries++
 				lastRecovery = time.Now()
 				stalled = 0
+				// A recovery attempt is in flight: record it so the card can
+				// say "recovering" instead of hiding the outage, and so a
+				// user who sees a frozen stream knows the engine is on it.
+				// The previous phase's reason is kept in the detail so the
+				// operator log retains what is being recovered from.
+				prevDetail := s.PhaseDetailReason()
+				s.setPhase(PhaseRecovering, "The media hiccuped — repairing playback without leaving the meeting…", "recovering: "+reason+"; was: "+prevDetail)
 				if rerr := s.recoverMedia(reason); rerr != nil {
 					s.log.Errorf("[PIPELINE:recovery] session %s: attempt %d failed: %v", s.ID, recoveries, rerr)
 					s.setDetail("[6/6] Media recovery failed: " + rerr.Error())
+					// This attempt failed but more are allowed: keep the
+					// recovering phase (the engine is still trying) and give
+					// the user the reason this attempt lost.
+					s.setPhase(PhaseRecovering, "The media hiccuped — still trying to repair playback…", "recovery attempt "+fmt.Sprint(recoveries)+" failed: "+rerr.Error())
 				} else {
 					lastCur = -1
 				}

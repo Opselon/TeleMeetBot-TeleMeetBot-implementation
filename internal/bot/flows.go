@@ -13,6 +13,7 @@ import (
 	"github.com/Opselon/TeleMeetBot/internal/config"
 	"github.com/Opselon/TeleMeetBot/internal/engine"
 	"github.com/Opselon/TeleMeetBot/internal/health"
+	"github.com/Opselon/TeleMeetBot/internal/media"
 	"github.com/Opselon/TeleMeetBot/internal/store"
 )
 
@@ -469,7 +470,13 @@ func (b *Bot) applyMediaSwitchTarget(chatID, userID int64, f *flow, target engin
 	b.sendText(chatID, fmt.Sprintf("🔀 Switching to <code>%s</code>…\n\nThe share stays up; only the shared tab changes.", esc(truncate(target.URL, 120))), nil)
 	if err := s.SwitchMedia(target.URL); err != nil {
 		b.log.Warnf("switch media %s: %v", s.ID, err)
-		b.sendText(chatID, "🔴 <b>Switch failed</b>\n\n"+esc(truncate(err.Error(), 300))+"\n\nThe session kept streaming; retry with 🔀 Switch media.", sessionCardKB(s.Snapshot()))
+		// The engine rolled back to the previous media and the meeting is
+		// intact: the message must say exactly that, in user terms, with the
+		// classified reason instead of the raw extractor/transport diagnostic.
+		reason := media.FriendlyUserMessage(err)
+		text := "🔴 <b>Switch failed</b>\n\n" + esc(reason) +
+			"\n\nThe session kept streaming the previous track; retry with 🔀 Switch media."
+		b.sendText(chatID, text, sessionCardKB(s.Snapshot()))
 		return
 	}
 	st := s.Snapshot()
@@ -603,7 +610,23 @@ func (b *Bot) launch(chatID, userID int64) {
 	}
 	sess, err := b.eng.Start(context.Background(), req)
 	if err != nil {
-		b.sendText(chatID, "❌ "+esc(err.Error()), mainMenuKB())
+		// Start rejects only for reasons the user can act on: a bad link, the
+		// session cap, a duplicate meeting. Map the classified reason so the
+		// message stays actionable; the raw diagnostic goes to the operator log.
+		reason := media.FriendlyUserMessage(err)
+		// Validation errors (NormalizeMeetURL/ClassifyMedia) are already
+		// user-friendly and must NOT be replaced by the generic fallback.
+		switch {
+		case strings.Contains(err.Error(), "must be") || strings.Contains(err.Error(), "cannot parse"):
+			reason = err.Error()
+		case strings.Contains(err.Error(), "limit reached") || strings.Contains(err.Error(), "already running"):
+			reason = err.Error()
+		case strings.Contains(err.Error(), "not available"):
+			// The Download & Stream feature gap: keep the actionable hint.
+			reason = err.Error()
+		}
+		b.log.Warnf("[PIPELINE:bot] launch failed for user=%d: %v", userID, err)
+		b.sendText(chatID, "❌ "+esc(reason), mainMenuKB())
 		return
 	}
 	b.clearFlow(userID)
