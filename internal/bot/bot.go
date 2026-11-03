@@ -106,6 +106,11 @@ type Bot struct {
 	// unavailable (an old data directory or a store that failed to open);
 	// the dashboard then hides the playlist entry point.
 	pl Playlists
+	// phaseNotified records, per session, the (phase, reason) tuple already
+	// announced as a standalone notice. State events fire on every transition;
+	// without dedup a fallback that also flips the card would notify twice.
+	// The map is cleared when a session ends (handleEvent EventEnded).
+	phaseNotified map[string]string
 	// set is the persistent per-user settings store (SQLite). Nil means the
 	// preferences stay in the legacy JSON state file: the bot falls back to
 	// the old accessor methods so an upgrade never loses the feature.
@@ -393,6 +398,7 @@ func (b *Bot) handleEvent(ev engine.Event) {
 			chat := b.sessionChats[string(acts.ID)]
 			delete(b.cards, string(acts.ID))
 			delete(b.sessionChats, string(acts.ID))
+			delete(b.phaseNotified, string(acts.ID))
 			b.mu.Unlock()
 			b.trackLive(chat, false, string(acts.ID))
 			// The session finished cleanly: its durable queue metadata is no
@@ -402,6 +408,22 @@ func (b *Bot) handleEvent(ev engine.Event) {
 		} else {
 			b.st.Update(string(ev.Session), "ended", "")
 		}
+	case engine.EventState:
+		// A state event that carries a media-phase transition the user must
+		// hear about ("download unavailable, streaming via browser") becomes a
+		// standalone notice — exactly once per transition, never on every
+		// refresh tick.
+		if notice := phaseNoticeText(st); notice != "" {
+			if b.shouldNotifyPhase(ev.Session, st) {
+				b.notifySession(ev.Session, notice, false)
+			}
+		}
+		// The card refresh loop renders the phase line on its own tick; here
+		// we only keep the history record in sync.
+		if s := b.eng.Get(ev.Session); s != nil {
+			acts := s.Snapshot()
+			b.st.Update(string(acts.ID), acts.State, "")
+		}
 	default:
 		// progress events are rendered by the refresh loop
 		_ = st
@@ -410,6 +432,25 @@ func (b *Bot) handleEvent(ev engine.Event) {
 			b.st.Update(string(acts.ID), acts.State, "")
 		}
 	}
+}
+
+// shouldNotifyPhase reports whether a phase notice is news for this session:
+// true the first time a given (phase, reason) appears, false for every repeat
+// of the same tuple. A phase that keeps firing the same transition (a stalled
+// recover loop, a download that fails repeatedly) is announced once, then left
+// to the card; a genuinely new transition still gets its own message.
+func (b *Bot) shouldNotifyPhase(id engine.SessionID, st engine.Status) bool {
+	key := st.Phase + "\x00" + st.PhaseUserReason
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.phaseNotified == nil {
+		b.phaseNotified = map[string]string{}
+	}
+	if prev, ok := b.phaseNotified[string(id)]; ok && prev == key {
+		return false
+	}
+	b.phaseNotified[string(id)] = key
+	return true
 }
 
 // notifySession sends (or edits) a card on the owner chat.

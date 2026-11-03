@@ -77,6 +77,11 @@ func (s *Session) runSwitch(target MediaTarget, stale func() bool) error {
 	}
 
 	log.Infof("[PIPELINE:switch] session %s: switching media %q → %q (kind=%s)", s.ID, truncateStr(oldURL, 60), truncateStr(target.URL, 60), target.Kind)
+	// A new media is a new story: clear any phase the previous media
+	// recorded (failed, fallback, recovering…) so a stale observation can
+	// never describe the new track. The new phase is recorded by whichever
+	// leg actually runs: the download leg below, or openMedia/playMedia.
+	s.clearPhase()
 	// Publish the new target: the card, the watchdog and the refresh loop must
 	// see what the tab is being pointed at while it reloads.
 	s.mu.Lock()
@@ -85,6 +90,13 @@ func (s *Session) runSwitch(target MediaTarget, stale func() bool) error {
 	// Media-only transition: "joining" while the tab reloads keeps the watchdog
 	// from treating the reload as a stall and "recovering" it.
 	s.setState(StateJoining, "switching media")
+	// When the switch will download first, say so: the card should read
+	// "downloading" while the fetch runs, not "switching" alone.
+	if s.playMode == mediateam.ModeDownload && mediateam.IsDownloadable(string(target.Kind)) {
+		if mgr := s.mediaManager(); mgr != nil && mgr.Enabled() {
+			s.setPhase(PhaseDownloading, "Downloading the new track…", "switch: download mode")
+		}
+	}
 
 	err := s.applySwitch(target, stale)
 	if stale() || errors.Is(err, errSwitchSuperseded) {
@@ -109,6 +121,18 @@ func (s *Session) runSwitch(target MediaTarget, stale func() bool) error {
 		s.freeLocalMediaEntry(old, "switch media completed (mocked)")
 	} else {
 		s.mu.Unlock()
+	}
+
+	// Record the honest phase for the new track: a local file won the switch,
+	// or the browser is playing it (a download attempt that failed inside
+	// applySwitch records the fallback itself).
+	s.mu.RLock()
+	hasLocal := s.localFile != nil
+	s.mu.RUnlock()
+	if hasLocal {
+		s.setPhase(PhaseDownloaded, "", "switch: playing the downloaded file")
+	} else if s.Phase() == PhaseNone {
+		s.setPhase(PhaseBrowser, "", "switch: playing the remote URL")
 	}
 
 	next := prevState
@@ -148,6 +172,16 @@ func (s *Session) applySwitch(target MediaTarget, stale func() bool) error {
 			res, err := s.runDownloadWithID(context.Background(), mgr, target, dlID)
 			if err != nil {
 				s.logger().Warnf("[PIPELINE:switch] session %s: download switch media failed (%v), falling back to direct browser navigation", s.ID, err)
+				// Record the fallback: the switch keeps the share up and
+				// plays the remote URL instead, and the card must say so
+				// rather than imply a download that never happened.
+				uerr := mediateam.ClassifyUserError(err)
+				user := fallbackUserMessage(uerr)
+				phase := PhaseFallback
+				if mediateam.IsUserCode(err, mediateam.UserCodeNetwork) {
+					phase = PhaseNetworkUnavailable
+				}
+				s.setPhaseFailedWith("download", phase, mediateam.UserCodeOf(err), user, err.Error())
 			} else if stale() {
 				// Never adopted: no lease was taken, so Remove is the right
 				// (unconditional) cleanup for this superseded download.

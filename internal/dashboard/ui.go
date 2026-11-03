@@ -53,6 +53,21 @@ function fmtDur(s){if(!s)return"—";const m=Math.floor(s/60);const ss=Math.floo
 function esc(t){const d=document.createElement("div");d.textContent=t==null?"":String(t);return d.innerHTML}
 function stageLine(sts){if(!sts||!sts.length)return"";return sts.map(x=>esc(x.name)+" "+(x.seconds<0?"?":(Math.round(x.seconds*10)/10)+"s")+(x.active?"*":"")).join(" · ")}
 function stateBadge(s){const cls=s==="streaming"?"ok":(s==="error"||s==="failed"?"err":(s==="starting"||s==="joining"?"warn":"dim"));return '<span class="'+cls+'">'+esc(s)+"</span>"}
+// phaseLine renders the honest playback-phase line: what is ACTUALLY happening
+// to the media right now (downloading / downloaded / browser / fallback /
+// failed / network_unavailable / recovering). It mirrors the Telegram card so
+// both surfaces tell the same story. A healthy plain browser stream renders
+// nothing (the mode line already says it); every other phase renders its icon,
+// label and the user-facing reason recorded with it — never the raw diagnostic.
+function phaseLine(s){if(!s||!s.phase)return"";if(s.phase==="browser"&&!s.phase_user_reason)return"";
+ const meta={downloading:["⬇️","Downloading"],downloaded:["💾","Downloaded"],browser:["🌐","Browser playback"],
+  fallback:["♻️","Browser fallback"],failed:["🔴","Playback failed"],network_unavailable:["📡","Network unavailable"],recovering:["🛠️","Recovering"]};
+ const m=meta[s.phase]||["",s.phase];const cls=(s.phase==="failed"||s.phase==="network_unavailable")?"err":((s.phase==="fallback"||s.phase==="recovering")?"warn":"dim");
+ let out='<div class="'+cls+'">'+(m[0]?m[0]+" ":"")+"<b>"+esc(m[1])+"</b>";
+ if(s.phase_user_reason){out+=" — "+esc(s.phase_user_reason)}return out+"</div>"}
+// phaseMethodIcon is the small glyph next to "via download"/"via browser" in
+// the mode line: the transport that is actually playing.
+function phaseMethodIcon(m){return m==="download"?"💾":"🌐"}
 function render(st){
  if(st.log_stats){const ls=st.log_stats;$("#logstats").textContent=ls.captured+"/"+ls.capacity+" entries · "+ls.errors+" errors · "+ls.warnings+" warnings"}
  const h=st.health||{};$("#health").innerHTML=
@@ -75,7 +90,10 @@ function render(st){
    '<button data-a="restart" data-id="'+s.id+'" class="ghost">🔁</button>'+
    '<button data-a="stop" data-id="'+s.id+'" class="danger">⏹</button></div>'+
    (s.title?"<div class='dim'>🎬 "+esc(s.title)+" "+fmtDur(s.cur)+" / "+fmtDur(s.dur)+"</div>":"")+
-   "<div class='dim'>🔊 "+s.volume+"% · ⚡ "+(s.rate||1)+"x"+(s.muted?" · 🔇":"")+(s.play_mode?" · "+esc(s.play_mode):"")+"</div>"+dl+
+   "<div class='dim'>🔊 "+s.volume+"% · ⚡ "+(s.rate||1)+"x"+(s.muted?" · 🔇":"")+
+   (s.play_mode?" · "+esc(s.play_mode):"")+
+   (s.playback_method?" · "+phaseMethodIcon(s.playback_method)+" via "+esc(s.playback_method):"")+
+   "</div>"+phaseLine(s)+dl+
    (s.stages&&s.stages.length?"<div class='dim'>🧭 "+stageLine(s.stages)+"</div>":"")+
    (s.error?"<div class='err'>🔴 "+esc(s.error)+"</div>":"");
   el.querySelectorAll("button").forEach(b=>b.onclick=()=>doAction(b.dataset.id,b.dataset.a));

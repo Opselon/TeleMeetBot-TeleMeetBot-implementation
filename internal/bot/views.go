@@ -278,6 +278,16 @@ func sessionCardText(st engine.Status) string {
 		}
 		sb.WriteString("\n")
 	}
+	// The phase line is the honest answer to "what is happening to my media
+	// right now?" — distinct from the mode (what was requested) and from the
+	// method (which transport won). It is what tells a user their download
+	// FAILED and the browser is keeping the meeting alive, or that the engine
+	// is repairing playback, or that the network to the source is down.
+	// The user reason is the actionable sentence; the operator diagnostic is
+	// never rendered here.
+	if ph := playbackPhaseLine(st); ph != "" {
+		sb.WriteString(ph)
+	}
 	if st.DownloadProgress.Active {
 		stage := st.DownloadProgress.Stage
 		if stage == "" {
