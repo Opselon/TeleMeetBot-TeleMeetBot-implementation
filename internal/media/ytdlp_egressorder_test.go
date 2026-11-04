@@ -3,6 +3,7 @@ package media
 import (
 	"context"
 	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -210,7 +211,7 @@ func TestYouTubeClientConfigValidatedAgainstInstalledYTDLP(t *testing.T) {
 		caps := &ytdlpClientCapabilities{clients: map[string]bool{"tv": true}}
 		pairs, dropped := youtubeExtractorArgs(caps)
 		joined := strings.Join(pairs, " ")
-		if !strings.Contains(joined, "player_client=android,ios,web") {
+		if !strings.Contains(joined, "player_client="+strings.Join(youtubeClientOrder, ",")) {
 			t.Fatalf("the documented client ladder must survive, pairs = %q (dropped %q)", pairs, dropped)
 		}
 	})
@@ -240,8 +241,70 @@ func TestYouTubeClientConfigValidatedAgainstInstalledYTDLP(t *testing.T) {
 			return &ytdlpClientCapabilities{}
 		}
 		args := m.ytdlpArgs("https://www.youtube.com/watch?v=abcdefghijk", "vid", "", "", "")
-		if val := playerClientArgValue(args); val != "android,ios,web" {
+		if val := playerClientArgValue(args); val != strings.Join(youtubeClientOrder, ",") {
 			t.Fatalf("probe failure must keep the documented ladder, got %q", val)
+		}
+	})
+	t.Run("the ladder carries the bot-check-resistant clients first", func(t *testing.T) {
+		// Regression: the historical ladder was android,ios,web, which is
+		// exactly the set YouTube challenges on a flagged egress. yt-dlp's
+		// own defaults since 2026.10.21 are tv_samsung,visionos,web; a video
+		// that bot-checks android/ios/web on every route still extracts
+		// through tv_samsung+visionos. The ladder must therefore lead with
+		// them (verified live 2026-11-04).
+		want := []string{"tv_samsung", "visionos", "android", "ios", "web"}
+		if !reflect.DeepEqual(youtubeClientOrder, want) {
+			t.Fatalf("youtubeClientOrder = %q, want %q", youtubeClientOrder, want)
+		}
+	})
+	t.Run("an old binary filters clients newer than its release", func(t *testing.T) {
+		// Regression: --list-extractor-args was REMOVED in yt-dlp 2026.x, so
+		// the capability probe exits 2 on the binary this image ships. The
+		// version floor map must then keep the argv honest: a 2026.08.19
+		// binary understands visionos but NOT tv_samsung, and a 2024 binary
+		// understands neither.
+		clients := func(version string) []string {
+			caps := &ytdlpClientCapabilities{clients: map[string]bool{}}
+			for _, c := range youtubeClientOrder {
+				if floor, ok := ytdlpClientAddedVersion[c]; ok && ytdlpVersionAtLeast(version, floor) {
+					caps.clients[c] = true
+				}
+			}
+			kept, _ := configuredYouTubeClients(youtubeClientOrder, caps)
+			return kept
+		}
+		if got := clients("2026.10.26"); !reflect.DeepEqual(got, []string{"tv_samsung", "visionos", "android", "ios", "web"}) {
+			t.Errorf("2026.10.26 must support every ladder client, got %q", got)
+		}
+		if got := clients("2026.08.19"); !reflect.DeepEqual(got, []string{"visionos", "android", "ios", "web"}) {
+			t.Errorf("2026.08.19 predates tv_samsung, got %q", got)
+		}
+		if got := clients("2024.03.05"); !reflect.DeepEqual(got, []string{"android", "ios", "web"}) {
+			t.Errorf("2024.03.05 predates tv_samsung+visionos, got %q", got)
+		}
+	})
+	t.Run("the version fallback probe validates clients against yt-dlp 2026.x", func(t *testing.T) {
+		// Regression: on yt-dlp 2026.10.26 --list-extractor-args exits 2 with
+		// "no such option" (the option was removed). probeYouTubeClientCapabilities
+		// must recover via --version instead of silently keeping a ladder that
+		// may name clients the binary does not honour.
+		m := newYtdlpTestManager(t, DefaultOptions(t.TempDir()), func(context.Context, []string) ([]byte, []byte, error) {
+			return nil, nil, youtubeBotCheck
+		})
+		m.ytdlpCapsProbe = nil // force the production probe path
+		m.ytdlpVersionProbe = func(context.Context, string) string { return "2026.10.26" }
+		caps := m.probeYouTubeClientCapabilities(context.Background(), "yt-dlp-probe")
+		if len(caps.clients) == 0 {
+			t.Fatalf("the version fallback must populate the client set on yt-dlp 2026.x")
+		}
+		for _, c := range youtubeClientOrder {
+			if !caps.clients[c] {
+				t.Errorf("yt-dlp 2026.10.26 must report support for %q", c)
+			}
+		}
+		args := m.ytdlpArgs("https://www.youtube.com/watch?v=abcdefghijk", "vid", "", "", "")
+		if val := playerClientArgValue(args); val != "tv_samsung,visionos,android,ios,web" {
+			t.Fatalf("the argv must carry the full validated ladder, got %q", val)
 		}
 	})
 }

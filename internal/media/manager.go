@@ -107,6 +107,10 @@ type Manager struct {
 	ytdlpCaps *ytdlpClientCapabilities
 	// ytdlpCapsProbe overrides the capability probe (tests).
 	ytdlpCapsProbe func(ctx context.Context, bin string) *ytdlpClientCapabilities
+	// ytdlpVersionProbe overrides the version probe the capability probe
+	// falls back to when yt-dlp no longer supports --list-extractor-args
+	// (tests). nil = run `yt-dlp --version` for real.
+	ytdlpVersionProbe func(ctx context.Context, bin string) string
 	// ytdlpCapsOnce makes the capability probe run exactly once per manager.
 	ytdlpCapsOnce sync.Once
 	// retryDelay overrides the sleep between yt-dlp attempts (tests).
