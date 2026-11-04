@@ -150,6 +150,10 @@ type ytdlpClientCapabilities struct {
 	// means "the probe could not enumerate" — callers must keep the
 	// configured list unchanged rather than discarding it.
 	clients map[string]bool
+	// version reports the yt-dlp release the probe asked the binary for.
+	// Empty means it did not need to (the capability list answered) or the
+	// binary would not say.
+	version string
 }
 
 // ytdlpMinClientListVersion is the first release known to enumerate accepted
@@ -215,10 +219,33 @@ func ytdlpVersionAtLeast(reported, target string) bool {
 	return true
 }
 
-// youtubeClientOrder is the documented client ladder: mobile clients first
-// (they are not subject to the web client's bot challenges), then the web
-// client last as a fallback. Mirror this order in whatever survives filtering.
-var youtubeClientOrder = []string{"android", "ios", "web"}
+// youtubeClientOrder is the documented client ladder for the YouTube
+// extractor. yt-dlp's OWN defaults since 2026.10.21 are
+// ('tv_samsung','visionos','web') — those are the clients YouTube still
+// serves on an egress it has flagged for the android/ios/web challenge
+// ("Sign in to confirm you're not a bot"), verified live: a video that
+// hard-bot-checks android/ios/web on every route still extracts cleanly
+// through tv_samsung+visionos over Tor. The mobile clients stay in the
+// ladder as cheap first attempts on a clean egress (they skip the web
+// challenge entirely); tv_samsung/visionos are the ones that recover a
+// flagged egress, and web stays last as the documented catch-all.
+// Mirror this order in whatever survives filtering.
+var youtubeClientOrder = []string{"tv_samsung", "visionos", "android", "ios", "web"}
+
+// ytdlpClientAddedVersion maps a YouTube player client to the first yt-dlp
+// release that understands it. Before yt-dlp could enumerate its accepted
+// clients this is the only way to keep the argv honest on an older binary:
+// passing a client the extractor has never heard of makes yt-dlp warn and
+// skip it (harmless), but a binary old enough to reject `player_client`
+// entirely exits with a non-obvious error. The version floor is therefore
+// only consulted when the capability probe could not answer.
+var ytdlpClientAddedVersion = map[string]string{
+	"android":    "2024.03.05", // player_client itself landed here
+	"ios":        "2024.03.05",
+	"web":        "2024.03.05",
+	"visionos":   "2026.08.19", // #17184
+	"tv_samsung": "2026.10.21", // #17723, then made a default in #17805
+}
 
 // configuredYouTubeClients returns the client list the argv should carry,
 // filtered by what the installed yt-dlp reports it supports. unsupported is
@@ -291,6 +318,39 @@ func stringsCutPrefix(s, prefix string) (string, bool) {
 	return s[len(prefix):], true
 }
 
+// probeYTDLPVersion asks the installed yt-dlp its release ("2026.10.26").
+// Empty means the binary could not or would not say; callers must keep their
+// configured client ladder unchanged rather than guessing. Bounded hard: a
+// probe must never hang the download it is supposed to protect.
+func (m *Manager) probeYTDLPVersion(ctx context.Context, bin string) string {
+	if m.ytdlpVersionProbe != nil {
+		return m.ytdlpVersionProbe(ctx, bin)
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			m.log.Warnf("[PIPELINE:download] youtube version probe panicked (%v)", r)
+		}
+	}()
+	vctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	var out strings.Builder
+	cmd := exec.CommandContext(vctx, bin, "--version")
+	setProcessGroup(cmd)
+	cmd.Stdout = &boundedWriter{w: &out, max: 4 * 1024}
+	cmd.Stderr = nil
+	if err := cmd.Run(); err != nil {
+		return ""
+	}
+	line := out.String()
+	if i := strings.IndexByte(line, '\n'); i > 0 {
+		line = line[:i]
+	}
+	if v, ok := parseYTDLPVersion(line); ok {
+		return v
+	}
+	return ""
+}
+
 // probeYouTubeClientCapabilities asks the installed yt-dlp which YouTube
 // clients it supports. Failures are never fatal — the probe returns an empty
 // capability set, and the caller falls back to the configured client list.
@@ -311,10 +371,29 @@ func (m *Manager) probeYouTubeClientCapabilities(ctx context.Context, bin string
 	cmd.Stdout = &boundedWriter{w: &stdout, max: 512 * 1024}
 	cmd.Stderr = nil
 	if err := cmd.Run(); err != nil {
-		// Older binaries reject --list-extractor-args entirely; that is not
-		// an error worth surfacing, just a probe without an answer.
-		m.log.Infof("[ PIPELINE:download] youtube client probe unavailable (%v); keeping configured client list", err)
-		return &ytdlpClientCapabilities{}
+		// `--list-extractor-args` was REMOVED in yt-dlp 2026.x (the option
+		// no longer exists, so the binary exits 2 with "no such option").
+		// That is not "an older binary" — it is a NEWER one that cannot
+		// answer the question this way anymore, and the historical
+		// "keep the configured list" fallback silently keeps a ladder that
+		// may name clients yt-dlp no longer honours. Recover by asking
+		// `--version` instead: the release number determines which clients
+		// the extractor understands (see ytdlpClientAddedVersion), so the
+		// argv still only carries clients the binary supports.
+		version := m.probeYTDLPVersion(ctx, bin)
+		if version == "" {
+			// Neither probe could answer: keep the configured ladder as-is.
+			m.log.Infof("[ PIPELINE:download] youtube client probe unavailable (%v); keeping configured client list", err)
+			return &ytdlpClientCapabilities{}
+		}
+		clients := map[string]bool{}
+		for _, c := range youtubeClientOrder {
+			if floor, ok := ytdlpClientAddedVersion[c]; ok && ytdlpVersionAtLeast(version, floor) {
+				clients[c] = true
+			}
+		}
+		m.log.Infof("[PIPELINE:download] youtube client probe: --list-extractor-args unsupported (yt-dlp %s); validated clients via version: %v", version, clients)
+		return &ytdlpClientCapabilities{clients: clients, version: version}
 	}
 	caps := &ytdlpClientCapabilities{clients: map[string]bool{}}
 	// Typical output: "    player_client: android, ios, web, ...". Any
