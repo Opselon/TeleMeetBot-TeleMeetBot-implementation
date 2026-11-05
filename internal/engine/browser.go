@@ -42,8 +42,20 @@ type launchOptions struct {
 	mediaProxy string
 }
 
-// detectProxy finds an explicit or ambient SOCKS5 proxy (e.g. Tor on 127.0.0.1:9050 or
-// Docker bridge host 172.17.0.1:9050).
+// detectProxy resolves the proxy for a browser launch. Resolution order:
+//
+//  1. An explicit browser.proxy (or TELEMEETBOT_PROXY env override) is used
+//     as written. The empty string is meaningful here: it is the operator's
+//     "run the browser DIRECT" choice, and it must not be silently replaced
+//     by an ambient proxy.
+//  2. Otherwise an ambient SOCKS5 listener (Tor on 127.0.0.1:9050 or the
+//     Docker bridge host 172.17.0.1:9050) is used. That is the historical
+//     zero-config path for hosts whose only clean egress is Tor.
+//
+// The order matters: probing the ambient listener BEFORE honouring an explicit
+// empty proxy would hijack a direct browser launch into the slowest route on
+// the host (a misconfiguration that is silent, stable, and very hard to
+// diagnose — the session keeps working while every tab crawls).
 func detectProxy(cfg BrowserConfig) string {
 	if p := strings.TrimSpace(cfg.Proxy); p != "" {
 		return p
