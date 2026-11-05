@@ -279,10 +279,15 @@ func TestYTDLPRetryArguments(t *testing.T) {
 	if !hasFlag("--socket-timeout", "30") {
 		t.Fatalf("--socket-timeout 30 missing from argv: %q", got)
 	}
-	// The WARP egress has no usable IPv6 route: IPv6-attempted handshakes fail
-	// outright, so force IPv4 through the proxy.
-	if !hasAny("--force-ipv4") {
-		t.Fatalf("--force-ipv4 missing from argv: %q", got)
+	// --force-ipv4 must NOT be in the argv. YouTube signs each googlevideo
+	// URL with the IP that extracted it (`ip=` param). Forcing the download
+	// socket to IPv4 makes the body fetch arrive from a different family
+	// (and, on a rotating egress like Tor, a different exit node entirely),
+	// so googlevideo 403s the transfer mid-body — verified live: the same
+	// URL streams cleanly at 4.7 MiB/s without the flag and dies at 94%
+	// with it.
+	if hasAny("--force-ipv4") {
+		t.Fatalf("--force-ipv4 present in argv: %q", got)
 	}
 }
 

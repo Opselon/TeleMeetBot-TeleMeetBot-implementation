@@ -461,7 +461,6 @@ func (m *Manager) ytdlpArgs(u, id, quality, subLang, proxy string) []string {
 		"--retry-sleep", "extractor:1",
 		"--retry-sleep", "file_access:1",
 		"--socket-timeout", "30", // a hung socket must not pin the download
-		"--force-ipv4", // the WARP egress has no working IPv6 route; AAAA attempts fail 100%
 	}
 	// Work around YouTube Innertube API datacenter blocking and TLS drops:
 	// emulate mobile (android/ios) client API endpoints which are not subject
