@@ -130,7 +130,18 @@ if api_hash:
 
 proxy = os.environ.get("TELEMEETBOT_PROXY", "").strip()
 if proxy:
-    text = re.sub(r'(proxy:\s*")[^"]*(")', rf'\g<1>{proxy}\g<2>', text)
+    # Apply only under the browser: section. A bare r'(proxy:\s*")'
+    # substitution also rewrites download.proxy, fusing the two legs into one
+    # route and clobbering an operator's direct-first egress ladder on every
+    # CD run. download.proxy is left alone: it defaults to direct and carries
+    # its own fallback_proxies ladder.
+    browser_start = text.find("\nbrowser:")
+    if browser_start != -1:
+        download_start = text.find("\ndownload:")
+        section_end = download_start if download_start > browser_start else len(text)
+        section = text[browser_start:section_end]
+        section = re.sub(r'(proxy:\s*")[^"]*(")', r"\g<1>" + proxy + r"\g<2>", section)
+        text = text[:browser_start] + section + text[section_end:]
 
 cid = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "").strip()
 csec = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "").strip()
