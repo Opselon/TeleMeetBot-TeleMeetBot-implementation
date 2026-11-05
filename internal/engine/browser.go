@@ -44,21 +44,26 @@ type launchOptions struct {
 
 // detectProxy resolves the proxy for a browser launch. Resolution order:
 //
-//  1. An explicit browser.proxy (or TELEMEETBOT_PROXY env override) is used
-//     as written. The empty string is meaningful here: it is the operator's
-//     "run the browser DIRECT" choice, and it must not be silently replaced
-//     by an ambient proxy.
-//  2. Otherwise an ambient SOCKS5 listener (Tor on 127.0.0.1:9050 or the
+//  1. An explicit browser.proxy is used as written, including the special
+//     value "direct" which forces a completely unproxied launch and defeats
+//     the ambient probe below. Without that escape hatch an operator whose
+//     egress is fast and clean but who also runs a Tor listener (this host:
+//     direct 165-232 MB/s vs Tor 0.4-2.8 MB/s, measured 2026-11-05) cannot
+//     make the browser use direct at all: an empty browser.proxy and a
+//     missing browser.proxy are the same string, so the ambient probe wins
+//     either way.
+//  2. TELEMEETBOT_PROXY applies when browser.proxy is unset.
+//  3. Otherwise an ambient SOCKS5 listener (Tor on 127.0.0.1:9050 or the
 //     Docker bridge host 172.17.0.1:9050) is used. That is the historical
 //     zero-config path for hosts whose only clean egress is Tor.
-//
-// The order matters: probing the ambient listener BEFORE honouring an explicit
-// empty proxy would hijack a direct browser launch into the slowest route on
-// the host (a misconfiguration that is silent, stable, and very hard to
-// diagnose — the session keeps working while every tab crawls).
 func detectProxy(cfg BrowserConfig) string {
-	if p := strings.TrimSpace(cfg.Proxy); p != "" {
-		return p
+	p := strings.TrimSpace(strings.ToLower(cfg.Proxy))
+	switch p {
+	case "":
+	case "direct", "direct://":
+		return ""
+	default:
+		return strings.TrimSpace(cfg.Proxy)
 	}
 	if p := strings.TrimSpace(os.Getenv("TELEMEETBOT_PROXY")); p != "" {
 		return p

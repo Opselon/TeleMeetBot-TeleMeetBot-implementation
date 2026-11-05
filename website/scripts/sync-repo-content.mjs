@@ -264,7 +264,7 @@ const CONFIG_DOCS = {
   'browser.lang': 'Browser locale. The Meet UI must stay English (<code>en-US</code>) for the automation to find its controls.',
   'browser.extra_args': 'Extra raw Chromium flags appended after the built-in capture and autoplay flags.',
   'browser.user_agent': 'Override the user agent. Empty sends a stock Chrome UA, because Meet rejects <code>HeadlessChrome</code>.',
-  'browser.proxy': 'Chromium proxy, for example <code>socks5://127.0.0.1:9050</code>, or the host-side egress proxy for YouTube.',
+  'browser.proxy': 'Chromium proxy, for example <code>socks5://127.0.0.1:9050</code>, or the host-side egress proxy for YouTube. The special value <code>direct</code> forces a completely unproxied browser: when Chromium must not ride an ambient Tor listener (empty and unset are indistinguishable, so an empty value still auto-detects one), <code>direct</code> is the only way to say "no proxy".',
   'download.enabled': 'Turn Download &amp; Stream on (default on). Browser mode always works, with or without this.',
   'download.dir': 'Managed download directory. Default <code>&lt;data_dir&gt;/downloads</code>; must not be a system directory.',
   'download.ttl_minutes': 'Orphan-cleanup lifetime of a downloaded file, counted from completion. Default 60. An active session holds its file past this deadline.',

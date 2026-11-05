@@ -35,7 +35,7 @@ func mediaEgresses(c *config.Config) []string {
 	var out []string
 	seen := map[string]bool{}
 	add := func(p string) {
-		if p = strings.TrimSpace(p); p != "" && !seen[p] {
+		if p = strings.TrimSpace(p); p != "" && !isDirectSentinel(p) && !seen[p] {
 			seen[p] = true
 			out = append(out, p)
 		}
@@ -46,6 +46,18 @@ func mediaEgresses(c *config.Config) []string {
 		add(p)
 	}
 	return out
+}
+
+// isDirectSentinel reports whether p is the "no proxy, ever" marker accepted
+// by detectProxy (browser.proxy / download.proxy). A sentinel must never
+// enter the egress ladder: it is not a route the media browser can fail over
+// to, only an instruction to stay unproxied.
+func isDirectSentinel(p string) bool {
+	switch strings.ToLower(strings.TrimSpace(p)) {
+	case "direct", "direct://":
+		return true
+	}
+	return false
 }
 
 // downloadFallbacksFor resolves the fallback egresses for media downloads.
