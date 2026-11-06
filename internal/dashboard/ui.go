@@ -103,7 +103,20 @@ function render(st){
  $("#users").innerHTML=us.length?us.map(u=>"<tr><td>"+esc(u.display_name||u.username||u.user_id)+"</td><td>"+esc(u.state)+"</td><td class='dim'>"+esc(u.detail||"")+"</td></tr>").join(""):"<tr><td class='dim' colspan=3>nobody active</td></tr>";
 }
 async function doAction(id,a){
- if(a==="stop"&&!confirm("Stop session "+id+"?"))return;
+ if(a==="stop"){
+  // Stop is NOT a media action: it routes to the dedicated stop endpoint,
+  // which waits (bounded) for the backend to confirm the session actually
+  // terminated. Routing it through the action endpoint used to hit an
+  // unhandled "stop" case and fail with HTTP 400 — a dead Stop button.
+  if(!confirm("Stop session "+id+"?"))return;
+  try{
+   await api("/api/session/stop?id="+encodeURIComponent(id),{method:"POST"});
+   // Give the backend the bounded moment it needs, then refresh: the
+   // session must appear STOPPED (terminal) rather than vanishing.
+   setTimeout(refresh,250);refresh();
+  }catch(e){alert(e.message)}
+  return;
+ }
  try{
   let body={action:a};
   if(a==="volume"){const v=prompt("Volume 0-100","50");if(v==null)return;body={action:"volume",arg:Number(v)}}

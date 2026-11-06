@@ -55,7 +55,7 @@ func TestPendingCardOffersAdaptiveOptions(t *testing.T) {
 	assertLabels(t, h.bot.pendingKB(items, nil), "▶️ Start a new stream", "🗑 Discard staged media", "⬅️ Dashboard")
 	st := engine.Status{ID: "s-a", Title: "track.mp3"}
 	assertLabels(t, h.bot.pendingKB(items, []engine.Status{st}), "➕ Add to active queue", "🔀 Switch live session", "▶️ Start a new stream", "🗑 Discard staged media", "⬅️ Dashboard")
-	h.bot.handlePendingCallback(1, 123, 7, cbPendingDrop)
+	h.bot.handlePendingCallback(1, 123, 7, &tgbotapi.CallbackQuery{ID: "q1"}, cbPendingDrop)
 	if h.bot.getPending(123) != nil {
 		t.Fatal("discard must clear the pending slot")
 	}
@@ -102,7 +102,7 @@ func TestQueue50ForwardedTelegramSongs(t *testing.T) {
 	}
 
 	// Now launch the session from staged playlist
-	h.bot.handlePendingCallback(1, 123, 7, cbPendingStart)
+	h.bot.handlePendingCallback(1, 123, 7, &tgbotapi.CallbackQuery{ID: "q2"}, cbPendingStart)
 	f := h.bot.getFlow(123)
 	if f == nil || len(f.queue) != 49 {
 		t.Fatalf("wizard queue count = %d, want 49 additional tracks", len(f.queue))

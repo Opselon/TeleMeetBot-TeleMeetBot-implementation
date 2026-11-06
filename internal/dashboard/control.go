@@ -46,7 +46,11 @@ func (s *Server) handleSessionStart(w http.ResponseWriter, r *http.Request) {
 	er := engine.StartRequest{
 		MeetLink:  req.MeetURL,
 		MediaLink: req.MediaURL,
-		PlayMode:  req.Mode,
+		// Normalize the mode the same way the bot does: an empty or
+		// invalid string must not travel to the engine unchecked, and the
+		// documented default (browser) must apply. Without this the web
+		// path silently diverged from the Telegram path.
+		PlayMode:  engine.NormalizePlaybackMode(req.Mode),
 		Queue:     req.Queue,
 		Volume:    req.Volume,
 		Speed:     req.Speed,

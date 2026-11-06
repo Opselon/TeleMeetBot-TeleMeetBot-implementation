@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -193,6 +195,25 @@ func (f *fakeEngine) Events() <-chan engine.Event { return make(chan engine.Even
 // MediaManager returns nil: the fake engine has no Download & Stream
 // manager, which is also what a bot sees when the feature is disabled.
 func (f *fakeEngine) MediaManager() *media.Manager { return nil }
+
+// Stop mirrors the engine's verified stop for the fake: it cancels the
+// session and waits (bounded) for its cleanup, so tests exercise the
+// same authoritative path production uses.
+func (f *fakeEngine) Stop(id engine.SessionID) error {
+	f.mu.Lock()
+	s := f.sessions[0]
+	f.mu.Unlock()
+	if s == nil {
+		return fmt.Errorf("session %s not found", id)
+	}
+	s.Stop()
+	select {
+	case <-s.Done():
+	case <-time.After(15 * time.Second):
+		return fmt.Errorf("session %s did not stop in time", id)
+	}
+	return nil
+}
 
 // ---- harness --------------------------------------------------------------
 

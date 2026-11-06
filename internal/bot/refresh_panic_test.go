@@ -56,6 +56,7 @@ func (p *panicEngine) List() []*engine.Session {
 func (p *panicEngine) Start(ctx context.Context, req engine.StartRequest) (*engine.Session, error) {
 	return nil, nil
 }
+func (p *panicEngine) Stop(id engine.SessionID) error          { return nil }
 func (p *panicEngine) Get(id engine.SessionID) *engine.Session { return nil }
 func (p *panicEngine) Active() []*engine.Session               { return nil }
 func (p *panicEngine) Events() <-chan engine.Event             { return nil }

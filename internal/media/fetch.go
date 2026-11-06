@@ -372,12 +372,26 @@ func (m *Manager) resolver() func(string) ([]net.IP, error) {
 // copyLimitedProgress is copyLimited with a mid-stream callback for progress
 // reporting. The callback fires at most 4x/second so a big file cannot flood
 // the bus. It also calculates instantaneous download speed in bytes/sec.
+//
+// The loop observes ctx on EVERY iteration, before the read as well as
+// after: a cancelled fetch must not sit blocked inside r.Read() waiting
+// for a connection that will never produce another byte (a cancelled
+// Transfer-Encoding response, a proxied socket that died silently).
+// Checking only after a successful read let a stop mid-body hang until
+// the client's own socket timeout, which defeated the whole point of
+// session cancellation.
 func (m *Manager) copyLimitedProgress(ctx context.Context, r io.Reader, w io.Writer, max int64, every func(read, speed int64)) (int64, error) {
 	buf := make([]byte, 512*1024)
 	var written int64
 	var lastWritten int64
 	lastReport := time.Now()
 	for {
+		// Observe cancellation BEFORE attempting the next read: the
+		// read below can block for the whole socket timeout on a
+		// connection that is already dead but not yet EOF.
+		if ctx.Err() != nil {
+			return written, ctx.Err()
+		}
 		if max > 0 && written >= max {
 			n, err := r.Read(buf)
 			if n > 0 {

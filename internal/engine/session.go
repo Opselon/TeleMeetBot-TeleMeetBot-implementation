@@ -46,12 +46,32 @@ type Session struct {
 	log        Logger
 	playerOpts PlayerOptions
 
+	// ctx is the session lifespan: the single authoritative cancellation
+	// authority. Every session-owned operation (download, subprocess,
+	// retry loop, media switch, queue advance) derives from it, so
+	// Stop() — which cancels it — reaches all of them through one path
+	// instead of a second registry that has to be kept in sync. See
+	// lifecycle.go for the full rationale and the contract a worker must
+	// honour (observe ctx.Done() and return promptly).
 	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
 	// doneOnce guarantees cleanup() closes done exactly once even when the
 	// session goroutine panics mid-cleanup.
 	doneOnce sync.Once
+	// workers lists the session-owned background workers that cleanup()
+	// must wait for before the session reports STOPPED, and
+	// runningWorkers is how many of them are still alive. A session whose
+	// own goroutine exited but which still has a live download has not
+	// actually stopped — that gap is exactly what these fields close.
+	// Guarded by mu. See lifecycle.go.
+	workers        map[string]context.CancelFunc
+	runningWorkers int
+	// stopOnce makes Stop idempotent: the first call records the
+	// operator-visible "stopping" detail state and every later call is
+	// a cheap no-op, so two simultaneous Stop requests can never race
+	// the session into an inconsistent state.
+	stopOnce sync.Once
 
 	mu       sync.RWMutex
 	state    string
@@ -428,10 +448,54 @@ func (s *Session) snapshotState() string {
 	return s.state
 }
 
-// Stop asks the session to leave and release Chromium.
-func (s *Session) Stop() { s.cancel() }
+// Stop terminates the session: every operation it owns is cancelled
+// along the single authoritative path (the session lifespan context)
+// and the resources it held are released.
+//
+// Stop is idempotent and race-safe. The first call records an
+// operator-visible "stopping" detail state so the card never claims
+// the session is still live while it is tearing down; every later
+// call is a cheap no-op, so two simultaneous Stop requests (a double
+// tap on the button, a Telegram press racing the dashboard) can never
+// race the session into an inconsistent state.
+//
+// Stop is session-isolated by construction: cancelling this session's
+// context cannot touch another session, whose workers derive from
+// ITS OWN lifespan. Stop never blocks indefinitely: the verification
+// wait lives in Manager.Stop (bounded by stopGracePeriod), and
+// cancelLifespan's own wait is bounded per worker class.
+//
+// After Stop, the session's done channel closes once cleanup() has
+// released the pages, the leases and the temp files — that is the
+// STOPPED confirmation every entry point must wait for before
+// reporting success to the user.
+func (s *Session) Stop() {
+	s.stopOnce.Do(func() {
+		s.mu.Lock()
+		if s.state != StateError && !IsTerminalState(s.state) {
+			s.detail = "stopping"
+		}
+		s.mu.Unlock()
+		// Sweep the partial files a cancelled download would otherwise
+		// leave behind, then cancel the lifespan. The sweep is
+		// best-effort and never blocks the cancellation itself.
+		s.stopOwnedDownload()
+		s.cancelLifespan()
+		// Guarantee the termination signal no matter who called Stop.
+		// cleanup() — the deferred release in run() — is what normally
+		// closes done, but a session stopped before its goroutine ever
+		// got there (Stop immediately after creation, Stop while the
+		// download stage was still holding it) would otherwise wait for
+		// a cleanup that run()'s error paths skip: several of run()'s
+		// early-return branches return BEFORE the deferred cleanup is
+		// reachable, and a hand-built session may have no run() at all.
+		// doneOnce makes this a no-op when cleanup() already ran, so
+		// the two paths can never double-close.
+		s.markStopped()
+	})
+}
 
-// Done is closed when the session has fully cleaned up.
+// done is closed when the session has fully cleaned up.
 func (s *Session) Done() <-chan struct{} { return s.done }
 
 // setState records a new state and emits a state event.
@@ -841,6 +905,16 @@ func (s *Session) run() {
 // closes it makes every stop time out at its bounded deadline and reports a
 // spurious "did not stop in time" failure.
 func (s *Session) cleanup() {
+	// Wait for every session-owned worker to actually terminate before
+	// the session reports STOPPED. The lifespan context is cancelled by
+	// the time we get here (Stop) or is about to be (run() returning),
+	// so a cooperative worker is already unwinding; the wait is bounded
+	// so a stuck worker cannot hold the session's terminal status
+	// hostage, and any that outlive the deadline are named in the log
+	// instead of vanishing silently. See lifecycle.go.
+	if stuck := s.cancelLifespan(); len(stuck) > 0 {
+		s.log.Warnf("[PIPELINE:session] session %s: worker(s) did not terminate within %s: %v", s.ID, stopGracePeriod, stuck)
+	}
 	defer func() {
 		// Close done exactly once, after every resource release so a caller
 		// waiting on Done() observes a fully released session. The channel
@@ -2003,13 +2077,17 @@ type MediaStatus = mediaStatus
 // SetStopForTesting gives a directly-constructed session (bot tests build
 // sessions without Manager.Start) a working Stop/Done pair: cancelling the
 // context closes the done channel exactly like the real run loop's cleanup.
+//
+// It routes through markStopped (the same doneOnce-guarded closer the real
+// Stop uses) so a test that calls BOTH Stop() and the context cancel can
+// never double-close done — the exact race the guard exists for.
 func (s *Session) SetStopForTesting() {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	s.ctx, s.cancel, s.done = ctx, cancel, done
 	go func() {
 		<-ctx.Done()
-		close(done)
+		s.markStopped()
 	}()
 }
 

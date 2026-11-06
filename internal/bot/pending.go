@@ -232,7 +232,9 @@ func (b *Bot) pendingKB(items []*pendingMedia, live []engine.Status) *tgbotapi.I
 }
 
 // handlePendingCallback dispatches actions from the staged-media card.
-func (b *Bot) handlePendingCallback(chatID, userID int64, msgID int, data string) {
+// q is the originating callback query so the dispatcher can answer the
+// button's spinner (an empty callback id cannot dismiss it).
+func (b *Bot) handlePendingCallback(chatID, userID int64, msgID int, q *tgbotapi.CallbackQuery, data string) {
 	items := b.getPending(userID)
 	b.log.Infof("[PIPELINE:pending] staged media callback: data=%q user=%d chat=%d (staged_items=%d)", data, userID, chatID, len(items))
 	if len(items) == 0 {
@@ -309,7 +311,12 @@ func (b *Bot) handlePendingCallback(chatID, userID int64, msgID int, data string
 		_ = b.api.Edit(chatID, msgID, fmt.Sprintf("🗑 Discarded %d staged file(s).", n), mainMenuKB())
 
 	default:
-		_ = b.api.AnswerCallback("", "unknown action")
+		// Answer with the real callback id, the way every other dispatcher
+		// does: an empty id cannot dismiss the spinner, so an unknown pm:
+		// action left the button visibly spinning until Telegram's own
+		// timeout. Log it too — a silent unknown is undiagnosable.
+		b.log.Warnf("[PIPELINE:pending] unknown pending callback data=%q from user=%d", data, userID)
+		_ = b.api.AnswerCallback(q.ID, "unknown action")
 	}
 }
 

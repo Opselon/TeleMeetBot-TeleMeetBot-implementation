@@ -129,6 +129,12 @@ func (b *Bot) handleCaptionsCallback(chatID, userID int64, msgID int, q *tgbotap
 		st = s.Snapshot()
 		b.setCardView(sid, chatID, msgID, "captions")
 		_ = b.api.Edit(chatID, msgID, captionsMenuText(st), captionsMenuKB(st))
+	case "caplangs":
+		// The 🌐 Preferred language button routes here; the menu builder
+		// lives in handleCaptionLangsMenu (probe-first, then the
+		// preference list). Without this case the button answered
+		// "unknown caption action" and opened nothing.
+		b.handleCaptionLangsMenu(chatID, userID, msgID, q, data)
 	case "capinfo":
 		_ = b.api.AnswerCallback(q.ID, "")
 		b.setCardView(sid, chatID, msgID, "captions")
