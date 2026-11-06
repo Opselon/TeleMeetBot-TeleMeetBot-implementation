@@ -791,7 +791,7 @@ func (b *Bot) handleCallback(ctx context.Context, q *tgbotapi.CallbackQuery) {
 	case strings.HasPrefix(data, "set:"):
 		b.handleSettingsCallback(chatID, userID, msgID, q, data)
 	case strings.HasPrefix(data, "pm:"):
-		b.handlePendingCallback(chatID, userID, msgID, data)
+		b.handlePendingCallback(chatID, userID, msgID, q, data)
 	case strings.HasPrefix(data, "q:"):
 		b.handleQueueCallback(chatID, userID, msgID, q, data)
 	case strings.HasPrefix(data, "act:"):
@@ -1215,13 +1215,36 @@ func (b *Bot) healthText() string {
 }
 
 // sendMain sends the dashboard as a new message.
+// sendMain renders the dashboard. When a resumable creation draft exists,
+// the keyboard carries a ▶️ Resume draft button (cbResumeDraft, "flow:resume"):
+// the draft-restore handler existed but no keyboard emitted the callback, so
+// the only way back into a saved draft was to retype everything.
 func (b *Bot) sendMain(chatID, userID int64) {
-	msgID, err := b.api.Send(chatID, b.mainText(userID), mainMenuKB())
+	kb := mainMenuKB()
+	if b.hasFreshDraft(userID) {
+		kb = mainMenuKBWithDraft()
+	}
+	msgID, err := b.api.Send(chatID, b.mainText(userID), kb)
 	if err == nil {
 		b.mu.Lock()
 		b.menus[chatID] = msgID
 		b.mu.Unlock()
 	}
+}
+
+// mainMenuKBWithDraft is mainMenuKB plus the draft-resume shortcut. The base
+// keyboard is shared so the two can never drift apart.
+func mainMenuKBWithDraft() *tgbotapi.InlineKeyboardMarkup {
+	kb := mainMenuKB()
+	rows := kb.InlineKeyboard
+	// Insert directly under the New stream row it belongs to.
+	newRow := []tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardButtonData("▶️ Resume draft", cbResumeDraft)}
+	out := make([][]tgbotapi.InlineKeyboardButton, 0, len(rows)+1)
+	out = append(out, rows[0])
+	out = append(out, newRow)
+	out = append(out, rows[1:]...)
+	kb.InlineKeyboard = out
+	return kb
 }
 
 // sendSessions sends the session list.

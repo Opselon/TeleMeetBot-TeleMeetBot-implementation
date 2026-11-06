@@ -1193,8 +1193,16 @@ func playlistQueueToolsKB(st engine.Status) *tgbotapi.InlineKeyboardMarkup {
 			tgbotapi.NewInlineKeyboardButtonData("💾 Save as playlist", "q:save:"+id),
 		},
 		{
-			tgbotapi.NewInlineKeyboardButtonData("📚 Load playlist", "q:load:"+id),
+			// q:addnext was a feature with a handler and no button: the
+			// queue-add flow (stepQueueAddNext, EnqueueNext) was fully
+			// implemented but no keyboard emitted the callback, so the
+			// "insert after the playing item" path was unreachable. The
+			// tools screen is where queue management lives.
+			tgbotapi.NewInlineKeyboardButtonData("➕ Add next", "q:addnext:"+id),
 			tgbotapi.NewInlineKeyboardButtonData("🗑 Clear options", "q:clear_confirm:"+id),
+		},
+		{
+			tgbotapi.NewInlineKeyboardButtonData("📚 Load playlist", "q:load:"+id),
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData("📋 View queue", "act:"+id+":queue"),

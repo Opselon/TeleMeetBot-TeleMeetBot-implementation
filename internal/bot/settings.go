@@ -217,6 +217,20 @@ func (b *Bot) handleSettingsCallback(chatID, userID int64, msgID int, q *tgbotap
 	var u store.UserSettings
 	switch verb {
 	case "back":
+		// "⬅️ Settings" is the back button of the settings pickers. When the
+		// user arrived from the PRE-LAUNCH CONFIRM CARD (confirmKB renders
+		// set:quality / set:captions), returning to the settings screen
+		// stranded them: no button there leads back to the wizard, so the
+		// pending draft's review card was lost and had to be rebuilt by
+		// hand. When a creation flow is open, go back to where they came
+		// from — the wizard screen — and only otherwise to settings.
+		if f := b.getFlow(userID); f != nil {
+			if _, isCreation := workflowStateOf(f); isCreation {
+				_ = b.api.AnswerCallback(q.ID, "")
+				_ = b.api.Edit(chatID, msgID, b.workflowScreenText(userID, f), b.workflowScreenKB(userID, f))
+				return
+			}
+		}
 		_ = b.api.AnswerCallback(q.ID, "")
 		b.showUserSettings(chatID, msgID, userID)
 		return

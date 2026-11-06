@@ -214,6 +214,12 @@ func playlistDetailKB(p store.Playlist, items []store.PlaylistItem, page, total 
 	}
 
 	rows = append(rows, []tgbotapi.InlineKeyboardButton{
+		// pl:clr was a dead control: the handler and its confirm screen
+		// (playlistClearText/playlistClearKB → pl:clrok → ClearItems)
+		// existed but no keyboard emitted pl:clr, so an operator could
+		// never reach the clear flow. The open-playlist view is the only
+		// screen that lists the items being cleared.
+		tgbotapi.NewInlineKeyboardButtonData("🧹 Clear items", fmt.Sprintf("pl:clr:%d", p.ID)),
 		tgbotapi.NewInlineKeyboardButtonData("🗑 Delete playlist", fmt.Sprintf("pl:del:%d", p.ID)),
 	})
 	rows = append(rows, []tgbotapi.InlineKeyboardButton{
