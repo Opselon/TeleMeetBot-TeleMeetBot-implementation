@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 )
 
@@ -22,6 +23,9 @@ func TestYTDLPFallsBackToAlternateEgress(t *testing.T) {
 	opts := DefaultOptions(dir)
 	opts.Proxy = "http://172.17.0.1:3339"
 	opts.FallbackProxies = []string{"socks5://172.17.0.1:9050"}
+	// The bot-check here is an ACCOUNT gate; with a cookie jar configured
+	// the ladder still advances (the jar can answer it on any route).
+	opts.CookiesFile = "/cookies.txt"
 
 	var calls [][]string
 	m := newYtdlpTestManager(t, opts, func(_ context.Context, args []string) ([]byte, []byte, error) {
@@ -89,8 +93,17 @@ func proxyOf(argv []string) string {
 // lands on throttled IPs), not of the video: the next attempt rotates to a
 // fresh circuit and must be given the chance.
 func TestYTDLPMidBody403AdvancesEgressLadder(t *testing.T) {
+	// A cookie jar is set because the direct leg of this scenario returns a
+	// bot-check: the account-gate fast fail stops the ladder only when NO
+	// jar could answer it (the without-jar half is pinned in cookies_test.go).
+	jar := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(jar, []byte("# jar\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	dir := t.TempDir()
 	opts := DefaultOptions(dir)
+	opts.CookiesFile = jar
 	opts.Proxy = "http://172.17.0.1:3339"
 	opts.FallbackProxies = []string{"socks5://172.17.0.1:9050"}
 

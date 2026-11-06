@@ -59,6 +59,20 @@ type Options struct {
 	// instance, a residential relay) is what keeps a session alive. Empty
 	// keeps the historical single-proxy behaviour.
 	FallbackProxies []string
+	// CookiesFile is a Netscape-format cookie jar handed to yt-dlp with
+	// --cookies. It is the ONLY supported way past YouTube's "Sign in to
+	// confirm you're not a bot" on an egress that is not flagged per-video:
+	// the challenge is an account gate, so an unauthenticated extraction
+	// cannot answer it no matter which egress it comes from.
+	//
+	// THE GOOGLE ACCOUNT IS NOT THIS. A connected Google Account holds OAuth
+	// Bearer tokens (googleauth.UserProfile), and Google explicitly
+	// prohibits converting OAuth tokens into first-party session cookies
+	// (SID/HSID/__Secure-1PSID). Those tokens authenticate the USER to
+	// Google APIs; they do not log a browser into youtube.com. An operator
+	// who wants their YouTube account to unlock downloads exports a cookie
+	// jar from a logged-in browser and points this key at it.
+	CookiesFile string
 }
 
 // DefaultOptions returns the production policy: one hour TTL, 2 GiB ceiling,

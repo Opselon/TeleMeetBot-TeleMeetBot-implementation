@@ -1266,6 +1266,18 @@ func (s *Session) openMedia() error {
 	s.mediaPage = p
 	s.mu.Unlock()
 
+	// The media tab faces the SAME YouTube account gate as yt-dlp: a
+	// bot-checked video presents LOGIN_REQUIRED in the player, which is
+	// exactly the error the extractor already told us about. Inject the
+	// configured cookie jar so the watch page carries the same
+	// authenticated session the downloader uses. Nothing happens when no
+	// jar is configured (the overwhelmingly common case).
+	if err := s.injectYouTubeCookies(p); err != nil {
+		// A broken jar is an operator problem, not a reason to kill the
+		// session: browser playback may still work for un-flagged videos.
+		s.log.Warnf("[PIPELINE:googleauth] session %s: cookie jar not injected: %v", s.ID, err)
+	}
+
 	target := s.MediaURL
 	kind := s.MediaKind
 	sourceURL := s.MediaURL
@@ -1342,6 +1354,45 @@ func (s *Session) openMedia() error {
 		_, _ = s.mediaAction("mute", 0)
 		_, _ = s.mediaAction("pause", 0)
 	}
+	return nil
+}
+
+// injectYouTubeCookies loads the configured download.cookies_file jar and
+// sets it on p. The watch page faces the same YouTube account gate as
+// yt-dlp, so the tab must carry the same authenticated session the
+// extractor uses. Nil cookies (no jar configured) is a no-op.
+func (s *Session) injectYouTubeCookies(p *rod.Page) error {
+	if s.mgr == nil {
+		return nil
+	}
+	cookies, err := s.mgr.YouTubeCookies()
+	if err != nil {
+		return err
+	}
+	if len(cookies) == 0 {
+		return nil
+	}
+	params := make([]*proto.NetworkCookieParam, 0, len(cookies))
+	for _, c := range cookies {
+		domain := c.Domain
+		if domain != "" && !strings.HasPrefix(domain, ".") {
+			// CDP treats a leading dot as "include subdomains"; the
+			// Netscape column already said which it is, and a bare host
+			// here would limit the cookie to exactly that host.
+			domain = "." + domain
+		}
+		params = append(params, &proto.NetworkCookieParam{
+			Name:   c.Name,
+			Value:  c.Value,
+			Domain: domain,
+			Path:   c.Path,
+			Secure: c.Secure,
+		})
+	}
+	if err := (proto.NetworkSetCookies{Cookies: params}).Call(p); err != nil {
+		return fmt.Errorf("set cookies: %w", err)
+	}
+	s.log.Infof("[PIPELINE:googleauth] session %s: injected %d YouTube session cookies into media tab", s.ID, len(params))
 	return nil
 }
 

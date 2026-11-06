@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	mathrand "math/rand"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -95,6 +96,9 @@ type MediaOptions struct {
 	// must not be given to the media tab again. Empty means the configured
 	// browser proxy is the only route (the historical behaviour).
 	MediaEgresses []string
+	// DownloadCookies is a Netscape cookie jar handed to yt-dlp with
+	// --cookies. See media.Options.CookiesFile.
+	DownloadCookies string
 	// DownloadBaseDir is the anchor for a relative DownloadDir (the config's
 	// paths.data_dir). Empty means "resolve against the process CWD".
 	DownloadBaseDir string
@@ -358,6 +362,10 @@ func (m *Manager) initMediaManager() error {
 	// → fallback_proxies) still honours every configured route.
 	opts.FallbackProxies = append(opts.FallbackProxies[:0], m.mediaCfg.DownloadFallbacks...)
 	opts.AllowTranscode = m.mediaCfg.DownloadAllowXcode
+	// The authenticated cookie jar (download.cookies_file) applies to every
+	// run on the ladder: YouTube's account gate follows the account, so a
+	// jar that answers it answers it on every egress.
+	opts.CookiesFile = strings.TrimSpace(m.mediaCfg.DownloadCookies)
 	// Anchor the download dir on the data dir when the operator left it
 	// relative or empty: a managed dir relative to the process CWD is
 	// ambiguous for a service that may be started from anywhere.
@@ -383,6 +391,21 @@ func (m *Manager) SetMediaTTLForTest(d time.Duration) {
 
 // MediaManager returns the Download & Stream manager (nil when disabled).
 func (m *Manager) MediaManager() *mediateam.Manager { return m.mediaMgr }
+
+// YouTubeCookies returns the parsed download.cookies_file jar for the
+// media tab. The watch page faces the SAME account gate as yt-dlp
+// ("Sign in to confirm you're not a bot" presents as LOGIN_REQUIRED in the
+// player), so the tab must carry the same authenticated session the
+// extractor uses. Returns nil when no jar is configured. A jar that cannot
+// be read returns an error — the operator must hear about it rather than
+// silently fall back to an unauthenticated tab.
+func (m *Manager) YouTubeCookies() ([]*http.Cookie, error) {
+	cf := strings.TrimSpace(m.mediaCfg.DownloadCookies)
+	if cf == "" || m.mediaMgr == nil {
+		return nil, nil
+	}
+	return mediateam.LoadCookiesFile(cf)
+}
 
 // Netcap returns the shared network capability layer. It is never nil for a
 // manager built by NewManager. Callers may ask it questions at any time;

@@ -91,6 +91,24 @@ func transientFailure(err error, stderr []byte) bool {
 		strings.Contains(t, "no such file or directory")
 }
 
+// errAccountGate names YouTube's "Sign in to confirm you're not a bot"
+// verdict as what it is: an ACCOUNT gate, not an egress problem.
+var errAccountGate = errors.New("YouTube account gate (bot check)")
+
+// accountGate reports whether the failure is YouTube's account challenge
+// ("Sign in to confirm you're not a bot") rather than a route problem.
+// The distinction decides whether the egress ladder has anything left to
+// try: the challenge follows the ACCOUNT, so changing the IP cannot answer
+// it — only an authenticated cookie jar can. proxyBlocked() must keep
+// returning true for it (it IS egress-shaped from the ladder's point of
+// view, so a configured jar should still get its chance on another route),
+// while accountGate() is the stronger claim that no route helps.
+func accountGate(stderr []byte) bool {
+	t := strings.ToLower(string(stderr))
+	return strings.Contains(t, "sign in to confirm you're not a bot") ||
+		strings.Contains(t, "sign in to confirm you’re not a bot")
+}
+
 // egresses returns the ordered ladder of egresses a YouTube download may use.
 //
 // DIRECT FIRST. The empty string means "direct connection" — no proxy, no
@@ -490,6 +508,13 @@ func (m *Manager) ytdlpArgs(u, id, quality, subLang, proxy string) []string {
 	if p := strings.TrimSpace(proxy); p != "" {
 		args = append(args, "--proxy", p)
 	}
+	// An authenticated cookie jar is the only thing that answers YouTube's
+	// account gate ("Sign in to confirm you're not a bot"). It applies to
+	// every route on the ladder: the challenge follows the ACCOUNT, not the
+	// IP, so a cookie that clears it clears it on direct and Tor alike.
+	if cf := strings.TrimSpace(m.opts.CookiesFile); cf != "" {
+		args = append(args, "--cookies", cf)
+	}
 	// ffmpeg decides whether the merge ladder is usable at all: asking
 	// yt-dlp for bv*+ba without it just fails the download.
 	selector := FormatSelectorFor(quality, m.FFmpegOK())
@@ -610,6 +635,15 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality, subLang string
 	// ("unsupported URL", "Requested format is not available") fail fast on
 	// the first route. stderr carries the last run's diagnosis so the ladder
 	// decision below sees the real failure text.
+	//
+	// ACCOUNT-GATE FAST FAIL: "Sign in to confirm you're not a bot" is NOT an
+	// egress problem — it follows the account, not the IP, so no route on the
+	// ladder can answer it and only a cookie jar can. When that verdict comes
+	// back and no cookies_file is configured, rerunning the same argv on the
+	// next route is pure latency: 3 attempts per route × every route on the
+	// ladder, which is exactly the "42s spent downloading nothing" the
+	// operator sees. Fail fast instead, with an actionable error that names
+	// the one supported remedy.
 	routes := m.egresses()
 	var res *ytdlpResult
 	var last error
@@ -671,11 +705,31 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality, subLang string
 			// stop rerunning identical argv and let the egress ladder decide
 			// whether another route could help. Transient, rate-limit-shaped
 			// failures keep the historical bounded retries to ride out a flap.
+			// The account gate is deterministic too AND no other route answers
+			// it, so the retry budget should not be spent on it either; the
+			// ladder-level check below turns it into an actionable error.
+			if accountGate(stderr) {
+				break
+			}
 			if !proxyBlocked(stderr) && !transientFailure(rerr, stderr) {
 				break
 			}
 		}
 		if ri+1 < len(routes) && proxyBlocked(stderr) {
+			// ACCOUNT-GATE FAST FAIL: "Sign in to confirm you're not a bot"
+			// follows the ACCOUNT, not the IP. No route on the ladder can
+			// answer it, so advancing only burns the operator's time — the
+			// "42s downloading nothing" symptom. When no cookie jar is
+			// configured there is exactly one remedy (download.cookies_file),
+			// so say so now instead of walking every remaining route at
+			// maxExecRetries each. With a jar configured the ladder still
+			// advances: the jar answers the gate on any route, so another
+			// route can genuinely still succeed.
+			if accountGate(stderr) && strings.TrimSpace(m.opts.CookiesFile) == "" {
+				m.MarkEgressBlocked(proxy)
+				last = fmt.Errorf("%w — YouTube requires a signed-in account for this video; set download.cookies_file to a Netscape cookie jar exported from a logged-in browser (a connected Google Account is OAuth tokens, not YouTube session cookies)", errAccountGate)
+				break
+			}
 			m.MarkEgressBlocked(proxy)
 			m.log.Warnf("[PIPELINE:download] %s: egress %s blocked by the source (%s); trying next egress %s", id, label, truncateForLog(strings.TrimSpace(string(stderr)), 120), egressLabel(routes[ri+1]))
 			continue

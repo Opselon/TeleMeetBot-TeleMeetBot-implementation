@@ -277,6 +277,7 @@ const CONFIG_DOCS = {
   'download.allow_transcode': 'Permit ffmpeg to remux containers Chromium cannot decode (mkv/avi/ogv) into mp4.',
   'download.proxy': 'Egress for yt-dlp and the plain-HTTP fetcher. DIRECT-BY-DEFAULT: empty (the default) means a direct connection, which works on an ordinary network with zero configuration. The ladder tries direct first and only reaches this proxy when the direct route is refused by the source. No longer inherits <code>browser.proxy</code>.',
   'download.fallback_proxies': 'Extra egresses tried, in order, after the direct route and <code>download.proxy</code> both fail to extract a YouTube URL (for example a Tor SOCKS5 port or a second relay).',
+  'download.cookies_file': 'Netscape cookie jar for YouTube’s account gate (<code>Sign in to confirm you’re not a bot</code>). That challenge follows the account, not the IP, so no egress on the ladder answers it; export the jar from a logged-in browser. Serves both yt-dlp and the media tab.',
   'media.default_volume': 'Initial player volume, 0–100.',
   'media.default_speed': 'Initial playback rate, 0.25–4.',
   'media.autoplay': 'Parsed but not read: playback always starts after Meet confirms the share (see known gaps).',
