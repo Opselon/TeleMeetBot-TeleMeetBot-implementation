@@ -481,6 +481,17 @@ func (s *Session) Stop() {
 		// best-effort and never blocks the cancellation itself.
 		s.stopOwnedDownload()
 		s.cancelLifespan()
+		// Guarantee the termination signal no matter who called Stop.
+		// cleanup() — the deferred release in run() — is what normally
+		// closes done, but a session stopped before its goroutine ever
+		// got there (Stop immediately after creation, Stop while the
+		// download stage was still holding it) would otherwise wait for
+		// a cleanup that run()'s error paths skip: several of run()'s
+		// early-return branches return BEFORE the deferred cleanup is
+		// reachable, and a hand-built session may have no run() at all.
+		// doneOnce makes this a no-op when cleanup() already ran, so
+		// the two paths can never double-close.
+		s.markStopped()
 	})
 }
 
@@ -2066,13 +2077,17 @@ type MediaStatus = mediaStatus
 // SetStopForTesting gives a directly-constructed session (bot tests build
 // sessions without Manager.Start) a working Stop/Done pair: cancelling the
 // context closes the done channel exactly like the real run loop's cleanup.
+//
+// It routes through markStopped (the same doneOnce-guarded closer the real
+// Stop uses) so a test that calls BOTH Stop() and the context cancel can
+// never double-close done — the exact race the guard exists for.
 func (s *Session) SetStopForTesting() {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	s.ctx, s.cancel, s.done = ctx, cancel, done
 	go func() {
 		<-ctx.Done()
-		close(done)
+		s.markStopped()
 	}()
 }
 

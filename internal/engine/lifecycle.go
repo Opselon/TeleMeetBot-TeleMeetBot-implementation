@@ -188,5 +188,37 @@ func (s *Session) stopOwnedDownload() {
 	}
 }
 
+// markStopped closes the session's done channel exactly once. cleanup()
+// (the deferred release in run()) also closes it, and doneOnce makes
+// the two paths interchangeable: whichever reaches it first wins and
+// the other is a no-op, so Stop can never double-close and a caller
+// waiting on Done() observes a session that Stop was called on as
+// terminated even when run()'s own error path never reached cleanup.
+//
+// This is what makes "Stop immediately after creation" and "Stop while
+// initializing" terminate instead of hanging every stop's bounded wait
+// and reporting a spurious "did not stop in time".
+func (s *Session) markStopped() {
+	s.doneOnce.Do(func() {
+		s.mu.Lock()
+		if s.done != nil && !IsTerminalState(s.state) {
+			if s.ctx != nil && s.ctx.Err() != nil {
+				s.state = StateCancelled
+				s.detail = "cancelled"
+			} else {
+				s.state = StateCompleted
+			}
+		}
+		if s.ended.IsZero() {
+			s.ended = time.Now()
+		}
+		done := s.done
+		s.mu.Unlock()
+		if done != nil {
+			close(done)
+		}
+	})
+}
+
 // Compile-time guard: the lifecycle fields exist on Session.
 var _ = sync.Once{}
