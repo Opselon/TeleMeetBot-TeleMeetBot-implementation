@@ -52,6 +52,10 @@ download:
   allow_transcode: true
   proxy: ""
   fallback_proxies: []
+  # Netscape cookie jar for YouTube's account gate ("Sign in to confirm
+  # you're not a bot"). bot check is an ACCOUNT gate, not a network one:
+  # no egress answers it. Export the jar from a logged-in browser.
+  cookies_file: ""
 
 meet:
   guest_name: "TeleMeet Bot"

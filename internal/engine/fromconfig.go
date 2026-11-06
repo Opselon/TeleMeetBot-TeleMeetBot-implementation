@@ -115,7 +115,11 @@ func FromConfig(c *config.Config) (BrowserConfig, MediaOptions, MeetOptions) {
 		DownloadAllowXcode: c.Download.AllowTranscode,
 		DownloadProxy:      downloadProxyFor(c),
 		DownloadFallbacks:  downloadFallbacksFor(c),
-		MediaEgresses:      mediaEgresses(c),
+		// The authenticated cookie jar for YouTube's account gate. See
+		// DownloadConfig.CookiesFile: it is the only ladder-independent
+		// answer to "Sign in to confirm you're not a bot".
+		DownloadCookies: c.Download.CookiesFile,
+		MediaEgresses:   mediaEgresses(c),
 
 		// The anchor for a relative download dir, so an operator writing
 		// "downloads" gets <data_dir>/downloads rather than a CWD-relative

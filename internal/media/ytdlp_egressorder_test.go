@@ -2,7 +2,9 @@ package media
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -114,6 +116,11 @@ func TestEgressLadderWalksEveryRouteInOrder(t *testing.T) {
 	opts := DefaultOptions(dir)
 	opts.Proxy = "http://172.17.0.1:3339"
 	opts.FallbackProxies = []string{"socks5://172.17.0.1:9050"}
+	// A configured cookie jar answers the account gate on any route, so the
+	// ladder still advances past a bot-check: this is the WITH-jar half of
+	// the contract (the NO-jar half, where the ladder stops, is pinned by
+	// cookies_test.go and by the account-gate fast fail).
+	opts.CookiesFile = "/cookies.txt"
 
 	var order []string
 	m := newYtdlpTestManager(t, opts, func(_ context.Context, args []string) ([]byte, []byte, error) {
@@ -163,6 +170,15 @@ func TestFailedDownloadReportsTheEgressLadder(t *testing.T) {
 	opts := DefaultOptions(t.TempDir())
 	opts.Proxy = "http://172.17.0.1:3339"
 	opts.FallbackProxies = []string{"socks5://172.17.0.1:9050"}
+	// A cookie jar is set: the scenario's bot-check is an account gate, and
+	// the fast fail stops the ladder only when NO jar could answer it. With
+	// a jar configured the ladder still walks every route so the final error
+	// can name them all.
+	jar := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(jar, []byte("# Netscape HTTP Cookie File\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts.CookiesFile = jar
 
 	m := newYtdlpTestManager(t, opts, func(_ context.Context, args []string) ([]byte, []byte, error) {
 		return nil, []byte("ERROR: [youtube] X: Sign in to confirm you're not a bot"), exec.ErrNotFound

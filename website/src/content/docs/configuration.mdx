@@ -120,6 +120,31 @@ browser:
   proxy: "http://172.17.0.1:3339"   # proxy reachable from the container
 ```
 
+### YouTube account gate (bot check)
+
+YouTube's **"Sign in to confirm you're not a bot"** is an account gate, not an
+network gate: no egress on the download ladder can answer it, so a bot-checked
+video fails on every route instead of falling back. Configuring an egress will
+never fix it. The supported remedy is a real authenticated session, exported as
+a Netscape cookie jar from a browser that is logged into the YouTube account:
+
+```yaml
+download:
+  cookies_file: "/data/cookies.txt"  # Netscape jar exported from a logged-in browser
+```
+
+The jar serves both halves of the pipeline: `yt-dlp` gets it as `--cookies`,
+and the media tab gets the same cookies injected over CDP, so the watch page
+clears the same gate instead of dying on `LOGIN_REQUIRED`.
+
+A **connected Google Account is not this**. The bot's OAuth tokens authenticate
+the user to Google APIs, and Google prohibits converting OAuth tokens into
+first-party `youtube.com` session cookies — they cannot log a browser in.
+
+To export a jar, use a browser extension that writes Netscape format (for
+example "Get cookies.txt LOCALLY") while signed into the account, then mount
+the file into the container and point `cookies_file` at it.
+
 ### Screen mode
 
 ```yaml

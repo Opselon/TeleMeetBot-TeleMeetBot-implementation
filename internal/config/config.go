@@ -93,6 +93,16 @@ type DownloadConfig struct {
 	// difference between a dead session and a working one. Empty keeps the
 	// historical single-proxy behaviour.
 	FallbackProxies []string `yaml:"fallback_proxies"`
+	// CookiesFile is a Netscape-format cookie jar handed to yt-dlp with
+	// --cookies. It is the supported way past YouTube's account gate
+	// ("Sign in to confirm you're not a bot"): that challenge is an ACCOUNT
+	// gate, not an IP gate, so no egress on the ladder answers it. An
+	// operator exports a cookie jar from a logged-in browser and points
+	// this key at it. File must be readable by the container user.
+	// NOTE: a connected Google Account does NOT unlock YouTube — the bot's
+	// OAuth tokens authenticate the user to Google APIs and Google
+	// prohibits turning them into youtube.com session cookies.
+	CookiesFile string `yaml:"cookies_file"`
 }
 
 // TelegramConfig holds bot token and access control.
@@ -675,6 +685,14 @@ func (c *Config) Validate() error {
 		switch strings.ToLower(strings.TrimSpace(c.Download.Dir)) {
 		case "/", "/etc", "/usr", "/bin", "/sbin", "/var", "/root", "/home":
 			problems = append(problems, "download.dir must not be a system directory")
+		}
+		// The cookie jar must exist when named: a missing file would
+		// otherwise surface as a per-download failure with a generic
+		// yt-dlp error instead of a clear config problem.
+		if cf := strings.TrimSpace(c.Download.CookiesFile); cf != "" {
+			if info, err := os.Stat(cf); err != nil || info.IsDir() {
+				problems = append(problems, "download.cookies_file must be an existing readable file (Netscape cookie jar)")
+			}
 		}
 	}
 	if c.Google.Enabled {

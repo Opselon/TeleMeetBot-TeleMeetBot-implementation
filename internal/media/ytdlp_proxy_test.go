@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -38,8 +40,16 @@ func newYtdlpTestManager(t *testing.T, opts Options, fn func(context.Context, []
 // carries it. The fake returns an egress-shaped refusal for the direct route
 // (exactly the shape that advances the ladder) and succeeds over the proxy.
 func TestYTDLPProxyIsPassed(t *testing.T) {
+	// The bot-check in this scenario is an account gate; a jar is set so the
+	// ladder keeps advancing to the proxy leg.
+	jar := filepath.Join(t.TempDir(), "cookies.txt")
+	if err := os.WriteFile(jar, []byte("# jar\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	dir := t.TempDir()
 	opts := DefaultOptions(dir)
+	opts.CookiesFile = jar
 	opts.Proxy = "http://172.17.0.1:3339"
 	var got []string
 	m := newYtdlpTestManager(t, opts, func(_ context.Context, args []string) ([]byte, []byte, error) {
