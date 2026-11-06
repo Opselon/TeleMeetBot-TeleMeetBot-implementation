@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -169,7 +168,7 @@ func (s *Session) applySwitch(target MediaTarget, stale func() bool) error {
 		dlID := fmt.Sprintf("ses-%s-g%d", s.ID, gen)
 		mgr := s.mediaManager()
 		if mgr != nil && mgr.Enabled() {
-			res, err := s.runDownloadWithID(context.Background(), mgr, target, dlID)
+			res, err := s.runDownloadWithID(s.downloadCtx(), mgr, target, dlID)
 			if err != nil {
 				s.logger().Warnf("[PIPELINE:switch] session %s: download switch media failed (%v), falling back to direct browser navigation", s.ID, err)
 				// Record the fallback: the switch keeps the share up and

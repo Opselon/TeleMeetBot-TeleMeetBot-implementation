@@ -198,8 +198,18 @@ func (s *Session) prepareLocalMedia() error {
 		s.mu.Unlock()
 	}()
 
-	res, err := s.downloadMedia(context.Background(), target)
+	res, err := s.downloadMedia(s.downloadCtx(), target)
 	if err != nil {
+		// A cancelled download must not leave its partial file behind.
+		// The manager sweeps on failure, but the session teardown path
+		// (releaseLocalMedia) also sweeps by download ID, so a stop
+		// mid-fetch reclaims the .part/.tmp artifacts immediately
+		// rather than waiting for the janitor's TTL pass.
+		if s.ctx != nil && s.ctx.Err() != nil {
+			if mgr := s.mediaManager(); mgr != nil && mgr.Enabled() {
+				_ = mgr.Remove(s.downloadID())
+			}
+		}
 		return err
 	}
 	if res == nil || strings.TrimSpace(res.LocalURL) == "" {

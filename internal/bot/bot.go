@@ -53,6 +53,7 @@ type cardRef struct {
 // Engine is the engine surface the bot needs (Manager implements it; tests fake it).
 type Engine interface {
 	Start(ctx context.Context, req engine.StartRequest) (*engine.Session, error)
+	Stop(id engine.SessionID) error
 	Get(id engine.SessionID) *engine.Session
 	Active() []*engine.Session
 	List() []*engine.Session

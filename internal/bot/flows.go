@@ -909,11 +909,12 @@ func (b *Bot) handleAction(chatID int64, msgID int, q *tgbotapi.CallbackQuery, d
 		// ended between the two presses is answered honestly instead of
 		// tearing anything else down.
 		_ = b.api.AnswerCallback(q.ID, "stopping")
-		s.Stop()
-		b.unbindCard(chatID, msgID)
-		if err := b.api.Edit(chatID, msgID, "⏹ Session "+string(id)+" is stopping.", mainMenuKB()); err != nil {
-			b.log.Warnf("[PIPELINE:bot] failed to show stopped message session=%s: %v", id, err)
-		}
+		// stopSession is the single authoritative Telegram stop: it drives
+		// the engine's verified stop (bounded wait for termination) and
+		// reports the honest outcome. Answering "stopping" and walking
+		// away — the old shape — is exactly how a Stop that never stopped
+		// looked successful to the user.
+		b.stopSession(chatID, msgID, id, s)
 		return
 	}
 	if action == "speed" {
@@ -1035,11 +1036,6 @@ func (b *Bot) handleAction(chatID int64, msgID int, q *tgbotapi.CallbackQuery, d
 		err, toast = s.RestartMedia(), "restarting"
 	case "refresh":
 		toast = "refreshed"
-	case "stop":
-		s.Stop()
-		toast = "stopping"
-		err = nil
-		s = nil
 	default:
 		_ = b.api.AnswerCallback(q.ID, "unknown action")
 		return
@@ -1143,8 +1139,51 @@ func (b *Bot) stopCommand(chatID int64, arg string) {
 		b.sendText(chatID, "Session not found.", mainMenuKB())
 		return
 	}
-	s.Stop()
-	b.sendText(chatID, "⏹ Stopping "+esc(arg)+".", mainMenuKB())
+	b.stopSession(chatID, 0, engine.SessionID(arg), s)
+}
+
+// stopSession is the SINGLE authoritative Telegram stop path. Every
+// Stop control in the bot converges here: the inline ⏹ confirm button
+// (act:<id>:stop_ok) and the /stop command alike.
+//
+// Stop MUST be verified, not merely requested: Session.Stop cancels
+// the lifespan and returns immediately, so the card text is derived
+// from what the engine actually reports afterwards rather than from
+// the fact that Stop() was called. The engine's Stop is the bounded
+// wait that confirms termination; a session that cannot be confirmed
+// gets an honest error on the card instead of a "stopped" lie.
+//
+// Never call Session.Stop directly from a user-facing control: an
+// unverified stop is how a Stop that never stopped looked successful.
+func (b *Bot) stopSession(chatID int64, msgID int, id engine.SessionID, s *engine.Session) {
+	if s == nil {
+		return
+	}
+	// The engine's Stop waits (bounded) for cleanup to finish: this is
+	// the backend confirmation the contract requires. It never blocks
+	// forever (stopGracePeriod bounds it), so the Telegram handler
+	// stays responsive even for a stuck session.
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				b.log.Errorf("[PIPELINE:bot] stop session %s panicked: %v", id, r)
+			}
+		}()
+		if err := b.eng.Stop(id); err != nil {
+			// A session that did not confirm its termination gets an
+			// honest error, never a silent success.
+			b.log.Warnf("[PIPELINE:bot] session %s did not stop cleanly: %v", id, err)
+		}
+		// The card follows the engine's own terminal state: the refresh
+		// loop and handleEvent(EventEnded) render the final STOPPED card
+		// from the snapshot, so nothing here can race the truth.
+	}()
+	b.unbindCard(chatID, msgID)
+	if msgID != 0 {
+		if err := b.api.Edit(chatID, msgID, "⏹ Session "+string(id)+" is stopping.", mainMenuKB()); err != nil {
+			b.log.Warnf("[PIPELINE:bot] failed to show stopped message session=%s: %v", id, err)
+		}
+	}
 }
 
 // statuses snapshots active sessions.
