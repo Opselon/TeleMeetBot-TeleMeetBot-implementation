@@ -179,3 +179,31 @@ func TestMediaEgressesOrderAndDedupe(t *testing.T) {
 		}
 	}
 }
+
+func TestApplyMediaEgressSwitchesDirectToFallback(t *testing.T) {
+	mgr := NewManager(
+		BrowserConfig{PerSession: true, Proxy: "direct"},
+		MediaOptions{
+			DownloadEnabled:   true,
+			DownloadProxy:     "",
+			DownloadFallbacks: []string{"http://172.17.0.1:3339", "socks5://172.17.0.1:9050"},
+			MediaEgresses:     []string{"http://172.17.0.1:3339", "socks5://172.17.0.1:9050"},
+			DownloadBaseDir:   t.TempDir(),
+		},
+		MeetOptions{GuestName: "Test Bot"},
+		dummyLogger{},
+	)
+	if mgr.mediaMgr == nil {
+		t.Fatalf("media manager must exist")
+	}
+
+	// Mark direct egress as blocked (e.g. after yt-dlp direct failed)
+	mgr.mediaMgr.MarkEgressBlocked("direct")
+
+	opts := launchOptions{browser: mgr.browserCfg}
+	mgr.applyMediaEgress(&opts)
+
+	if opts.mediaProxy != "http://172.17.0.1:3339" {
+		t.Fatalf("applyMediaEgress failed: mediaProxy = %q, want %q", opts.mediaProxy, "http://172.17.0.1:3339")
+	}
+}

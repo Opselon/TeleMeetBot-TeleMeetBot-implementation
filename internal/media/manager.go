@@ -456,8 +456,8 @@ func (m *Manager) MarkEgressBlocked(proxy string) {
 		return
 	}
 	p := strings.TrimSpace(proxy)
-	if p == "" {
-		return
+	if p == "" || strings.EqualFold(p, "direct") || strings.EqualFold(p, "direct://") {
+		p = "direct"
 	}
 	now := m.egressClock()
 	m.blockedMu.Lock()
@@ -481,8 +481,8 @@ func (m *Manager) EgressBlocked(proxy string) bool {
 		return false
 	}
 	p := strings.TrimSpace(proxy)
-	if p == "" {
-		return false
+	if p == "" || strings.EqualFold(p, "direct") || strings.EqualFold(p, "direct://") {
+		p = "direct"
 	}
 	m.blockedMu.Lock()
 	defer m.blockedMu.Unlock()
