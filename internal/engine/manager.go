@@ -819,14 +819,14 @@ func (m *Manager) launch(opts launchOptions) (*rod.Browser, func(), error) {
 // the registry is advisory, never a reason to fail a launch.
 func (m *Manager) applyMediaEgress(opts *launchOptions) {
 	configured := strings.TrimSpace(opts.browser.Proxy)
-	if configured == "" {
-		return // direct connection: there is no alternative to "direct"
+	if configured == "" || isDirectSentinel(configured) {
+		configured = "direct"
 	}
 	if m.mediaMgr == nil || !m.mediaMgr.EgressBlocked(configured) {
 		return
 	}
 	for _, p := range m.mediaCfg.MediaEgresses {
-		if p == configured {
+		if strings.EqualFold(p, configured) || isDirectSentinel(p) {
 			continue
 		}
 		if !m.mediaMgr.EgressBlocked(p) {

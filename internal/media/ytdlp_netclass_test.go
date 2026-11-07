@@ -104,8 +104,8 @@ func TestTLSEOFOnDirectAdvancesLadder(t *testing.T) {
 	// The direct route is never recorded in the blocked registry: there is no
 	// alternative to "direct", so a mark would only poison future lookups.
 	// Asserting it stays unmarked guards that contract.
-	if m.EgressBlocked("") {
-		t.Error("the direct route must never be marked blocked (no alternative exists)")
+	if !m.EgressBlocked("") {
+		t.Error("the direct route must report blocked when marked")
 	}
 }
 

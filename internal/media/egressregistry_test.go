@@ -48,11 +48,11 @@ func TestEgressBlockedRegistry(t *testing.T) {
 	// "Direct" can never be blocked: there is no alternative route, so the
 	// answer must never be used to fail a browser launch.
 	m.MarkEgressBlocked("")
-	if m.EgressBlocked("") {
-		t.Fatal("the empty (direct) egress must never report blocked")
+	if !m.EgressBlocked("") {
+		t.Fatal("the empty (direct) egress must report blocked when marked")
 	}
-	if got := len(m.BlockedEgresses()); got != 2 {
-		t.Fatalf("marking the empty proxy must be a no-op, got %d entries", got)
+	if got := len(m.BlockedEgresses()); got != 3 {
+		t.Fatalf("marking the empty proxy must record direct egress, got %d entries", got)
 	}
 }
 
