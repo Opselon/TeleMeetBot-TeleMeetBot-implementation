@@ -120,14 +120,10 @@ var userRules = []userRule{
 	// media BODY is classified as network-level by the body-fetch rules below
 	// (a rotating egress recovers from it, so it is not a blanket ban).
 	//
-	// THE ACCOUNT GATE comes FIRST and gets its own sentence: YouTube's
-	// "Sign in to confirm you're not a bot" is an ACCOUNT gate, not an IP
-	// gate — no egress on the ladder answers it, so "try again in a few
-	// minutes" is a lie. The actionable answer is a cookie jar, and the
-	// phrase the engine injects (errAccountGate) is matched here before the
-	// generic bot-check rules can soften it into a networking blip.
-	{substring: "youtube account gate", code: UserCodeBlocked, message: "YouTube wants a signed-in account for this video. The operator can set download.cookies_file (a cookie jar exported from a logged-in browser) — or send a different link."},
-	{substring: "youtube requires a signed-in account", code: UserCodeBlocked, message: "YouTube wants a signed-in account for this video. The operator can set download.cookies_file (a cookie jar exported from a logged-in browser) — or send a different link."},
+	// THE BOT CHECK is an IP-level, per-video gate (verified live
+	// 2026-11-07: the same video bot-checks one egress and extracts cleanly
+	// over another). It is a source limitation the user can retry or route
+	// around, not a call for cookie configuration.
 	{substring: "sign in to confirm you're not a bot", code: UserCodeBlocked, message: "The media source is limiting this server right now. Please try again in a few minutes, or send another link."},
 	{substring: "sign in to confirm you’re not a bot", code: UserCodeBlocked, message: "The media source is limiting this server right now. Please try again in a few minutes, or send another link."},
 	{substring: "http error 429", code: UserCodeBlocked, message: "The media source is rate-limiting this server. Please wait a minute and try again."},

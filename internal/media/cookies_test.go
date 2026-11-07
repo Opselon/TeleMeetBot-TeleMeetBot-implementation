@@ -86,28 +86,31 @@ func TestLoadCookiesFileSkipsMalformedLines(t *testing.T) {
 	}
 }
 
-// ---- the account gate classifier -------------------------------------
+// ---- the bot check is egress-shaped, not account-shaped --------------
 
-func TestAccountGateClassifier(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		in   string
-		want bool
-	}{
-		{"ascii bot check", "ERROR: [youtube] X: Sign in to confirm you're not a bot.", true},
-		{"curly-quote bot check", "Sign in to confirm you’re not a bot", true},
-		{"unrelated extractor verdict", "ERROR: Unsupported URL", false},
-		{"network shaped", "Unable to download API page: TLS/SSL connection has been closed (EOF)", false},
-		{"empty", "", false},
+// TestBotCheckIsEgressShaped pins the invariant that ended the
+// "account-gate fast fail": YouTube's "Sign in to confirm you're not a bot"
+// verdict must stay classified as an EGRESS-shaped refusal so the ladder
+// keeps walking. Verified live 2026-11-07: the challenge follows the IP
+// PER VIDEO — a video that bot-checks the direct route extracts cleanly
+// over the configured fallback egress. A fast fail on the first route
+// throws away the one working path the operator configured.
+func TestBotCheckIsEgressShaped(t *testing.T) {
+	for _, in := range []string{
+		"ERROR: [youtube] X: Sign in to confirm you're not a bot.",
+		"Sign in to confirm you’re not a bot",
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := accountGate([]byte(tc.in)); got != tc.want {
-				t.Fatalf("accountGate(%q) = %v, want %v", tc.in, got, tc.want)
-			}
-			if tc.want && !proxyBlocked([]byte(tc.in)) {
-				t.Fatalf("proxyBlocked must stay true for an account gate so a configured jar still gets other routes")
-			}
-		})
+		if !proxyBlocked([]byte(in)) {
+			t.Fatalf("proxyBlocked(%q) = false, want true: the bot check is an egress-shaped refusal the ladder must walk", in)
+		}
+	}
+	for _, in := range []string{
+		"ERROR: Unsupported URL",
+		"ERROR: [youtube] X: Requested format is not available",
+	} {
+		if proxyBlocked([]byte(in)) {
+			t.Fatalf("proxyBlocked(%q) = true, want false: a genuine extractor verdict must fail fast on the first route", in)
+		}
 	}
 }
 

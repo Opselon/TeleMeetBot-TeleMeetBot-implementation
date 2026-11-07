@@ -116,10 +116,9 @@ func TestEgressLadderWalksEveryRouteInOrder(t *testing.T) {
 	opts := DefaultOptions(dir)
 	opts.Proxy = "http://172.17.0.1:3339"
 	opts.FallbackProxies = []string{"socks5://172.17.0.1:9050"}
-	// A configured cookie jar answers the account gate on any route, so the
-	// ladder still advances past a bot-check: this is the WITH-jar half of
-	// the contract (the NO-jar half, where the ladder stops, is pinned by
-	// cookies_test.go and by the account-gate fast fail).
+	// Bot-checks are egress-shaped: the ladder walks them with or without a
+	// cookie jar (verified live 2026-11-07 — the same video bot-checks one
+	// egress and extracts cleanly over another).
 	opts.CookiesFile = "/cookies.txt"
 
 	var order []string
@@ -153,6 +152,57 @@ func TestEgressLadderWalksEveryRouteInOrder(t *testing.T) {
 	}
 	if len(distinct) != len(want) {
 		t.Fatalf("ladder visited %d distinct routes (%q), want %d (%q)", len(distinct), distinct, len(want), want)
+	}
+	for i, w := range want {
+		if distinct[i] != w {
+			t.Fatalf("ladder position %d = %q, want %q (full order %q)", i, distinct[i], w, order)
+		}
+	}
+}
+
+// TestEgressLadderAdvancesPastBotCheckWithoutCookies pins the fix for the
+// "account-gate fast fail" regression. That fast fail assumed the YouTube
+// bot check follows the ACCOUNT (so no route could answer it) and stopped the
+// ladder after the first route when no cookie jar was configured. Verified
+// live 2026-11-07 on this deployment: the check follows the IP PER VIDEO —
+// a video that returns "Sign in to confirm you're not a bot" on the direct
+// route extracts cleanly over the fallback. Stopping early therefore threw
+// away the one working path the operator had configured, and the browser
+// fallback then reused the rejected route and failed too.
+func TestEgressLadderAdvancesPastBotCheckWithoutCookies(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.Proxy = "" // direct-first
+	opts.FallbackProxies = []string{"socks5://172.17.0.1:9050"}
+	if opts.CookiesFile != "" {
+		t.Fatalf("test premise: no cookie jar configured, got %q", opts.CookiesFile)
+	}
+
+	var order []string
+	m := newYtdlpTestManager(t, opts, func(_ context.Context, args []string) ([]byte, []byte, error) {
+		p := proxyOf(args)
+		order = append(order, p)
+		if p == "" {
+			return nil, []byte("ERROR: [youtube] X: Sign in to confirm you're not a bot"), exec.ErrNotFound
+		}
+		writeStub(t, dir+"/vid.mp4")
+		return []byte("136,1280,720,30,avc1.64001f,mp4a.40.2,mp4,1500\n"), nil, nil
+	})
+
+	if _, err := m.Download(context.Background(), DownloadRequest{
+		URL: "https://www.youtube.com/watch?v=abcdefghijk", Kind: "youtube", ID: "vid",
+	}); err != nil {
+		t.Fatalf("Download failed: %v", err)
+	}
+	var distinct []string
+	for _, p := range order {
+		if len(distinct) == 0 || distinct[len(distinct)-1] != p {
+			distinct = append(distinct, p)
+		}
+	}
+	want := []string{"", opts.FallbackProxies[0]}
+	if len(distinct) != len(want) {
+		t.Fatalf("ladder visited %d distinct routes (%q), want %d (%q): the bot check must not stop the walk", len(distinct), distinct, len(want), want)
 	}
 	for i, w := range want {
 		if distinct[i] != w {
