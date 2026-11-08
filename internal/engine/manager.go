@@ -51,6 +51,14 @@ type BrowserConfig struct {
 	// WarmUp pre-launches one idle Chromium at manager start so the first
 	// session skips the cold browser start.
 	WarmUp bool
+	// ProfileDir, when set, makes every session of ONE user reuse the same
+	// Chromium user-data-dir under <ProfileDir>/<owner>/ instead of a fresh
+	// temp profile. Cookies, storage and the Google sign-in then survive
+	// across sessions, so Google's CDN and Meet see a browser with history
+	// instead of a brand-new one. Empty keeps the historical per-session
+	// throwaway profile. Same trust boundary as user-profiles/<tgid>/: one
+	// directory per user, never shared.
+	ProfileDir string
 }
 
 // MediaOptions is the media-side configuration.
@@ -208,6 +216,13 @@ type StartRequest struct {
 	GuestName string
 	// GoogleCookies injects authenticated Google account cookies into the session context.
 	GoogleCookies []*proto.NetworkCookieParam
+	// Owner tags the user the session belongs to. It is used as the Chromium
+	// profile directory name when browser.profile_dir is configured, so one
+	// user's cookies, storage and Google sign-in survive across sessions and
+	// two users never share a profile. Pass a stable identifier (a Telegram
+	// user id is ideal). Sanitised at the boundary; empty keeps the historical
+	// throwaway temp profile.
+	Owner string
 	// Volume overrides the configured default player volume (1-100; 0 = global default).
 	Volume int
 	// Speed overrides the configured default playback speed (0.25-4; 0 = global default).
@@ -275,6 +290,11 @@ type Manager struct {
 	// immediately, and an unknown answer always means "no evidence", never
 	// "don't try".
 	netcap *netcap.Capability
+
+	// profileOwnerKey is the user the next browser launch is for (see
+	// applyPersistentProfile). Guarded by mu together with the sessions map;
+	// Start sets it before the session goroutine runs so the launch sees it.
+	profileOwnerKey string
 }
 
 // warmBrowser holds a pre-launched, idle browser waiting for a session.
@@ -674,6 +694,9 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (*Session, error)
 	}
 	m.pruneFinishedLocked()
 	m.sessions[id] = s
+	// The browser launch for THIS session resolves the persistent profile from
+	// the owner key; set it before run() fires so the first launch sees it.
+	m.profileOwnerKey = m.cleanProfileOwner(req.Owner)
 	m.mu.Unlock()
 
 	go s.run()
@@ -710,6 +733,7 @@ func (m *Manager) pruneFinishedLocked() {
 func (m *Manager) acquireBrowser() (*rod.Browser, func(), error) {
 	opts := launchOptions{browser: m.browserCfg, meet: m.meetCfg, forMeet: true}
 	m.applyMediaEgress(&opts)
+	m.applyPersistentProfile(&opts)
 
 	if !m.browserCfg.PerSession {
 		m.sharedMu.Lock()
@@ -840,6 +864,21 @@ func (m *Manager) applyMediaEgress(opts *launchOptions) {
 	m.log.Warnf("[PIPELINE:browser] primary media egress %s is blocked and no unblocked alternative is configured; keeping it", configured)
 }
 
+// applyPersistentProfile points this launch at the owning user's persistent
+// Chromium profile when browser.profile_dir is configured. The owner comes from
+// the session the launch is for (m.profileOwner is set by Start/StartRequest
+// plumbing); with no owner or no configured root the launch keeps the
+// historical throwaway temp profile.
+func (m *Manager) applyPersistentProfile(opts *launchOptions) {
+	owner := strings.TrimSpace(m.profileOwnerKey)
+	if owner == "" {
+		return
+	}
+	if dir, ok := persistentProfileDir(m.browserCfg.ProfileDir, owner); ok {
+		opts.userData = dir
+	}
+}
+
 // WarmUp pre-launches one idle Chromium so the next session skips the cold
 // start. The warm browser is only a started process with a blank page: no
 // meeting is joined, no camera/mic is enabled, nothing is presented. It is
@@ -960,6 +999,20 @@ func (m *Manager) ShutdownWarm() {
 	}
 }
 
+// cleanProfileOwner turns whatever owner tag a caller supplied into a safe
+// single directory name. Only [a-z0-9-_] survives, anything else collapses to
+// an underscore, so the value can be used as a path segment without escaping
+// <ProfileDir>. An empty owner (the historical default: nobody set it) keeps
+// the throwaway temp profile.
+func (m *Manager) cleanProfileOwner(in string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			return r
+		}
+		return '_'
+	}, strings.ToLower(strings.TrimSpace(in)))
+}
+
 // newSessionID returns a short random id like "s-1a2b3c4d".
 func newSessionID() SessionID {
 	buf := make([]byte, 4)
@@ -1036,6 +1089,37 @@ func tempProfileDir() (string, error) {
 		return "", err
 	}
 	return os.MkdirTemp(filepath.Join(base, "telemeetbot"), "profile-*")
+}
+
+// persistentProfileDir returns the Chromium user-data-dir one owner reuses
+// across sessions: <root>/<owner>/, created 0700. The owner key comes from the
+// session's lease owner (owner-<session-id> by default; the bot layer overrides
+// it with the Telegram user id), so two users never share a profile directory —
+// the same isolation user-profiles/<tgid>/ uses for OAuth state. An empty root
+// or owner keeps the historical throwaway profile (the temp dir), so the flag
+// stays strictly opt-in and never breaks a deployment that did not configure it.
+func persistentProfileDir(root, owner string) (string, bool) {
+	root = strings.TrimSpace(root)
+	owner = strings.TrimSpace(owner)
+	if root == "" || owner == "" {
+		return "", false
+	}
+	// The owner key is an identifier, never a path: collapse anything a caller
+	// might smuggle in so the profile cannot escape the root.
+	clean := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			return r
+		}
+		return '_'
+	}, strings.ToLower(owner))
+	if clean == "" {
+		return "", false
+	}
+	dir := filepath.Join(root, clean)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", false
+	}
+	return dir, true
 }
 
 // filepathIsAbs / filepathDir / filepathAbs are thin wrappers so the engine

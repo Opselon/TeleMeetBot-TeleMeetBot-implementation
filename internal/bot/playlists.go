@@ -953,6 +953,8 @@ func (b *Bot) launchPlaylist(chatID, userID, playlistID int64, meetURL string) {
 	req := b.startRequestFor(userID, meetURL, engine.StartRequest{
 		MeetLink:  meetURL,
 		MediaLink: urls[0],
+		// Key the persistent Chromium profile by the Telegram user.
+		Owner: fmt.Sprintf("%d", userID),
 	})
 	if len(urls) > 1 {
 		req.Queue = urls[1:]

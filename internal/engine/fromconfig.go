@@ -79,6 +79,7 @@ func FromConfig(c *config.Config) (BrowserConfig, MediaOptions, MeetOptions) {
 		Executable:   c.Browser.Executable,
 		Headless:     c.Browser.Headless,
 		PerSession:   c.Browser.PerSession,
+		ProfileDir:   c.Browser.ProfileDir,
 		Display:      c.Browser.Display,
 		WindowWidth:  c.Browser.WindowWidth,
 		WindowHeight: c.Browser.WindowHeight,

@@ -1858,12 +1858,47 @@ func (s *Session) startPresenting() error {
 	presentMisses := 0
 	lastDump := time.Time{}
 	presentStart := time.Now()
+	// directDriven is set once the direct displayMedia driver (below) has
+	// installed a capture stream on Meet's own RTCPeerConnection. After that
+	// the toolbar click path is actively harmful: it would start a SECOND
+	// share from a different source and Meet would tear the first one down,
+	// so the loop stops clicking entirely.
+	directDriven := false
 	for time.Now().Before(deadline) {
 		if s.ctx.Err() != nil {
 			return s.ctx.Err()
 		}
 		if ok, _ := s.presenting(); ok {
 			return nil
+		}
+		// DIRECT DISPLAY-MEDIA DRIVER — the primary path. It does not depend on
+		// finding a toolbar button at all: Meet's own RTCREPeerConnection set
+		// (hooked by meetPeerHookJS at document start) publishes whatever
+		// capture stream we hand it, and Chromium answers getDisplayMedia
+		// automatically through --auto-select-tab-capture-source-by-title for
+		// the tab whose WebContents title is s.TabTitle (verified by
+		// ensureCaptureTitle above). On the Meet builds this host actually
+		// receives (verified 2026-11-08, sessions s-8a1200a6 / s-c436cdfe /
+		// s-56c126e9) the toolbar exposes NO present/share control — the
+		// bottom bar shows only camera/mic/leave/chat and the "More options"
+		// menu lists Backgrounds/Report/Troubleshooting/Settings — so the
+		// historical click path alone can never start the share and the
+		// session dies with "present flow timed out after 45s".
+		//
+		// Non-fatal by construction: a page that answers with no usable stream
+		// (no peer connections yet, capture refused) leaves directDriven false
+		// and the loop falls through to the click path unchanged.
+		if !directDriven {
+			if ok, note := s.driveDisplayMedia(); ok {
+				directDriven = true
+				s.log.Infof("[PIPELINE:present] session %s: direct display-media driver installed a capture stream (%s)", s.ID, note)
+				s.setState(StateSharing, "[5/6] Capture stream installed")
+				time.Sleep(700 * time.Millisecond)
+				if ok, _ := s.presenting(); ok {
+					s.log.Infof("[PIPELINE:present] session %s: presenting confirmed active via direct driver", s.ID)
+					return nil
+				}
+			}
 		}
 		// Meet is already starting the capture (getDisplayMedia in flight): wait
 		// for the stream instead of hammering the toolbar again.
@@ -1883,7 +1918,10 @@ func (s *Session) startPresenting() error {
 			continue
 		}
 		startingSince = time.Time{}
-		if s.meetTab() != nil {
+		// Never click any toolbar control once the direct driver has
+		// installed a capture stream: a second share from a different source
+		// is what tears the presentation down.
+		if s.meetTab() != nil && !directDriven {
 			opened, label := s.clickPresentButton()
 			if opened {
 				if label == "opened more options" {

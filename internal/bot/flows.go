@@ -589,6 +589,9 @@ func (b *Bot) launch(chatID, userID int64) {
 	req := b.startRequestFor(userID, f.meet, engine.StartRequest{
 		MeetLink:  f.meet,
 		MediaLink: f.media,
+		// The Chromium profile is keyed by the Telegram user so cookies,
+		// storage and the Google sign-in survive across sessions.
+		Owner: fmt.Sprintf("%d", userID),
 	})
 	if len(f.queue) > 0 {
 		req.Queue = f.queue

@@ -267,6 +267,7 @@ const CONFIG_DOCS = {
   'browser.proxy': 'Chromium proxy, for example <code>socks5://127.0.0.1:9050</code>, or the host-side egress proxy for YouTube. The special value <code>direct</code> forces a completely unproxied browser: when Chromium must not ride an ambient Tor listener (empty and unset are indistinguishable, so an empty value still auto-detects one), <code>direct</code> is the only way to say "no proxy".',
   'download.enabled': 'Turn Download &amp; Stream on (default on). Browser mode always works, with or without this.',
   'download.dir': 'Managed download directory. Default <code>&lt;data_dir&gt;/downloads</code>; must not be a system directory.',
+  'browser.profile_dir': 'Root for per-USER Chromium profiles (<code>&lt;profile_dir&gt;/&lt;owner&gt;/</code>). Cookies, local storage and a Google sign-in then survive across sessions, so Google\'s CDN and Meet see a browser with history instead of a new one. One directory per user, never shared. Empty (default) keeps the throwaway per-session profile.',
   'download.ttl_minutes': 'Orphan-cleanup lifetime of a downloaded file, counted from completion. Default 60. An active session holds its file past this deadline.',
   'download.max_size_mb': 'Per-file size ceiling. Default 2048 (2 GiB); 0 keeps the default.',
   'download.min_free_mb': 'Minimum free disk space required before a download starts. Default 256.',
