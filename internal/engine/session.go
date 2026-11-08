@@ -1858,46 +1858,12 @@ func (s *Session) startPresenting() error {
 	presentMisses := 0
 	lastDump := time.Time{}
 	presentStart := time.Now()
-	// directDriven is set once the direct displayMedia driver (below) has
-	// installed a capture stream on Meet's own RTCPeerConnection. After that
-	// the toolbar click path is actively harmful: it would start a SECOND
-	// share from a different source and Meet would tear the first one down,
-	// so the loop stops clicking entirely.
-	directDriven := false
 	for time.Now().Before(deadline) {
 		if s.ctx.Err() != nil {
 			return s.ctx.Err()
 		}
 		if ok, _ := s.presenting(); ok {
 			return nil
-		}
-		// DIRECT DISPLAY-MEDIA DRIVER — the primary path. It does not depend on
-		// finding a toolbar button at all: Meet's own RTCREPeerConnection set
-		// (hooked by meetPeerHookJS at document start) publishes whatever
-		// capture stream we hand it, and Chromium answers getDisplayMedia
-		// automatically through --auto-select-tab-capture-source-by-title for
-		// the tab whose WebContents title is s.TabTitle (verified by
-		// ensureCaptureTitle above). On the Meet builds this host actually
-		// receives (verified 2026-11-08, sessions s-8a1200a6 / s-c436cdfe /
-		// s-56c126e9) the toolbar exposes NO present/share control — the
-		// bottom bar shows only camera/mic/leave/chat and the "More options"
-		// menu lists Backgrounds/Report/Troubleshooting/Settings — so the
-		// historical click path alone can never start the share and the
-		// session dies with "present flow timed out after 45s".
-		//
-		// Non-fatal by construction: a page that answers with no usable stream
-		// (no peer connections yet, capture refused) leaves directDriven false
-		// and the loop falls through to the click path unchanged.
-		// Direct display-media driver: warm the capture pipeline once (it never
-		// replaces the click path — Meet must still start the presentation
-		// itself). On builds where the toolbar exposes NO present control at
-		// all, this is the only way the tab enters a capturable state at all,
-		// so run it once early and then keep trying the toolbar.
-		if !directDriven {
-			if ok, note := s.driveDisplayMedia(); ok {
-				directDriven = true
-				s.log.Infof("[PIPELINE:present] session %s: capture pipeline warmed (stream %s); waiting for Meet to accept it", s.ID, note)
-			}
 		}
 		// Meet is already starting the capture (getDisplayMedia in flight): wait
 		// for the stream instead of hammering the toolbar again.
@@ -1917,10 +1883,6 @@ func (s *Session) startPresenting() error {
 			continue
 		}
 		startingSince = time.Time{}
-		// The toolbar click path is the PRIMARY driver: Meet only negotiates a
-		// presentation when its own Present control fires getDisplayMedia from
-		// inside the page. The direct driver below never gates this: even after
-		// it installs a capture stream, the click is what makes Meet accept it.
 		if s.meetTab() != nil {
 			opened, label := s.clickPresentButton()
 			if opened {
@@ -1992,14 +1954,6 @@ func (s *Session) startPresenting() error {
 			}
 		}
 		time.Sleep(900 * time.Millisecond)
-	}
-	if directDriven {
-		// The capture pipeline is warm but Meet never confirmed the share within
-		// the budget. Say so explicitly rather than reporting a plain timeout:
-		// the tab IS capturable, this is a Meet negotiation problem, not a
-		// missing-button problem.
-		return fmt.Errorf("could not start screen sharing in Google Meet (Meet never confirmed the capture after %s; capture stream installed; chromium tabs=%v); the bot is in the meeting — retry from the dashboard",
-			timeout, s.captureTabTitles())
 	}
 	return fmt.Errorf("could not start screen sharing in Google Meet (present flow timed out after %s; present control=%q; chromium tabs=%v); the bot is in the meeting — retry from the dashboard",
 		timeout, lastState, s.captureTabTitles())
