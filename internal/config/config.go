@@ -188,6 +188,14 @@ type BrowserConfig struct {
 	// WarmUp pre-launches one idle Chromium at startup so the first session
 	// skips the cold browser start (saves ~1-3s). Default false.
 	WarmUp bool `yaml:"warm_up"`
+	// ProfileDir stores Chromium user-data-dirs per USER under this root
+	// (<ProfileDir>/<owner>/), so cookies, local storage and the Google
+	// sign-in survive across sessions: Google's CDN and Meet see a browser
+	// with history instead of a brand-new one, and a signed-in profile can
+	// be reused without re-authenticating. One directory per user, never
+	// shared. Empty (default) keeps the historical throwaway per-session
+	// profile. Recommended: <data_dir>/browser-profiles.
+	ProfileDir string `yaml:"profile_dir"`
 }
 
 // MediaConfig controls playback inside the shared tab.

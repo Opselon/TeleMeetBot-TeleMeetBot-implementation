@@ -27,6 +27,11 @@ browser:
   extra_args: []
   user_agent: ""
   proxy: ""
+  # Per-USER Chromium profile root (<profile_dir>/<owner>/). Cookies, local
+  # storage and a Google sign-in then survive across sessions, so Google's CDN
+  # and Meet see a browser with history instead of a new one. One directory per
+  # user, never shared. Empty keeps the throwaway per-session profile.
+  profile_dir: ""
 
 media:
   default_volume: 80

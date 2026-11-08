@@ -615,20 +615,30 @@ func (s *Session) meetTab() *rod.Page {
 // restarted and the diagnostics are discoverable instead of vanishing.
 func (s *Session) run() {
 	defer s.cleanup()
+	// recoveredByLeg reports whether a parallel leg (below) already turned a
+	// panic into an error on its channel. The run-level recovery stays armed
+	// for every sequential step ([1/6], the joins after the legs, [5/6],
+	// [6/6], watch); a panic inside a LEG is handled by the leg's own recover,
+	// and double-handling it here would overwrite the leg's error with a
+	// "session crashed" message and, when the cancel raced it, downgrade the
+	// session to cancelled — hiding the crash the leg already reported.
+	recoveredByLeg := false
 	defer func() {
 		if r := recover(); r != nil {
-			err := fmt.Errorf("session crashed: %v", r)
-			if s.ctx != nil && s.ctx.Err() != nil {
-				// A panic during cancellation is usually the cancellation
-				// itself racing a rod call; report it as cancelled, the
-				// honest terminal state for a stop in flight.
-				s.setError(errors.New("session stopped during teardown"))
-			} else {
-				s.setError(err)
+			if !recoveredByLeg {
+				err := fmt.Errorf("session crashed: %v", r)
+				if s.ctx != nil && s.ctx.Err() != nil {
+					// A panic during cancellation is usually the cancellation
+					// itself racing a rod call; report it as cancelled, the
+					// honest terminal state for a stop in flight.
+					s.setError(errors.New("session stopped during teardown"))
+				} else {
+					s.setError(err)
+				}
+				// The stack digest goes to the log; stderr still gets the full
+				// trace from the runtime's own panic reporting path.
+				s.log.Errorf("[PIPELINE:session] session %s: %v", s.ID, r)
 			}
-			// The stack digest goes to the log; stderr still gets the full
-			// trace from the runtime's own panic reporting path.
-			s.log.Errorf("[PIPELINE:session] session %s: %v", s.ID, r)
 		}
 	}()
 	s.setState(StateStarting, "[1/6] Launching Chromium")
@@ -690,81 +700,241 @@ func (s *Session) run() {
 		defer close(adSkipStop)
 	}
 
-	// Download & Stream: fetch the media to disk BEFORE the tab is opened so
-	// the media tab loads a local, always-available file. The download honours
-	// its own size/time/concurrency limits and starts the expiry clock on
-	// completion. If download extraction fails (e.g. YouTube bot-blocks yt-dlp
-	// or drops TLS connections on datacenter/proxy egress), fall back to
-	// direct browser playback in Chromium rather than killing the live session.
-	// Chromium in the media tab plays YouTube and web links natively.
-	if mode := s.playMode; mode == mediateam.ModeDownload || mode == mediateam.ModeAuto {
-		// The phase records the download intent BEFORE the fetch runs, so a
-		// card rendered while it is in flight says "downloading" instead of
-		// silently implying a finished file.
-		if mediateam.IsDownloadable(string(s.MediaKind)) {
-			s.setPhase(PhaseDownloading, "", "download stage starting")
-		}
-		prepareErr := s.prepareLocalMedia()
-		if s.prepareRun != nil {
-			// Test seam: the fake stands in for the whole preparation, so
-			// run()'s handling of a failing or panicking download stage can
-			// be exercised without Chromium or a download toolchain.
-			if perr := s.prepareRun(); perr != nil && prepareErr == nil {
-				prepareErr = perr
-			}
-		}
-		if prepareErr != nil {
-			// Classify once: the user message is what the card shows, the raw
-			// error is what the operator log keeps. A network-shaped failure
-			// is recorded as such so the user sees "network unavailable"
-			// rather than a generic failure.
-			uerr := mediateam.ClassifyUserError(prepareErr)
-			userMsg := fallbackUserMessage(uerr)
-			detail := prepareErr.Error()
-			code := ""
-			if uerr != nil {
-				code = uerr.Code
-			}
-			phase := PhaseFallback
-			if mediateam.IsUserCode(prepareErr, mediateam.UserCodeNetwork) {
-				phase = PhaseNetworkUnavailable
-			}
-			s.log.Warnf("[PIPELINE:session] session %s: download extraction failed (%v), falling back to browser playback", s.ID, prepareErr)
-			// The detail line is the user-facing diagnostic for the fallback.
-			// It names the failure honestly and states the outcome, so an
-			// operator can tell "the download failed and we recovered" apart
-			// from "the download worked". Never claim success here.
-			s.setDetail("download failed, playing via browser: " + truncateStr(prepareErr.Error(), 80))
-			s.setPhaseFailedWith("download", phase, code, userMsg, detail)
-			s.emit(EventState, "download unavailable, streaming via browser")
-		}
-	}
+	// ---- [2/6]+[3/6]+[4/6]: media leg and meet leg, in parallel -----------------
+	//
+	// The user's contract: "browser open + Meet join must overlap the download"
+	// (باید باز شدن مرورگر و تلاش برای ورود همزمان با دانلود اتفاق بیوفته).
+	// Both legs are pure CDP on DIFFERENT tabs and share nothing but the
+	// s.mu-guarded fields, so they can run concurrently: the meet leg opens the
+	// Meet tab and drives the prejoin/lobby gate while the media leg is still
+	// fetching the file or loading the media tab.
+	//
+	// Error semantics are preserved exactly: each leg returns the error it
+	// observed and handles it here (after the join) exactly as the sequential
+	// version did, including the download-fallback phase bookkeeping and the
+	// timed-out classification. On the FIRST fatal error from either leg the
+	// session lifespan is cancelled so the other leg unwinds promptly instead
+	// of hanging in a CDP call; both legs observe s.ctx through bindPageCtx and
+	// the explicit checks below.
+	//
+	// Concurrency safety: setState/setDetail/setError/setPhase all take s.mu
+	// internally, and each leg writes only its own page field (s.mediaPage /
+	// s.meetPage) under s.mu, so no new shared mutable state exists. The
+	// players.playerURL loopback server is process-global and mutex-guarded
+	// inside playerServer, which both legs may register documents on when
+	// playing local/direct media — it is safe to call concurrently.
+	s.log.Infof("[PIPELINE:session] session %s: media and meet legs spawning concurrently", s.ID)
 
-	s.setState(StateJoining, "[2/6] Loading media")
-	s.log.Infof("[PIPELINE:session] [STEP 2/6] session %s: opening media tab (url=%s kind=%s)...", s.ID, s.MediaURL, s.MediaKind)
-	// A session that never entered the download stage plays the remote URL
-	// directly — record the honest phase ("browser", not a fallback) so the
-	// card can distinguish "played from the browser as requested" from
-	// "download failed, fell back to the browser".
-	if s.Phase() == PhaseNone || s.Phase() == PhaseDownloading {
-		if s.playMode == mediateam.ModeBrowser {
-			s.setPhase(PhaseBrowser, "", "browser mode: playing the remote URL directly")
-		} else if s.localFile == nil {
-			// Download/Auto whose download was skipped (unsupported kind) or
-			// already failed: whatever plays is the browser, and the phase
-			// must not imply a download that never happened.
-			s.setPhase(PhaseBrowser, "", "download not applicable; playing the remote URL directly")
+	mediaErrCh := make(chan error, 1)
+	meetErrCh := make(chan error, 1)
+	// meetQuiet is closed when the meet leg has finished calling setState —
+	// i.e. it has either reported its error or observed the cancelled lifespan
+	// at the gate between openMeet and joinMeeting. The media leg's fatal
+	// branch waits on it before recording the terminal state, so a straggler
+	// setState from the meet goroutine can never overwrite StateError (the
+	// state machine stays single-writer even across the two parallel legs).
+	meetQuiet := make(chan struct{})
+	var meetQuietOnce sync.Once
+	quietMeet := func() { meetQuietOnce.Do(func() { close(meetQuiet) }) }
+
+	// The meet leg: [3/6] open the Meet tab, then [4/6] join the meeting.
+	// These two are pure CDP on the meet tab and do not depend on the media
+	// tab or the download, so they run in their own goroutine.
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// Convert the panic into an error so run()'s panic contract
+				// still holds: the leg reports a terminal state instead of
+				// vanishing. recoveredByLeg tells run()'s own deferred
+				// recovery the crash was already handled, so it does not
+				// overwrite this error (or downgrade the session to
+				// cancelled when the cancel raced the panic).
+				s.mu.Lock()
+				recoveredByLeg = true
+				s.mu.Unlock()
+				quietMeet()
+				meetErrCh <- fmt.Errorf("meet leg crashed: %v", r)
+			}
+		}()
+		s.setState(StateJoining, "[3/6] Opening Google Meet")
+		s.log.Infof("[PIPELINE:session] [STEP 3/6] session %s: opening Meet tab (url=%s)...", s.ID, s.MeetURL)
+		if err := s.openMeet(); err != nil {
+			quietMeet()
+			meetErrCh <- err
+			return
 		}
-	}
+		// A media-leg failure cancels the lifespan; do not start the join on a
+		// dead session — the observation point between the two meet stages.
+		if s.ctx.Err() != nil {
+			quietMeet()
+			meetErrCh <- s.ctx.Err()
+			return
+		}
+		s.log.Infof("[PIPELINE:session] [STEP 3/6] session %s: Meet tab loaded", s.ID)
+
+		s.setState(StateJoining, "[4/6] Joining meeting")
+		s.log.Infof("[PIPELINE:session] [STEP 4/6] session %s: handling prejoin and host gate...", s.ID)
+		quietMeet()
+		meetErrCh <- s.joinMeeting()
+	}()
+
+	// The media leg: the Download & Stream preparation (BLOCKING), then [2/6]
+	// open the media tab. prepareLocalMedia's phase recording and fallback
+	// handling are kept EXACTLY as is; the [2/6] openMedia call honours the
+	// openRun test seam.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// Same contract as the meet leg: report the crash as an error
+				// and keep run()'s recovery from double-handling it.
+				s.mu.Lock()
+				recoveredByLeg = true
+				s.mu.Unlock()
+				mediaErrCh <- fmt.Errorf("media leg crashed: %v", r)
+			}
+		}()
+		// Download & Stream: fetch the media to disk BEFORE the tab is opened so
+		// the media tab loads a local, always-available file. The download honours
+		// its own size/time/concurrency limits and starts the expiry clock on
+		// completion. If download extraction fails (e.g. YouTube bot-blocks yt-dlp
+		// or drops TLS connections on datacenter/proxy egress), fall back to
+		// direct browser playback in Chromium rather than killing the live session.
+		// Chromium in the media tab plays YouTube and web links natively.
+		if mode := s.playMode; mode == mediateam.ModeDownload || mode == mediateam.ModeAuto {
+			// The phase records the download intent BEFORE the fetch runs, so a
+			// card rendered while it is in flight says "downloading" instead of
+			// silently implying a finished file.
+			if mediateam.IsDownloadable(string(s.MediaKind)) {
+				s.setPhase(PhaseDownloading, "", "download stage starting")
+			}
+			prepareErr := s.prepareLocalMedia()
+			if s.prepareRun != nil {
+				// Test seam: the fake stands in for the whole preparation, so
+				// run()'s handling of a failing or panicking download stage can
+				// be exercised without Chromium or a download toolchain.
+				if perr := s.prepareRun(); perr != nil && prepareErr == nil {
+					prepareErr = perr
+				}
+			}
+			if prepareErr != nil {
+				// Classify once: the user message is what the card shows, the raw
+				// error is what the operator log keeps. A network-shaped failure
+				// is recorded as such so the user sees "network unavailable"
+				// rather than a generic failure.
+				uerr := mediateam.ClassifyUserError(prepareErr)
+				userMsg := fallbackUserMessage(uerr)
+				detail := prepareErr.Error()
+				code := ""
+				if uerr != nil {
+					code = uerr.Code
+				}
+				phase := PhaseFallback
+				if mediateam.IsUserCode(prepareErr, mediateam.UserCodeNetwork) {
+					phase = PhaseNetworkUnavailable
+				}
+				s.log.Warnf("[PIPELINE:session] session %s: download extraction failed (%v), falling back to browser playback", s.ID, prepareErr)
+				// The detail line is the user-facing diagnostic for the fallback.
+				// It names the failure honestly and states the outcome, so an
+				// operator can tell "the download failed and we recovered" apart
+				// from "the download worked". Never claim success here.
+				s.setDetail("download failed, playing via browser: " + truncateStr(prepareErr.Error(), 80))
+				s.setPhaseFailedWith("download", phase, code, userMsg, detail)
+				s.emit(EventState, "download unavailable, streaming via browser")
+			}
+		}
+
+		s.setState(StateJoining, "[2/6] Loading media")
+		s.log.Infof("[PIPELINE:session] [STEP 2/6] session %s: opening media tab (url=%s kind=%s)...", s.ID, s.MediaURL, s.MediaKind)
+		// A session that never entered the download stage plays the remote URL
+		// directly — record the honest phase ("browser", not a fallback) so the
+		// card can distinguish "played from the browser as requested" from
+		// "download failed, fell back to the browser".
+		if s.Phase() == PhaseNone || s.Phase() == PhaseDownloading {
+			if s.playMode == mediateam.ModeBrowser {
+				s.setPhase(PhaseBrowser, "", "browser mode: playing the remote URL directly")
+			} else if s.localFile == nil {
+				// Download/Auto whose download was skipped (unsupported kind) or
+				// already failed: whatever plays is the browser, and the phase
+				// must not imply a download that never happened.
+				s.setPhase(PhaseBrowser, "", "download not applicable; playing the remote URL directly")
+			}
+		}
+		if s.openRun != nil {
+			// Test seam: the fake stands in for the whole media-tab open, so the
+			// fallback path runs past stage 2 without Chromium.
+			mediaErrCh <- s.openRun()
+			return
+		}
+		mediaErrCh <- s.openMedia()
+	}()
+
+	// Wait for both legs. The media leg's error handling is the big block at
+	// [2/6]: it is fatal EXCEPT when the download already recorded a fallback
+	// the browser leg could still recover from — preserved here exactly.
 	var err error
-	if s.openRun != nil {
-		// Test seam: the fake stands in for the whole media-tab open, so the
-		// fallback path runs past stage 2 without Chromium.
-		err = s.openRun()
-	} else {
-		err = s.openMedia()
+	select {
+	case err = <-mediaErrCh:
+		// The media leg settled first; the meet leg keeps running for now and
+		// is joined (or drained) below.
+	case meetErr := <-meetErrCh:
+		// First fatal error from the meet leg ([3/6] or [4/6]): abort the
+		// session so the media leg unwinds instead of loading a tab for a
+		// meeting that is already lost. Wait for the meet leg to go quiet
+		// first — after handleMeetLegError records the terminal state a
+		// straggler setState from the still-unwinding meet goroutine could
+		// overwrite it, exactly the race the media branch guards against.
+		select {
+		case <-meetQuiet:
+		case <-time.After(5 * time.Second):
+			s.log.Warnf("[PIPELINE:session] session %s: meet leg still running after its own failure; recording the terminal state anyway", s.ID)
+		}
+		if s.cancel != nil {
+			s.cancel()
+		}
+		// Drain the media leg so it cannot outlive the session goroutine: it
+		// observes the cancelled lifespan and returns promptly. Its (now moot)
+		// error is dropped on purpose — the MEET error is what the session
+		// must report, exactly as the sequential version did.
+		select {
+		case <-mediaErrCh:
+		case <-time.After(5 * time.Second):
+		}
+		s.handleMeetLegError(meetErr)
+		return
 	}
+	// The media leg settled first with an error: the [2/6] classification
+	// block below is the fatal path exactly as before. The cancel is issued
+	// FIRST so the meet leg stops calling setState the moment its current
+	// CDP call returns: a later setState from the meet leg would otherwise
+	// overwrite the terminal StateError this branch records (the state
+	// machine is single-writer by design, and two legs must not race the
+	// terminal verdict). The classification itself still runs with the
+	// session's own terminal state unset, so setError is what finalises it —
+	// the observable order the sequential version had.
 	if err != nil {
+		// Cancel FIRST so the meet leg stops calling setState the moment its
+		// current CDP call returns: the state machine is single-writer by
+		// design, and a straggler setState from the meet goroutine would
+		// otherwise overwrite the terminal StateError this branch records.
+		// The classification below still runs before setError, so the
+		// observable order (phase → error) matches the sequential version.
+		// NOTE: do NOT cancel the lifespan here. The old sequential code only
+		// cancelled on Stop; a media-stage failure is reported through
+		// setError below, and cancelling first would make the s.ctx.Err()==nil
+		// guard skip it (turning a real media error into a silent "cancelled").
+		// The meet leg unwinds on its own: it observes the failed media leg via
+		// the shared state and its gate between openMeet and joinMeeting.
+		// Wait for the meet leg to go quiet — it has either reported its error
+		// or observed the dead lifespan at the gate between openMeet and
+		// joinMeeting. joinMeeting's poll loop honours ctx.Err() too, so the
+		// only unbounded case is a meet leg blocked inside a CDP call that
+		// ignores the bound context; the deadline keeps even that from
+		// holding the session's terminal verdict hostage.
+		select {
+		case <-meetQuiet:
+		case <-time.After(5 * time.Second):
+			s.log.Warnf("[PIPELINE:session] session %s: meet leg still running after media failure; recording the terminal state anyway", s.ID)
+		}
 		if s.ctx.Err() == nil {
 			// The media tab failed to open at all: classify for the user and
 			// record the failure honestly. The session ends here, so this is
@@ -791,9 +961,25 @@ func (s *Session) run() {
 			}
 			s.setError(err)
 		}
+		// The meet leg has already gone quiet (or timed out) above; wait for
+		// it to finish unwinding so it can never outlive the session goroutine.
+		select {
+		case <-meetErrCh:
+		case <-time.After(5 * time.Second):
+		}
 		return
 	}
 	if s.ctx.Err() != nil {
+		// The lifespan died mid-media-leg: wait for the meet leg to go quiet
+		// and finish unwinding so it cannot outlive the session goroutine.
+		select {
+		case <-meetQuiet:
+		case <-time.After(5 * time.Second):
+		}
+		select {
+		case <-meetErrCh:
+		case <-time.After(5 * time.Second):
+		}
 		return
 	}
 	s.mu.Lock()
@@ -801,30 +987,35 @@ func (s *Session) run() {
 	s.mu.Unlock()
 	s.log.Infof("[PIPELINE:session] [STEP 2/6] session %s: media ready (title=%q dur=%.1fs)", s.ID, mediaTitle, mediaDur)
 
-	s.setState(StateJoining, "[3/6] Opening Google Meet")
-	s.log.Infof("[PIPELINE:session] [STEP 3/6] session %s: opening Meet tab (url=%s)...", s.ID, s.MeetURL)
-	if err := s.openMeet(); err != nil {
-		if s.ctx.Err() == nil {
-			s.setError(err)
-		}
+	// The media leg is done; the meet leg is still driving [3/6]/[4/6] on its
+	// own tab. Wait for it here, keeping the exact error semantics the
+	// sequential version had for both stages.
+	if err := <-meetErrCh; err != nil {
+		s.handleMeetLegError(err)
 		return
+	}
+	// rearmRecovery guards the remaining sequential steps ([5/6], [6/6],
+	// watch) after the parallel legs' own recovers have gone out of scope.
+	// It must NOT re-run when the meet leg already reported a crash
+	// (recoveredByLeg): double-handling would overwrite the leg's error and,
+	// when the cancel raced the crash, downgrade the session to cancelled.
+	if !recoveredByLeg {
+		defer func() {
+			if r := recover(); r != nil {
+				err := fmt.Errorf("session crashed: %v", r)
+				if s.ctx != nil && s.ctx.Err() != nil {
+					// A panic during cancellation is usually the cancellation
+					// itself racing a rod call; report it as cancelled, the
+					// honest terminal state for a stop in flight.
+					s.setError(errors.New("session stopped during teardown"))
+				} else {
+					s.setError(err)
+				}
+				s.log.Errorf("[PIPELINE:session] session %s: %v", s.ID, r)
+			}
+		}()
 	}
 	if s.ctx.Err() != nil {
-		return
-	}
-	s.log.Infof("[PIPELINE:session] [STEP 3/6] session %s: Meet tab loaded", s.ID)
-
-	s.setState(StateJoining, "[4/6] Joining meeting")
-	s.log.Infof("[PIPELINE:session] [STEP 4/6] session %s: handling prejoin and host gate...", s.ID)
-	if err := s.joinMeeting(); err != nil {
-		if s.ctx.Err() != nil {
-			s.setState(StateCancelled, "cancelled")
-			return
-		}
-		if strings.Contains(err.Error(), "timed out") {
-			s.setState(StateTimedOut, err.Error())
-		}
-		s.setError(err)
 		return
 	}
 	s.mu.Lock()
@@ -893,6 +1084,23 @@ func (s *Session) run() {
 	s.emit(EventStreaming, "stream is live")
 
 	s.watch()
+}
+
+// handleMeetLegError is the meet leg's error path, lifted unchanged from the
+// sequential run(): the [3/6]/[4/6] failures were fatal (except for the
+// cancelled case), with the joinMeeting-specific timed-out classification.
+// The error passed in is the first fatal error from EITHER leg when it came
+// from the meet side, or the meet leg's own error observed after the media
+// leg already succeeded; either way the handler records it exactly as before.
+func (s *Session) handleMeetLegError(err error) {
+	if s.ctx.Err() != nil && errors.Is(err, context.Canceled) {
+		s.setState(StateCancelled, "cancelled")
+		return
+	}
+	if strings.Contains(err.Error(), "timed out") {
+		s.setState(StateTimedOut, err.Error())
+	}
+	s.setError(err)
 }
 
 // cleanup releases pages and finalises the state.
@@ -1650,12 +1858,47 @@ func (s *Session) startPresenting() error {
 	presentMisses := 0
 	lastDump := time.Time{}
 	presentStart := time.Now()
+	// directDriven is set once the direct displayMedia driver (below) has
+	// installed a capture stream on Meet's own RTCPeerConnection. After that
+	// the toolbar click path is actively harmful: it would start a SECOND
+	// share from a different source and Meet would tear the first one down,
+	// so the loop stops clicking entirely.
+	directDriven := false
 	for time.Now().Before(deadline) {
 		if s.ctx.Err() != nil {
 			return s.ctx.Err()
 		}
 		if ok, _ := s.presenting(); ok {
 			return nil
+		}
+		// DIRECT DISPLAY-MEDIA DRIVER — the primary path. It does not depend on
+		// finding a toolbar button at all: Meet's own RTCREPeerConnection set
+		// (hooked by meetPeerHookJS at document start) publishes whatever
+		// capture stream we hand it, and Chromium answers getDisplayMedia
+		// automatically through --auto-select-tab-capture-source-by-title for
+		// the tab whose WebContents title is s.TabTitle (verified by
+		// ensureCaptureTitle above). On the Meet builds this host actually
+		// receives (verified 2026-11-08, sessions s-8a1200a6 / s-c436cdfe /
+		// s-56c126e9) the toolbar exposes NO present/share control — the
+		// bottom bar shows only camera/mic/leave/chat and the "More options"
+		// menu lists Backgrounds/Report/Troubleshooting/Settings — so the
+		// historical click path alone can never start the share and the
+		// session dies with "present flow timed out after 45s".
+		//
+		// Non-fatal by construction: a page that answers with no usable stream
+		// (no peer connections yet, capture refused) leaves directDriven false
+		// and the loop falls through to the click path unchanged.
+		if !directDriven {
+			if ok, note := s.driveDisplayMedia(); ok {
+				directDriven = true
+				s.log.Infof("[PIPELINE:present] session %s: direct display-media driver installed a capture stream (%s)", s.ID, note)
+				s.setState(StateSharing, "[5/6] Capture stream installed")
+				time.Sleep(700 * time.Millisecond)
+				if ok, _ := s.presenting(); ok {
+					s.log.Infof("[PIPELINE:present] session %s: presenting confirmed active via direct driver", s.ID)
+					return nil
+				}
+			}
 		}
 		// Meet is already starting the capture (getDisplayMedia in flight): wait
 		// for the stream instead of hammering the toolbar again.
@@ -1675,7 +1918,10 @@ func (s *Session) startPresenting() error {
 			continue
 		}
 		startingSince = time.Time{}
-		if s.meetTab() != nil {
+		// Never click any toolbar control once the direct driver has
+		// installed a capture stream: a second share from a different source
+		// is what tears the presentation down.
+		if s.meetTab() != nil && !directDriven {
 			opened, label := s.clickPresentButton()
 			if opened {
 				if label == "opened more options" {
