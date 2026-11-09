@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -163,6 +164,19 @@ type Session struct {
 	// a browser. The fake must NOT set s.browser: the whole point is that
 	// the session proceeds with no Chromium at all.
 	openRun func() error
+
+	// joinRun is the Meet half of run()'s [3/6]+[4/6] stage (open the Meet tab,
+	// then drive the prejoin/lobby gate). It is nil in production, where
+	// openMeet and joinMeeting drive real CDP. Package tests substitute a fake
+	// so the two parallel legs' handoff can be exercised without Chromium —
+	// in particular that a SUCCESSFUL join falls through to [5/6] instead of
+	// being read as a fatal leg error.
+	joinRun func() error
+
+	// presentRun and playRun stand in for the [5/6] share and [6/6] playback
+	// stages so a browser-free test can drive run() all the way past the join.
+	presentRun func() error
+	playRun    func() error
 
 	// Playlist queue fields
 	queueMu     sync.RWMutex
@@ -637,7 +651,7 @@ func (s *Session) run() {
 				}
 				// The stack digest goes to the log; stderr still gets the full
 				// trace from the runtime's own panic reporting path.
-				s.log.Errorf("[PIPELINE:session] session %s: %v", s.ID, r)
+				s.log.Errorf("[PIPELINE:session] session %s: %v\n%s", s.ID, r, debug.Stack())
 			}
 		}
 	}()
@@ -758,6 +772,13 @@ func (s *Session) run() {
 		}()
 		s.setState(StateJoining, "[3/6] Opening Google Meet")
 		s.log.Infof("[PIPELINE:session] [STEP 3/6] session %s: opening Meet tab (url=%s)...", s.ID, s.MeetURL)
+		if s.joinRun != nil {
+			// Test seam: the fake covers BOTH meet stages (open + join) so the
+			// leg's success/failure handoff is exercisable without Chromium.
+			quietMeet()
+			meetErrCh <- s.joinRun()
+			return
+		}
 		if err := s.openMeet(); err != nil {
 			quietMeet()
 			meetErrCh <- err
@@ -872,11 +893,30 @@ func (s *Session) run() {
 	// [2/6]: it is fatal EXCEPT when the download already recorded a fallback
 	// the browser leg could still recover from — preserved here exactly.
 	var err error
+	// meetErr/metDone record the meet leg's verdict so the [2/6] block below
+	// can join it without reading a channel that already delivered (a second
+	// receive on meetErrCh would block forever after the meet leg reported
+	// first).
+	var meetErr error
+	meetDone := false
 	select {
 	case err = <-mediaErrCh:
 		// The media leg settled first; the meet leg keeps running for now and
 		// is joined (or drained) below.
-	case meetErr := <-meetErrCh:
+	case meetErr = <-meetErrCh:
+		meetDone = true
+		// The meet leg reported. A nil error is SUCCESS — the bot is in the
+		// meeting — and must fall through to [5/6], not be treated as a
+		// failure. This branch used to abort on every value the channel
+		// delivered, so a perfectly successful join cancelled the session
+		// mid-media-load: the media tab's buffered-video wait was killed by
+		// the lifespan cancel and the session died reporting
+		// "video element never buffered within 35s" for a video that had
+		// simply not finished loading, or with a nil-pointer panic in
+		// handleMeetLegError(nil). See the nil guard there.
+		if meetErr == nil {
+			break
+		}
 		// First fatal error from the meet leg ([3/6] or [4/6]): abort the
 		// session so the media leg unwinds instead of loading a tab for a
 		// meeting that is already lost. Wait for the meet leg to go quiet
@@ -988,10 +1028,13 @@ func (s *Session) run() {
 	s.log.Infof("[PIPELINE:session] [STEP 2/6] session %s: media ready (title=%q dur=%.1fs)", s.ID, mediaTitle, mediaDur)
 
 	// The media leg is done; the meet leg is still driving [3/6]/[4/6] on its
-	// own tab. Wait for it here, keeping the exact error semantics the
-	// sequential version had for both stages.
-	if err := <-meetErrCh; err != nil {
-		s.handleMeetLegError(err)
+	// own tab — unless it already reported above, in which case its verdict is
+	// in hand and receiving from the channel again would block forever.
+	if !meetDone {
+		meetErr = <-meetErrCh
+	}
+	if meetErr != nil {
+		s.handleMeetLegError(meetErr)
 		return
 	}
 	// rearmRecovery guards the remaining sequential steps ([5/6], [6/6],
@@ -1011,7 +1054,7 @@ func (s *Session) run() {
 				} else {
 					s.setError(err)
 				}
-				s.log.Errorf("[PIPELINE:session] session %s: %v", s.ID, r)
+				s.log.Errorf("[PIPELINE:session] session %s: %v\n%s", s.ID, r, debug.Stack())
 			}
 		}()
 	}
@@ -1027,9 +1070,15 @@ func (s *Session) run() {
 
 	s.setState(StateSharing, "[5/6] Starting screen share")
 	s.log.Infof("[PIPELINE:session] [STEP 5/6] session %s: presenting tab %q...", s.ID, s.TabTitle)
-	if err := s.startPresenting(); err != nil {
+	shareErr := func() error {
+		if s.presentRun != nil {
+			return s.presentRun()
+		}
+		return s.startPresenting()
+	}()
+	if shareErr != nil {
 		if s.ctx.Err() == nil {
-			s.setError(err)
+			s.setError(shareErr)
 		}
 		return
 	}
@@ -1038,8 +1087,14 @@ func (s *Session) run() {
 
 	s.setState(StateStreaming, "[6/6] Starting media playback")
 	s.log.Infof("[PIPELINE:session] [STEP 6/6] session %s: unmuting & playing media...", s.ID)
-	if err := s.playMedia(); err != nil {
-		s.log.Warnf("[PIPELINE:session] [STEP 6/6] session %s: media play failed after share: %v", s.ID, err)
+	playErr := func() error {
+		if s.playRun != nil {
+			return s.playRun()
+		}
+		return s.playMedia()
+	}()
+	if playErr != nil {
+		s.log.Warnf("[PIPELINE:session] [STEP 6/6] session %s: media play failed after share: %v", s.ID, playErr)
 		// Auto fallback: the browser pipeline could not play the remote
 		// source, so try the downloaded file — exactly once, bounded, and
 		// only when nothing was already downloaded (Download mode already
@@ -1062,14 +1117,14 @@ func (s *Session) run() {
 		} else {
 			// record the browser-side play failure (terminal unless recovery
 			// repairs it: recoverMedia overwrites the phase when it succeeds).
-			uerr := mediateam.ClassifyUserError(err)
+			uerr := mediateam.ClassifyUserError(playErr)
 			user := "The media couldn't start playing. Use 🔀 Switch media to try another link — the meeting is still live."
 			if uerr != nil && uerr.Code == mediateam.UserCodeNetwork {
 				user = "The network to the media source is unavailable right now. Playback will retry automatically; the meeting is still live."
 			}
-			s.setPhaseFailedWith("browser", PhaseFailed, mediateam.UserCodeOf(err), user, err.Error())
+			s.setPhaseFailedWith("browser", PhaseFailed, mediateam.UserCodeOf(playErr), user, playErr.Error())
 		}
-		s.setDetail("[6/6] Sharing, media start retry: " + err.Error())
+		s.setDetail("[6/6] Sharing, media start retry: " + playErr.Error())
 	} else {
 		s.setDetail("[6/6] Streaming live")
 		// Playback is verified. Keep "downloaded"/"browser" as recorded by
@@ -1093,6 +1148,12 @@ func (s *Session) run() {
 // from the meet side, or the meet leg's own error observed after the media
 // leg already succeeded; either way the handler records it exactly as before.
 func (s *Session) handleMeetLegError(err error) {
+	// A nil verdict is success, not a failure: the meet leg sends nil after a
+	// completed join, and this handler used to dereference it (nil pointer
+	// panic) — masking a perfectly healthy join as a crashed session.
+	if err == nil {
+		return
+	}
 	if s.ctx.Err() != nil && errors.Is(err, context.Canceled) {
 		s.setState(StateCancelled, "cancelled")
 		return
@@ -1992,6 +2053,21 @@ func (s *Session) playMedia() error {
 	s.mu.Unlock()
 	if err != nil {
 		return err
+	}
+	// The player is now hydrated and playing (ensurePlayback pressed play and
+	// verified advancing frames). Only now does getAvailableAudioTracks() report
+	// real tracks — calling ensureAudioTrack earlier (in prepareMedia, during the
+	// ad/pre-roll) finds 0 tracks and gives up, which left YouTube's default
+	// auto-dubbed English track playing instead of the requested Persian original.
+	if s.MediaKind == MediaYouTube {
+		if atRep, atErr := ensureAudioTrack(media, s.MediaKind, s.AudioLang, s.log); atErr != nil {
+			s.log.Warnf("[PIPELINE:audio-track] session %s: requested_lang=%s: %v", s.ID, s.AudioLang, atErr)
+		} else {
+			s.mu.Lock()
+			s.audioRep = atRep
+			s.mu.Unlock()
+			s.log.Infof("[PIPELINE:audiotrack] session %s: %s", s.ID, atRep.describe())
+		}
 	}
 	s.log.Infof("[PIPELINE:playback] session %s: %s", s.ID, rep.describe())
 	return nil

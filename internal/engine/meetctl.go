@@ -269,10 +269,13 @@ func (s *Session) clickPresentButton() (bool, string) {
 	res, err := meet.Timeout(8 * time.Second).Eval(`() => {
   const norm = x => (x || "").replace(/\s+/g, " ").trim().toLowerCase();
 
-  // Dismiss any modal dialog or popup that may be blocking the toolbar
+  // Dismiss any modal dialog or popup that may be blocking the toolbar,
+  // including Meet's transcription/Gemini consent ("Join now"/"Leave").
   try {
     const dialogClose = document.querySelector('[role="dialog"] button[aria-label*="close" i], [role="dialog"] button[aria-label*="cancel" i], div[aria-modal="true"] button[aria-label*="close" i]');
     if (dialogClose) dialogClose.click();
+    const dialogJoin = Array.from(document.querySelectorAll('[role="dialog"] button, div[aria-modal="true"] button')).find(b => /join now/i.test((b.innerText||b.textContent||'').trim()) && !/leave/i.test((b.innerText||b.textContent||'').trim()));
+    if (dialogJoin && dialogJoin.getBoundingClientRect().width >= 1 && dialogJoin.getBoundingClientRect().height >= 1) dialogJoin.click();
   } catch (e) {}
 
   // Wake up auto-hiding toolbar by moving pointer to the bottom toolbar area
