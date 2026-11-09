@@ -328,3 +328,61 @@ func TestYTDLPRetriesWithBackoff(t *testing.T) {
 		t.Fatalf("expected backoff delays for attempts 1 and 2, got %v", delays)
 	}
 }
+
+// A dead proxy listener must fail its route on the FIRST attempt. The route is
+// deterministic (a closed port stays closed), so retrying it only adds latency
+// and a bogus "blocked by the source" mark to the registry — which is exactly
+// what happened live when a configured fallback's port moved: three attempts
+// and ~22s of "[Errno 111] Connection refused" before the ladder advanced.
+func TestYTDLPDeadProxyRouteFailsOnFirstAttempt(t *testing.T) {
+	dir := t.TempDir()
+	opts := DefaultOptions(dir)
+	opts.FallbackProxies = []string{"http://127.0.0.1:59999"}
+	var proxied []int // attempt numbers seen on the proxied route
+	proxiedRoute := 0
+	m := newYtdlpTestManager(t, opts, func(_ context.Context, args []string) ([]byte, []byte, error) {
+		for _, a := range args {
+			if strings.Contains(a, "127.0.0.1:59999") {
+				proxiedRoute++
+				proxied = append(proxied, proxiedRoute)
+				return nil, []byte("ERROR: Unable to download API page: [Errno 111] Connection refused (caused by TransportError('[Errno 111] Connection refused'))"), youtubeBotCheck
+			}
+		}
+		return nil, []byte("ERROR: [youtube] X: Sign in to confirm you're not a bot"), youtubeBotCheck
+	})
+	_, err := m.Download(context.Background(), DownloadRequest{
+		URL: "https://www.youtube.com/watch?v=abcdefghijk", Kind: "youtube", ID: "vid",
+	})
+	if err == nil {
+		t.Fatal("expected the whole ladder to fail")
+	}
+	if proxiedRoute != 1 {
+		t.Fatalf("a dead proxy listener must be attempted exactly once, got %d attempts", proxiedRoute)
+	}
+}
+
+// unreachableProxy must not claim the source-refusal shapes: those flip between
+// attempts and are exactly what the bounded retry loop exists for.
+func TestUnreachableProxyClassification(t *testing.T) {
+	dead := [][]byte{
+		[]byte("ERROR: Unable to download API page: [Errno 111] Connection refused"),
+		[]byte("ERROR: Unable to connect to proxy: Connection refused"),
+		[]byte("ERROR: ProxyError('Unable to connect to proxy', ConnectionRefusedError(111, 'Connection refused'))"),
+	}
+	for _, s := range dead {
+		if !unreachableProxy(s) {
+			t.Fatalf("expected unreachable proxy: %s", s)
+		}
+	}
+	live := [][]byte{
+		[]byte("ERROR: [youtube] X: Sign in to confirm you're not a bot"),
+		[]byte("ERROR: unable to download video data: HTTP Error 403: Forbidden"),
+		[]byte("ERROR: HTTP Error 429: Too Many Requests"),
+		[]byte("ERROR: [youtube] X: Requested format is not available"),
+	}
+	for _, s := range live {
+		if unreachableProxy(s) {
+			t.Fatalf("a live route's refusal must not classify as unreachable: %s", s)
+		}
+	}
+}

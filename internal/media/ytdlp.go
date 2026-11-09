@@ -64,6 +64,30 @@ func proxyBlocked(stderr []byte) bool {
 		strings.Contains(t, "unable to connect to proxy")
 }
 
+// unreachableProxy reports whether a yt-dlp failure is a PROXY-side transport
+// failure — the route itself is dead (nothing listening, the tunnel refused the
+// connection, the SOCKS handshake never completed) — as opposed to the source
+// refusing this egress.
+//
+// The distinction matters for pacing, not for ladder order. A source refusal
+// ("Sign in to confirm you're not a bot", HTTP 429) can flip between attempts,
+// so the historical bounded retries are worth their cost. A dead listener
+// cannot: every retry of the same argv talks to the same closed port. Verified
+// live 2026-11-09 — a configured fallback whose port had moved from the docker
+// bridge to loopback spent 3 attempts and ~22 s producing
+// "Unable to download API page: [Errno 111] Connection refused", and the
+// resulting mark then steered the media browser away from a route that had in
+// fact never been asked anything. Failing the route on the FIRST attempt keeps
+// the ladder's total latency honest and lets the next route answer.
+func unreachableProxy(stderr []byte) bool {
+	t := strings.ToLower(string(stderr))
+	return strings.Contains(t, "connection refused") ||
+		strings.Contains(t, "[errno 111]") ||
+		strings.Contains(t, "unable to connect to proxy") ||
+		strings.Contains(t, "proxyerror") ||
+		strings.Contains(t, "failed to establish a new connection")
+}
+
 // stderrOf pulls the embedded yt-dlp stderr text out of a wrapped fetch
 // error (the %w in "yt-dlp: exit status 1: ERROR: ..."). The ladder decision
 // reads the real diagnosis, not a bare "exit status 1".
@@ -685,7 +709,14 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality, subLang string
 			// stop rerunning identical argv and let the egress ladder decide
 			// whether another route could help. Transient, rate-limit-shaped
 			// failures keep the historical bounded retries to ride out a flap.
+			// A DEAD proxy listener is equally deterministic — see
+			// unreachableProxy — so it fails the route on its first attempt.
 			if !proxyBlocked(stderr) && !transientFailure(rerr, stderr) {
+				break
+			}
+			if unreachableProxy(stderr) {
+				m.log.Warnf("[PIPELINE:download] %s: egress %s is unreachable (%s); failing this route on the first attempt instead of retrying a closed socket",
+					id, label, truncateForLog(strings.TrimSpace(string(stderr)), 120))
 				break
 			}
 		}
@@ -699,7 +730,14 @@ func (m *Manager) fetchYTDLP(ctx context.Context, u, id, quality, subLang string
 			// the operator configured, and the browser fallback then reuses
 			// the same rejected route and dies too. Walk the ladder.
 			m.MarkEgressBlocked(proxy)
-			m.log.Warnf("[PIPELINE:download] %s: egress %s blocked by the source (%s); trying next egress %s", id, label, truncateForLog(strings.TrimSpace(string(stderr)), 120), egressLabel(routes[ri+1]))
+			// Name the failure honestly: a dead listener is not the source
+			// refusing this egress, and an operator reading "blocked by the
+			// source" for a closed port goes hunting for the wrong problem.
+			why := "blocked by the source"
+			if unreachableProxy(stderr) {
+				why = "unreachable"
+			}
+			m.log.Warnf("[PIPELINE:download] %s: egress %s %s (%s); trying next egress %s", id, label, why, truncateForLog(strings.TrimSpace(string(stderr)), 120), egressLabel(routes[ri+1]))
 			continue
 		}
 		// A real verdict (or a route error that is not egress-shaped): the
