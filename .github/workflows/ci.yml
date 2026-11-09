@@ -369,7 +369,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: build and push image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: ${{ steps.meta.outputs.push == 'true' }}
