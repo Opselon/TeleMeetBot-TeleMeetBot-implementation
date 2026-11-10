@@ -10,16 +10,35 @@ import (
 	"github.com/go-rod/rod/lib/proto"
 )
 
-// meetStageJS is the page script classifying where the bot is. It must stay in
-// function form (no IIFE wrap) for rod's Eval, and it returns [stage, detail] —
-// stages: meeting, lobby, blocked, prejoin, login, unknown. For "blocked" the
-// detail is the page's own (lowercased) excerpt so the Go side can tell
-// terminal blocks from host-gated waits.
+// meetClassifyFn is the page script classifying where the bot is. It must stay
+// in function form (no IIFE wrap) for rod's Eval, and it returns [stage,
+// detail] — stages: meeting, lobby, blocked, prejoin, login, unknown. For
+// "blocked" the detail is the page's own (lowercased) excerpt so the Go side
+// can tell terminal blocks from host-gated waits.
 //
-// Stage classification is body-text based (see references/meet-guest-flow.md).
-func meetStageJS() string {
-	return `() => {
-  const body = (((document.body || {}).innerText) || "").toLowerCase();
+// Stage classification is body-text based (see references/meet-guest-flow.md);
+// the in-meeting stage additionally takes ground truth from the publisher hook
+// (meetPeerHookJS): Meet only opens RTCPeerConnections for media transport
+// once the bot is inside the call — the prejoin screen and the lobby never
+// create one. That signal survives Meet redesigns and localized UI where the
+// English aria-label heuristics do not.
+const meetClassifyFn = `() => {
+  // Media-transport ground truth: Meet's PREJOIN screen creates
+  // capability-check RTCPeerConnections, so bare connections prove nothing
+  // (the bot once claimed "Admitted" from the prejoin screen because of
+  // them). Only a connected connection whose senders carry live tracks is
+  // the actual media transport — that exists only inside the call.
+  let transport = false;
+  try {
+    const pcs = window.__tmPCs || [];
+    for (const pc of pcs) {
+      try {
+        if (pc.connectionState !== "connected") continue;
+        const senders = (pc.getSenders ? pc.getSenders() : []) || [];
+        if (senders.some(s => s.track && s.track.readyState === "live")) { transport = true; break; }
+      } catch (e) {}
+    }
+  } catch (e) {}
   const vis = sel => {
     try {
       const els = document.querySelectorAll(sel);
@@ -33,33 +52,40 @@ func meetStageJS() string {
       return false;
     } catch (e) { return false; }
   };
+
+  // In-meeting controls that only exist once the call is active. Checked
+  // before the body-text walk (innerText forces a full layout pass) because
+  // the transport signal answers without it.
+  const controls = vis('[aria-label*="Leave call" i]') ||
+                   vis('[aria-label*="Leave meeting" i]') ||
+                   vis('[data-tooltip*="Leave call" i]') ||
+                   vis('[aria-label*="Present" i]') ||
+                   vis('[data-tooltip*="Present" i]') ||
+                   vis('[aria-label*="Share screen" i]') ||
+                   vis('[aria-label*="Share your screen" i]') ||
+                   vis('[aria-label*="Stop presenting" i]') ||
+                   vis('[data-tooltip*="Stop presenting" i]') ||
+                   vis('[aria-label*="Stop sharing" i]') ||
+                   vis('[data-tooltip*="Stop sharing" i]') ||
+                   vis('[aria-label*="Raise hand" i]') ||
+                   vis('[aria-label*="People" i]') ||
+                   vis('[aria-label*="Chat with everyone" i]') ||
+                   vis('[aria-label*="Meeting details" i]');
+  if (controls || transport) {
+    return ["meeting", transport ? "meeting media transport active" : "meeting controls visible"];
+  }
+
+  const body = (((document.body || {}).innerText) || "").toLowerCase();
   const snippet = (re) => {
     const m = body.match(re);
     return m ? String(m[0]).slice(0, 120) : "";
   };
   const excerpt = body.replace(/\s+/g, " ").trim().slice(0, 240);
 
-  // In-meeting controls that only exist once the call is active:
-  const inMeeting = vis('[aria-label*="Leave call" i]') ||
-                    vis('[data-tooltip*="Leave call" i]') ||
-                    vis('[aria-label*="Present" i]') ||
-                    vis('[data-tooltip*="Present" i]') ||
-                    vis('[aria-label*="Share screen" i]') ||
-                    vis('[aria-label*="Share your screen" i]') ||
-                    vis('[aria-label*="Stop presenting" i]') ||
-                    vis('[data-tooltip*="Stop presenting" i]') ||
-                    vis('[aria-label*="Stop sharing" i]') ||
-                    vis('[data-tooltip*="Stop sharing" i]') ||
-                    vis('[aria-label*="Raise hand" i]') ||
-                    vis('[aria-label*="People" i]') ||
-                    vis('[aria-label*="Chat with everyone" i]') ||
-                    vis('[aria-label*="Meeting details" i]') ||
-                    /you are presenting|you're presenting|stop presenting|you are sharing|you're sharing|stop sharing/.test(body);
-
-  if (inMeeting) {
-    return ["meeting", "meeting controls visible"];
+  if (/you are presenting|you're presenting|stop presenting|you are sharing|you're sharing|stop sharing/.test(body)) {
+    return ["meeting", "presentation indicators visible"];
   }
-  if (/waiting for (the )?host|you.ll be able to join|someone will let you in|waiting to be admitted|you.ll join when someone lets you in|asking to join/.test(body)) {
+  if (/waiting for (the )?host|you.ll be able to join|someone will let you in|waiting to be admitted|you.ll join when someone lets you in|asking to join|asking to be let in/.test(body)) {
     return ["lobby", "in the lobby, host must admit"];
   }
   if (/meeting is full|you can.t join this (video )?call|this meeting has ended|the call has ended|invalid meeting|check your meeting code|no one can join|ask the host|needs permission/.test(body)) {
@@ -73,6 +99,118 @@ func meetStageJS() string {
   }
   return ["unknown", excerpt.slice(0, 80)];
 }`
+
+// meetStageJS returns the one-shot classifier for rod's Eval.
+func meetStageJS() string {
+	return meetClassifyFn
+}
+
+// awaitMeetStageJS wraps the classifier in an in-page waiter: the classifier
+// runs on a timer INSIDE the page and the promise resolves as soon as any
+// decisive stage appears (rod's Eval awaits promises), so a slow SPA
+// transition is noticed within one tick without paying a CDP round trip per
+// poll. The numbers are baked in rather than passed as Eval args so the shape
+// stays a plain zero-argument function.
+func awaitMeetStageJS(maxWait, tick time.Duration) string {
+	return fmt.Sprintf(`() => new Promise((resolve) => {
+  const classify = %s;
+  let timer = null;
+  let done = false;
+  const finish = (r) => {
+    if (done) return;
+    done = true;
+    if (timer) clearInterval(timer);
+    resolve(r);
+  };
+  timer = setInterval(() => {
+    if (done) return;
+    let r;
+    try { r = classify(); } catch (e) { return; }
+    if (r && r[0] && r[0] !== "unknown") finish(r);
+  }, %d);
+  setTimeout(() => finish(["unknown", ""]), %d);
+})`, meetClassifyFn, tick.Milliseconds(), maxWait.Milliseconds())
+}
+
+// verifyInMeetingJS is the participant-grade self-check behind the "meeting"
+// verdict: an ADMITTED participant has the call toolbar (leave/present/people
+// controls only exist inside the call) and the publisher's media transport
+// (a connected RTCPeerConnection carrying live tracks). Neither bare
+// RTCPeerConnections — Meet's prejoin screen creates capability-check ones —
+// nor any single DOM probe count as proof on their own.
+const verifyInMeetingJS = `() => {
+  const vis = sel => {
+    try {
+      const els = document.querySelectorAll(sel);
+      for (const el of els) {
+        const r = el.getBoundingClientRect();
+        if (r.width >= 2 && r.height >= 2) {
+          const cs = getComputedStyle(el);
+          if (cs.visibility !== "hidden" && cs.display !== "none") return true;
+        }
+      }
+      return false;
+    } catch (e) { return false; }
+  };
+  const toolbar = vis('[aria-label*="Leave call" i]') ||
+                  vis('[aria-label*="Leave meeting" i]') ||
+                  vis('[data-tooltip*="Leave call" i]') ||
+                  vis('[aria-label*="Present" i]') ||
+                  vis('[data-tooltip*="Present" i]') ||
+                  vis('[aria-label*="People" i]') ||
+                  vis('[aria-label*="Meeting details" i]');
+  let transport = false;
+  try {
+    const pcs = window.__tmPCs || [];
+    for (const pc of pcs) {
+      try {
+        if (pc.connectionState !== "connected") continue;
+        const senders = (pc.getSenders ? pc.getSenders() : []) || [];
+        if (senders.some(s => s.track && s.track.readyState === "live")) { transport = true; break; }
+      } catch (e) {}
+    }
+  } catch (e) {}
+  return JSON.stringify({toolbar: !!toolbar, transport: transport});
+}`
+
+// verifyInMeeting confirms — independently of the stage classifier — that the
+// bot is REALLY inside the call. The join flow learned the hard way (live
+// probe against a real meeting, 2026-11-10): Meet's prejoin screen creates
+// capability-check RTCPeerConnections, so "connections exist" once made the
+// bot claim "Admitted to meeting" while it was still on the prejoin screen
+// and no participant ever saw it. This probe is the self-check: the verdict
+// names which participant-grade signal(s) agreed, and "no participant-grade
+// signal" means the claim is not confirmed.
+func (s *Session) verifyInMeeting() (bool, string) {
+	meet := s.meetTab()
+	if meet == nil {
+		return false, "no meet tab"
+	}
+	res, err := meet.Timeout(5 * time.Second).Eval(verifyInMeetingJS)
+	if err != nil {
+		return false, err.Error()
+	}
+	body := strings.TrimSpace(res.Value.Str())
+	if !strings.HasPrefix(body, "{") {
+		return false, "unexpected probe result"
+	}
+	var st struct {
+		Toolbar   bool `json:"toolbar"`
+		Transport bool `json:"transport"`
+	}
+	if err := json.Unmarshal([]byte(body), &st); err != nil {
+		return false, err.Error()
+	}
+	switch {
+	case st.Toolbar && st.Transport:
+		return true, "toolbar and media transport both confirmed"
+	case st.Toolbar:
+		return true, "call toolbar confirmed"
+	case st.Transport:
+		return true, "media transport confirmed"
+	default:
+		return false, "no participant-grade signal"
+	}
 }
 
 // blockedFatalPhrase reports the terminal-rejection phrase hidden in a
@@ -104,6 +242,29 @@ func (s *Session) meetStage() (string, string) {
 		return "unknown", "no page"
 	}
 	res, err := meet.Timeout(5 * time.Second).Eval(meetStageJS())
+	if err != nil {
+		return "unknown", err.Error()
+	}
+	arr := res.Value.Arr()
+	if len(arr) < 2 {
+		return "unknown", ""
+	}
+	return strings.ToLower(arr[0].Str()), strings.TrimSpace(arr[1].Str())
+}
+
+// meetStageWait is meetStage's event-driven twin: the classifier runs on a
+// timer inside the page and the call resolves as soon as any decisive stage
+// appears, or after maxWait with ("unknown", "") — so a slow SPA transition is
+// noticed within one in-page tick (joinPollTick) instead of paying a CDP round
+// trip per poll. A probe error degrades to ("unknown", ...) exactly like
+// meetStage: a destroyed execution context (Meet navigating mid-wait) is just
+// an observation that the page moved on.
+func (s *Session) meetStageWait(maxWait time.Duration) (string, string) {
+	meet := s.meetTab()
+	if meet == nil {
+		return "unknown", "no page"
+	}
+	res, err := meet.Timeout(maxWait + 5*time.Second).Eval(awaitMeetStageJS(maxWait, joinPollTick))
 	if err != nil {
 		return "unknown", err.Error()
 	}

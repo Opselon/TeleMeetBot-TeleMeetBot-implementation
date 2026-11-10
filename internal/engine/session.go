@@ -34,6 +34,46 @@ const (
 	hostWaitHeartbeat   = 30 * time.Second
 )
 
+// Join-flow pacing: how the join loop observes the page and retries the
+// prejoin click. The stage observation is event-driven (see meetStageWait):
+// the classifier runs inside the page on a joinPollTick timer and the result
+// arrives the moment a decisive stage appears, so a slow SPA transition is
+// noticed within one tick without a CDP round trip per poll.
+const (
+	// joinPollWait bounds one in-page stage observation.
+	joinPollWait = 1200 * time.Millisecond
+	// joinPollTick is the in-page classifier cadence inside one observation.
+	joinPollTick = 250 * time.Millisecond
+	// joinClickPace is the short delay after a prejoin click before the next
+	// observation: an open meeting answers "Join now" almost immediately.
+	joinClickPace = 700 * time.Millisecond
+	// openReclickWait is how long an unconfirmed open-meeting "Join now" click
+	// may sit on the prejoin screen before the click is retried.
+	openReclickWait = 4 * time.Second
+	// knockReclickWait spaces out retried "Ask to join" knocks: the knock
+	// registers server-side and Meet throttles repeated knocks.
+	knockReclickWait = 12 * time.Second
+	// maxPrejoinClicks bounds consecutive unconfirmed clicks before the loop
+	// escalates to a full page reload instead of clicking into the same page.
+	maxPrejoinClicks = 3
+	// maxMeetingConfirmChecks bounds the meeting-entry self-check: how many
+	// observation rounds a "meeting" stage verdict may stay uncorroborated by
+	// verifyInMeeting before it is accepted anyway (the watch loop keeps
+	// probing afterwards).
+	maxMeetingConfirmChecks = 4
+)
+
+// clickRetryWait returns how long a prejoin click may stay unconfirmed before
+// another click is justified. "Ask to join" registers a knock server-side and
+// may be throttled by Meet, so knocks are retried on a wider cadence than the
+// open-meeting "Join now", which must land almost instantly.
+func clickRetryWait(label string) time.Duration {
+	if strings.Contains(label, "ask") {
+		return knockReclickWait
+	}
+	return openReclickWait
+}
+
 // Session is one Google Meet participant that shares one media tab.
 type Session struct {
 	ID        SessionID
@@ -917,30 +957,46 @@ func (s *Session) run() {
 		if meetErr == nil {
 			break
 		}
-		// First fatal error from the meet leg ([3/6] or [4/6]): abort the
-		// session so the media leg unwinds instead of loading a tab for a
-		// meeting that is already lost. Wait for the meet leg to go quiet
-		// first — after handleMeetLegError records the terminal state a
-		// straggler setState from the still-unwinding meet goroutine could
-		// overwrite it, exactly the race the media branch guards against.
+		// Prefer an already-settled media verdict: when both legs failed
+		// essentially together, the media story (download → fallback →
+		// failure) is the honest terminal phase and its classification block
+		// below owns the recorded verdict — the meet error is kept in the log.
+		// When the media leg is still in flight its verdict is moot, and the
+		// MEET error is what the session reports, exactly as before (a meet
+		// failure such as an invalid meeting code must not wait out the media
+		// leg to be recorded).
 		select {
-		case <-meetQuiet:
-		case <-time.After(5 * time.Second):
-			s.log.Warnf("[PIPELINE:session] session %s: meet leg still running after its own failure; recording the terminal state anyway", s.ID)
+		case err = <-mediaErrCh:
+			s.log.Warnf("[PIPELINE:session] session %s: meet leg also failed (%v); recording the media verdict", s.ID, meetErr)
+			// Fall through to the media classification block below. The meet
+			// verdict was already consumed here, so the block's drain must
+			// not read meetErrCh again (it would block for its full timeout).
+		default:
+			// First fatal error from the meet leg ([3/6] or [4/6]): abort the
+			// session so the media leg unwinds instead of loading a tab for a
+			// meeting that is already lost. Wait for the meet leg to go quiet
+			// first — after handleMeetLegError records the terminal state a
+			// straggler setState from the still-unwinding meet goroutine could
+			// overwrite it, exactly the race the media branch guards against.
+			select {
+			case <-meetQuiet:
+			case <-time.After(5 * time.Second):
+				s.log.Warnf("[PIPELINE:session] session %s: meet leg still running after its own failure; recording the terminal state anyway", s.ID)
+			}
+			if s.cancel != nil {
+				s.cancel()
+			}
+			// Drain the media leg so it cannot outlive the session goroutine:
+			// it observes the cancelled lifespan and returns promptly. Its
+			// (now moot) error is dropped on purpose — the MEET error is what
+			// the session must report, exactly as the sequential version did.
+			select {
+			case <-mediaErrCh:
+			case <-time.After(5 * time.Second):
+			}
+			s.handleMeetLegError(meetErr)
+			return
 		}
-		if s.cancel != nil {
-			s.cancel()
-		}
-		// Drain the media leg so it cannot outlive the session goroutine: it
-		// observes the cancelled lifespan and returns promptly. Its (now moot)
-		// error is dropped on purpose — the MEET error is what the session
-		// must report, exactly as the sequential version did.
-		select {
-		case <-mediaErrCh:
-		case <-time.After(5 * time.Second):
-		}
-		s.handleMeetLegError(meetErr)
-		return
 	}
 	// The media leg settled first with an error: the [2/6] classification
 	// block below is the fatal path exactly as before. The cancel is issued
@@ -1002,10 +1058,14 @@ func (s *Session) run() {
 			s.setError(err)
 		}
 		// The meet leg has already gone quiet (or timed out) above; wait for
-		// it to finish unwinding so it can never outlive the session goroutine.
-		select {
-		case <-meetErrCh:
-		case <-time.After(5 * time.Second):
+		// it to finish unwinding so it can never outlive the session
+		// goroutine. A verdict consumed by the meet-first branch above
+		// (meetDone) must not be read again — the channel delivered it once.
+		if !meetDone {
+			select {
+			case <-meetErrCh:
+			case <-time.After(5 * time.Second):
+			}
 		}
 		return
 	}
@@ -1692,16 +1752,23 @@ func (s *Session) openMeet() error {
 	}
 	_ = p.WaitLoad()
 	s.setLastMeetLoad()
-	// Meet is a SPA: give it a beat to render the prejoin screen.
-	time.Sleep(1200 * time.Millisecond)
+	// Meet is a SPA: give it a beat to start rendering. The join loop's
+	// event-driven observer (meetStageWait) notices the prejoin screen the
+	// moment it appears, so this only needs to cover the blank page.
+	time.Sleep(400 * time.Millisecond)
 	return nil
 }
 
 // joinMeeting drives the prejoin screen and lobby, and waits out Google Meet's
-// host-restricted access: when the host has not joined yet, Meet refuses
-// everyone ("no one can join a meeting unless invited or admitted by the
-// host") — that block clears once the host starts the meeting, so it is
-// handled as a waitable state rather than a terminal error.
+// host-restricted access: when the meeting's opener is not inside the call,
+// Meet refuses everyone ("no one can join a meeting unless invited or admitted
+// by the host") — that block clears once the opener starts the meeting, so it
+// is handled as a waitable state rather than a terminal error.
+//
+// The state messages are honest by construction: "Waiting for host to admit
+// bot" is reserved for pages that actually demand admission (the knock lobby);
+// an open meeting's "Join now" click reports "Joining the meeting…" instead of
+// mislabeling every join as host-gated.
 func (s *Session) joinMeeting() error {
 	timeout := time.Duration(s.mgr.meetCfg.JoinTimeoutSeconds) * time.Second
 	if timeout <= 0 {
@@ -1709,9 +1776,9 @@ func (s *Session) joinMeeting() error {
 	}
 	deadline := time.Now().Add(timeout)
 
-	// Lobby and host-gate both clear only when a host is in the meeting; the
-	// configured admit wait (default 5 min) bounds that patience instead of
-	// the plain join timeout.
+	// Lobby and host-gate both clear only when the meeting's opener is in the
+	// call; the configured admit wait (default 5 min) bounds that patience
+	// instead of the plain join timeout.
 	admitWait := time.Duration(s.mgr.meetCfg.AdmitWaitSeconds) * time.Second
 	if admitWait <= 0 {
 		admitWait = 5 * time.Minute
@@ -1729,8 +1796,34 @@ func (s *Session) joinMeeting() error {
 	var lastStage string
 	lastWaitNote := time.Time{}
 	reloadCount := 0
-	joinClicked := false
-	joinClickedAt := time.Time{}
+
+	// Prejoin click bookkeeping. A click is confirmed the moment the page
+	// leaves the prejoin stage — ANY decisive stage (meeting, lobby, blocked)
+	// means Google processed the click, so the bookkeeping resets there. While
+	// the page stays prejoin, the click is retried on a label-aware cadence
+	// (clickRetryWait), and a page that swallows maxPrejoinClicks clicks in a
+	// row is reloaded instead of being clicked further.
+	clickLabel := ""
+	clickAt := time.Time{}
+	unlandedClicks := 0
+	resetClick := func() {
+		clickLabel = ""
+		clickAt = time.Time{}
+		unlandedClicks = 0
+	}
+	confirmClick := func(label string) {
+		clickLabel = strings.ToLower(label)
+		clickAt = time.Now()
+	}
+
+	// Meeting-entry self-check: the "meeting" stage must be corroborated by a
+	// participant-grade signal (verifyInMeeting) before the bot reports
+	// Admitted. A page that keeps claiming the meeting without any
+	// corroboration is accepted after maxMeetingConfirmChecks — Meet's DOM
+	// varies between builds, and the watch loop owns the ground truth from
+	// there (its kicked-out detector probes the same signals).
+	meetingConfirmed := false
+	confirmChecks := 0
 
 	computeReloadInterval := func(attempts int) time.Duration {
 		var base time.Duration
@@ -1761,18 +1854,46 @@ func (s *Session) joinMeeting() error {
 		// sub-second is pure CDP churn (it used to re-render the dashboard card
 		// and rewrite the state file ~1.2x/second for minutes on end).
 		pace := 900 * time.Millisecond
-		stage, info := s.meetStage()
+		stage, info := s.meetStageWait(joinPollWait)
 		if stage != lastStage {
 			lastStage = stage
 			s.log.Infof("session %s: meet stage=%s %q", s.ID, stage, info)
 		}
 		switch stage {
 		case "meeting":
+			if !meetingConfirmed {
+				ok, why := s.verifyInMeeting()
+				switch {
+				case ok:
+					meetingConfirmed = true
+					s.log.Infof("[PIPELINE:meet] session %s: meeting entry verified (%s)", s.ID, why)
+				case confirmChecks < maxMeetingConfirmChecks:
+					// The page claims the meeting but no participant-grade
+					// signal agrees yet (the media transport takes a beat to
+					// come up right after admission): confirm before claiming.
+					confirmChecks++
+					s.log.Infof("[PIPELINE:meet] session %s: meeting stage unverified (%s), confirming (%d/%d)",
+						s.ID, why, confirmChecks, maxMeetingConfirmChecks)
+					s.setState(StateJoining, "[4/6] Confirming meeting entry…")
+					pace = 900 * time.Millisecond
+				default:
+					// The page keeps claiming the meeting without
+					// corroboration: accept it and let the watch loop own the
+					// ground truth from here on.
+					meetingConfirmed = true
+					s.log.Warnf("[PIPELINE:meet] session %s: meeting stage never verified (%s); accepting, the watch loop keeps checking", s.ID, why)
+				}
+			}
+			if !meetingConfirmed {
+				break
+			}
 			s.log.Infof("[PIPELINE:meet] session %s: joined the meeting (meeting stage detected)", s.ID)
 			s.setState(StateAdmitted, "[4/6] Admitted to meeting")
 			s.turnOffMeetingCamera()
 			return nil
 		case "lobby":
+			// The knock registered: the click bookkeeping resets.
+			resetClick()
 			extendWaitForHost()
 			s.setState(StateWaitingForAdmission, "[4/6] Waiting for host to admit bot")
 			pace = lobbyPollInterval
@@ -1781,21 +1902,21 @@ func (s *Session) joinMeeting() error {
 			if phrase := blockedFatalPhrase(info); phrase != "" {
 				return fmt.Errorf("cannot join this meeting: %s", phrase)
 			}
-			// Host-gated: Meet only lets people in after the first host has
-			// joined. The blocked page also bounces back to Meet's home screen
-			// after ~60 s, so re-request entry on a bounded cadence until the
-			// gate lifts. The card keeps a stable detail string (no attempt
-			// counter): the counter belongs to the log, where it costs nothing,
-			// not to the dashboard text where every increment forces a message
-			// edit and a state-file rewrite.
+			// Host-gated: Meet only lets people in after the meeting's opener
+			// has joined. The blocked page also bounces back to Meet's home
+			// screen after ~60 s, so re-request entry on a bounded cadence
+			// until the gate lifts. The card keeps a stable detail string (no
+			// attempt counter): the counter belongs to the log, where it costs
+			// nothing, not to the dashboard text where every increment forces
+			// a message edit and a state-file rewrite.
+			resetClick()
 			extendWaitForHost()
-			s.setState(StateWaitingForAdmission, "[4/6] Host-restricted meeting: waiting for host")
+			s.setState(StateWaitingForAdmission, "[4/6] Meeting not open yet: waiting for host to start it")
 			interval := currentReloadWait
 			if time.Since(s.lastMeetLoad) >= interval {
 				reloadCount++
 				currentReloadWait = computeReloadInterval(reloadCount)
-				joinClicked = false
-				s.log.Infof("[PIPELINE:meet] session %s: host-restricted meeting, re-requesting entry (attempt %d, waited %s)",
+				s.log.Infof("[PIPELINE:meet] session %s: meeting not accepting guests, re-requesting entry (attempt %d, waited %s)",
 					s.ID, reloadCount, time.Since(hostWaitStarted).Round(time.Second))
 				if err := s.reopenMeet(); err != nil {
 					return fmt.Errorf("reload the meeting page: %w", err)
@@ -1813,7 +1934,7 @@ func (s *Session) joinMeeting() error {
 					}
 					pace = remaining
 				}
-				s.logHostWait(&lastWaitNote, "blocked", "host-restricted meeting", reloadCount, hostWaitStarted)
+				s.logHostWait(&lastWaitNote, "blocked", "meeting not accepting guests yet", reloadCount, hostWaitStarted)
 			}
 		case "login":
 			if len(s.googleCookies) > 0 {
@@ -1821,19 +1942,40 @@ func (s *Session) joinMeeting() error {
 			}
 			return errors.New("this meeting requires a signed-in Google account; TeleMeetBot joins as a guest only (add your Google account in /account)")
 		case "prejoin":
-			s.setState(StateJoining, "[4/6] Prejoin screen: muting camera/mic & entering")
+			s.setState(StateJoining, "[4/6] Prejoin screen: preparing and joining")
 			s.fillGuestName()
 			s.mutePrejoinDevices()
-			if !joinClicked || time.Since(joinClickedAt) > 12*time.Second {
-				if clicked, label := s.clickJoin(); clicked {
-					joinClicked = true
-					joinClickedAt = time.Now()
+			if !clickAt.IsZero() && unlandedClicks >= maxPrejoinClicks {
+				// The page swallowed click after click; only a full reload can
+				// move it forward.
+				s.log.Infof("[PIPELINE:meet] session %s: %d join clicks never left the prejoin screen, reloading the page", s.ID, unlandedClicks)
+				resetClick()
+				if err := s.reopenMeet(); err != nil {
+					return fmt.Errorf("reload the meeting page: %w", err)
+				}
+				pace = 2 * time.Second
+			} else if clickAt.IsZero() || time.Since(clickAt) >= clickRetryWait(clickLabel) {
+				// First click on this page, or the previous click stayed
+				// unconfirmed past its label-aware budget: click again.
+				if !clickAt.IsZero() {
+					unlandedClicks++
+				}
+				clicked, label := s.clickJoin()
+				if clicked {
+					confirmClick(label)
 					s.log.Infof("[PIPELINE:meet] session %s: clicked %q", s.ID, label)
-					s.setState(StateWaitingForAdmission, "[4/6] Waiting for host to admit bot")
-					pace = 1500 * time.Millisecond
+					// An open meeting answers "Join now" within a second or
+					// two; a genuine admission need moves to the knock lobby,
+					// where the "Waiting for host to admit bot" message comes
+					// from. Saying "waiting for host" HERE would mislabel
+					// every open meeting as host-gated.
+					s.setState(StateJoining, "[4/6] Joining the meeting…")
+					pace = joinClickPace
+				} else {
+					pace = 900 * time.Millisecond
 				}
 			} else {
-				pace = 1000 * time.Millisecond
+				pace = 900 * time.Millisecond
 			}
 		default:
 			// Unknown/loading: a little patience.
@@ -1843,7 +1985,7 @@ func (s *Session) joinMeeting() error {
 		}
 	}
 	if !hostWaitStarted.IsZero() {
-		return fmt.Errorf("waited %s for a host-restricted meeting: no host ever started it (google: no one can join unless invited or admitted by the host). if the link is wrong or expired, Meet shows this same page — verify the meeting code with the host", deadline.Sub(hostWaitStarted).Round(time.Second))
+		return fmt.Errorf("timed out waiting %s for the meeting to accept guests: Google's host gate refused every entry attempt (no one can join a meeting unless invited or admitted by the host). the meeting opener must be inside the call with the account that created the link — the bot joins automatically the moment the room opens. if the room is already open, connect a Google account via /account: Meet sometimes refuses guests that are not signed in", deadline.Sub(hostWaitStarted).Round(time.Second))
 	}
 	return fmt.Errorf("meet join timed out after %s (stage=%s)", timeout, lastStage)
 }
@@ -1879,8 +2021,9 @@ func (s *Session) reopenMeet() error {
 	_ = meet.WaitLoad()
 	s.setState(StateJoining, "re-requesting entry to the meeting")
 	s.setLastMeetLoad()
-	// Meet is a SPA: give it a beat to render the prejoin or gate screen.
-	time.Sleep(1200 * time.Millisecond)
+	// Meet is a SPA: give it a beat to start rendering the prejoin or gate
+	// screen; the join loop's observer picks the rest up as it appears.
+	time.Sleep(400 * time.Millisecond)
 	return nil
 }
 

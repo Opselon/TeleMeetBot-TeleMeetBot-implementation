@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -397,6 +399,17 @@ func checkExecutable(path string) error {
 	}
 	if info.IsDir() {
 		return fmt.Errorf("browser path %s is a directory", path)
+	}
+	if runtime.GOOS == "windows" {
+		// Windows has no executable permission bits: os.Stat reports 0666 for
+		// every regular file, so the Unix bit check below would reject Chrome
+		// itself. A known executable extension is the platform's check.
+		switch strings.ToLower(filepath.Ext(path)) {
+		case ".exe", ".com", ".bat", ".cmd", "":
+			return nil
+		default:
+			return fmt.Errorf("%s does not look like an executable (extension %s)", path, filepath.Ext(path))
+		}
 	}
 	if info.Mode().Perm()&0o111 == 0 {
 		return fmt.Errorf("%s is not executable", path)
