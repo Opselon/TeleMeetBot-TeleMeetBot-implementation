@@ -1960,9 +1960,14 @@ func (s *Session) joinMeeting() error {
 			// The knock registered: the click bookkeeping resets.
 			resetClick()
 			extendWaitForHost()
-			s.setState(StateWaitingForAdmission, "[4/6] Waiting for host to admit bot")
+			// The knock lobby needs a HUMAN admit: Google distrusts
+			// datacenter clients so much that even "open" meetings knock
+			// them, and no amount of retrying lifts it — the meeting's host
+			// must tap Admit. Say exactly that, or the operator reads
+			// "waiting for host" as a stuck bot.
+			s.setState(StateWaitingForAdmission, "[4/6] The bot knocked — tap Admit in your meeting to let it in")
 			pace = lobbyPollInterval
-			s.logHostWait(&lastWaitNote, "lobby", "waiting to be admitted", 0, hostWaitStarted)
+			s.logHostWait(&lastWaitNote, "lobby", "knocked, waiting for the host to admit it", 0, hostWaitStarted)
 		case "blocked":
 			if phrase := blockedFatalPhrase(info); phrase != "" {
 				return fmt.Errorf("cannot join this meeting: %s", phrase)

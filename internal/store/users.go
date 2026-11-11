@@ -191,7 +191,7 @@ const (
 
 // userSchemaVersion is the latest schema version recorded in
 // schema_migrations. Bump it together with a new step in userMigrations.
-const userSchemaVersion = 4
+const userSchemaVersion = 5
 
 // userMigrations maps a version to its DDL. Version 1 is idempotent
 // (CREATE ... IF NOT EXISTS). Versions 2+ add columns/tables with
@@ -247,6 +247,11 @@ var userMigrations = map[int]string{
 	3: `ALTER TABLE user_preferences ADD COLUMN quality_policy TEXT NOT NULL DEFAULT 'auto';`,
 	4: `ALTER TABLE user_preferences ADD COLUMN caption_policy TEXT NOT NULL DEFAULT 'off';
 	ALTER TABLE user_preferences ADD COLUMN caption_lang TEXT NOT NULL DEFAULT '';`,
+	5: `CREATE TABLE IF NOT EXISTS app_settings (
+		key        TEXT PRIMARY KEY,
+		value      TEXT NOT NULL,
+		updated_at INTEGER NOT NULL
+	);`,
 }
 
 // ErrUserInvalid wraps invalid user-scoped input.
@@ -372,6 +377,12 @@ func (us *UserStore) migrate(ctx context.Context) error {
 				"ALTER TABLE user_preferences ADD COLUMN caption_lang TEXT NOT NULL DEFAULT ''"); err != nil {
 				return err
 			}
+		case 5:
+			// Global runtime settings (egress override). Idempotent DDL like
+			// version 1: an existing table from a partial run is fine.
+			if _, err := us.db.ExecContext(ctx, userMigrations[5]); err != nil {
+				return fmt.Errorf("apply user migration 5: %w", err)
+			}
 		default:
 			if _, err := us.db.ExecContext(ctx, userMigrations[v]); err != nil {
 				return fmt.Errorf("apply user migration %d: %w", v, err)
@@ -401,6 +412,41 @@ func (us *UserStore) ensureColumnLocked(ctx context.Context, table, column, ddl 
 	}
 	if _, err := us.db.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("apply %s.%s migration: %w", table, column, err)
+	}
+	return nil
+}
+
+// ---- global settings (app_settings) -----------------------------------------
+
+// GetSetting reads one global runtime setting. The second return says whether
+// the key exists — distinct from an empty stored value, which callers use as
+// "restore the configured default".
+func (us *UserStore) GetSetting(ctx context.Context, key string) (string, bool, error) {
+	us.mu.Lock()
+	defer us.mu.Unlock()
+	var value string
+	err := us.db.QueryRowContext(ctx,
+		`SELECT value FROM app_settings WHERE key = ?`, key).Scan(&value)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read app setting %q: %w", key, err)
+	}
+	return value, true, nil
+}
+
+// SetSetting upserts one global runtime setting. An empty value stores as
+// empty (callers read it as "use the default"), it does not delete the row —
+// deletion is unnecessary and an upsert keeps the write single-statement.
+func (us *UserStore) SetSetting(ctx context.Context, key, value string) error {
+	us.mu.Lock()
+	defer us.mu.Unlock()
+	if _, err := us.db.ExecContext(ctx,
+		`INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		key, value, time.Now().Unix()); err != nil {
+		return fmt.Errorf("write app setting %q: %w", key, err)
 	}
 	return nil
 }

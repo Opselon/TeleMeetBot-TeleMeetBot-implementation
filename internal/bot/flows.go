@@ -48,6 +48,8 @@ const (
 	stepAdminBroadcast
 	// stepGuestName waits for the Meet display-name override text.
 	stepGuestName
+	// stepProxyCustom waits for a typed proxy URL (Settings -> Egress).
+	stepProxyCustom
 )
 
 // flowTimeout drops half-finished wizards after inactivity.

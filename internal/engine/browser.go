@@ -203,6 +203,16 @@ func primaryEgressLabel(opts launchOptions) string {
 	return "direct"
 }
 
+// meetEgressWord renders whether the meet tab rides the proxy or bypasses it,
+// for the launch log line — the two egress splits are exactly what
+// browser.meet_via_proxy toggles.
+func meetEgressWord(cfg BrowserConfig) string {
+	if cfg.MeetViaProxy {
+		return "the proxy"
+	}
+	return "direct egress"
+}
+
 // mediaBrowserCfg returns the browser config whose proxy is the media-tab
 // override when one was chosen (see Manager.applyMediaEgress), otherwise the
 // launch's own config unchanged.
@@ -238,12 +248,21 @@ func launchBrowser(opts launchOptions, log Logger) (*rod.Browser, func(), error)
 	}
 	if proxy := detectProxy(cfg); proxy != "" {
 		l.Proxy(proxy)
+		// Historical split: media through the proxy, Meet direct (Google was
+		// assumed friendlier to the host's own IP than to a proxied one).
+		// Live evidence 2026-11-10 says the opposite for datacenter hosts:
+		// Hetzner's IP was served the host gate on EVERY entry attempt while
+		// a WARP/proxied egress walked through, so browser.meet_via_proxy
+		// keeps the Google domains OUT of the bypass list.
 		bypass := "meet.google.com;*.google.com;accounts.google.com;localhost;127.0.0.1;<local>;172.16.0.0/12;10.0.0.0/8;192.168.0.0/16"
+		if cfg.MeetViaProxy {
+			bypass = "localhost;127.0.0.1;<local>"
+		}
 		l.Set("proxy-bypass-list", bypass)
 		if opts.mediaProxy != "" {
-			log.Infof("[PIPELINE:browser] media proxy enabled: %s (primary %s was blocked by the source; Meet bypassed)", proxy, primaryEgressLabel(opts))
+			log.Infof("[PIPELINE:browser] media proxy enabled: %s (primary %s was blocked by the source; meet rides %s)", proxy, primaryEgressLabel(opts), meetEgressWord(cfg))
 		} else {
-			log.Infof("[PIPELINE:browser] media proxy enabled: %s (Meet bypassed)", proxy)
+			log.Infof("[PIPELINE:browser] browser proxy enabled: %s (meet rides %s)", proxy, meetEgressWord(cfg))
 		}
 	}
 

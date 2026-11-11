@@ -12,6 +12,7 @@ package bot
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -44,6 +45,8 @@ type Settings interface {
 	ResetAllPreferences(ctx context.Context) (int, error)
 	Preferences(ctx context.Context) (map[int64]store.UserSettings, error)
 	KnownUserIDs(ctx context.Context, extra ...int64) ([]int64, error)
+	GetSetting(ctx context.Context, key string) (string, bool, error)
+	SetSetting(ctx context.Context, key, value string) error
 	SaveSessionQueue(ctx context.Context, snap store.SessionQueueSnapshot) error
 	LoadSessionQueue(ctx context.Context, ownerID int64, sessionID string) (store.SessionQueueSnapshot, bool, error)
 	LatestInterruptedQueue(ctx context.Context, ownerID int64) (store.SessionQueueSnapshot, bool, error)
@@ -178,6 +181,9 @@ func userSettingsKB(u store.UserSettings) *tgbotapi.InlineKeyboardMarkup {
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData(guestLabel, "set:guestname"),
+		},
+		{
+			tgbotapi.NewInlineKeyboardButtonData("🌐 Egress / Proxy", "set:proxy"),
 		},
 		{
 			tgbotapi.NewInlineKeyboardButtonData("♻️ Reset to defaults", "set:reset"),
@@ -333,6 +339,9 @@ func (b *Bot) handleSettingsCallback(chatID, userID int64, msgID int, q *tgbotap
 		}
 		text.WriteString("\nSend the name to display in the meeting (max 60 characters), or <code>-</code> to clear it.")
 		_ = b.api.Edit(chatID, msgID, text.String(), playlistCancelKB())
+	case "proxy":
+		b.handleProxySetting(chatID, userID, msgID, q, parts)
+		return
 	case "volume", "speed":
 		// Numeric pickers have their own screens; the row button just opens them.
 		_ = b.api.AnswerCallback(q.ID, "")
@@ -407,8 +416,28 @@ func boolWord(b bool) string {
 	return "off"
 }
 
-// trySettingsInput consumes the settings screen's text steps (guest name).
+// trySettingsInput consumes the settings screen's text steps (guest name,
+// custom proxy URL).
 func (b *Bot) trySettingsInput(chatID, userID int64, f *flow, text string) bool {
+	if f.step == stepProxyCustom {
+		raw := strings.TrimSpace(text)
+		if raw == "-" {
+			raw = ""
+		}
+		st, err := b.applyEgress(raw, nil)
+		if err != nil {
+			b.sendText(chatID, "❌ "+esc(err.Error())+"\n\nSend another address like <code>socks5://host:port</code>, or <code>-</code> to clear.", playlistCancelKB())
+			return true
+		}
+		b.clearFlow(userID)
+		if st.proxy == "" {
+			b.sendText(chatID, "✅ Egress override cleared — the server default applies again.", nil)
+		} else {
+			b.sendText(chatID, "✅ Egress saved: <code>"+esc(st.proxy)+"</code> — new sessions use it.", nil)
+		}
+		b.showUserSettings(chatID, 0, userID)
+		return true
+	}
 	if f.step != stepGuestName {
 		return false
 	}
@@ -552,6 +581,257 @@ func (b *Bot) showVolumePicker(chatID int64, msgID int, userID int64) {
 
 // speedChoices are the start-speed presets. "default" keeps the server value.
 var speedChoices = []string{"default", "0.75", "1", "1.25", "1.5", "2"}
+
+// ---- egress (proxy) settings -------------------------------------------------
+
+// Global app_settings keys for the egress override. The proxy value uses the
+// same vocabulary as browser.proxy: a proxy URL, "direct", or "" (no override
+// — the configured telemeetbot.yml value applies).
+const (
+	settingEgressProxy        = "egress.proxy"
+	settingEgressMeetViaProxy = "egress.meet_via_proxy"
+)
+
+// egressPreset is one one-tap choice in the proxy menu. The bridge presets
+// cover the standard deployment shape: the proxy listens on the server's
+// loopback and the container reaches it over the Docker bridge gateway (or
+// host.docker.internal).
+var egressPresets = []egressPreset{
+	{label: "🚫 Direct (no proxy)", value: "direct"},
+	{label: "🌉 Bridge :3339", value: "socks5://172.17.0.1:3339"},
+	{label: "🌐 Docker host :3339", value: "socks5://host.docker.internal:3339"},
+}
+
+type egressPreset struct {
+	label string
+	value string
+}
+
+// egressState is the effective egress as shown on the proxy screen.
+type egressState struct {
+	proxy      string // "", "direct", or a proxy URL
+	meetVia    bool
+	meetViaSet bool // the stored toggle exists (else the yml default applies)
+}
+
+// egressStateOf reads the stored override and resolves the effective values.
+func (b *Bot) egressStateOf() egressState {
+	st := egressState{}
+	if b.set != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), settingsOpTimeout)
+		defer cancel()
+		if v, ok, err := b.set.GetSetting(ctx, settingEgressProxy); err == nil && ok {
+			st.proxy = v
+		}
+		if v, ok, err := b.set.GetSetting(ctx, settingEgressMeetViaProxy); err == nil && ok {
+			st.meetVia = v == "1"
+			st.meetViaSet = true
+		}
+	}
+	if !st.meetViaSet && b.cfg != nil {
+		st.meetVia = b.cfg.Browser.MeetViaProxy
+	}
+	return st
+}
+
+// applyEgress persists and applies one egress override. It returns the
+// effective state (what was actually saved) or an error carrying the reason.
+func (b *Bot) applyEgress(proxy string, meetVia *bool) (egressState, error) {
+	st := b.egressStateOf()
+	if proxy != "" && proxy != "direct" {
+		if err := validateProxyURL(proxy); err != nil {
+			return st, err
+		}
+	}
+	if b.set != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), settingsOpTimeout)
+		defer cancel()
+		if err := b.set.SetSetting(ctx, settingEgressProxy, proxy); err != nil {
+			return st, err
+		}
+		if meetVia != nil {
+			v := "0"
+			if *meetVia {
+				v = "1"
+			}
+			if err := b.set.SetSetting(ctx, settingEgressMeetViaProxy, v); err != nil {
+				return st, err
+			}
+			st.meetVia = *meetVia
+			st.meetViaSet = true
+		}
+	}
+	st.proxy = proxy
+	b.applyEgressToEngine(st.proxy, st.meetVia)
+	return st, nil
+}
+
+// applyEgressToEngine hands the override to the real engine. Test fakes do
+// not implement egressSetter and are skipped.
+func (b *Bot) applyEgressToEngine(proxy string, meetVia bool) {
+	if b.eng == nil {
+		return
+	}
+	if es, ok := b.eng.(egressSetter); ok {
+		es.SetEgressOverride(proxy, meetVia)
+	}
+}
+
+// egressSetter is implemented by *engine.Manager: the runtime egress override.
+type egressSetter interface {
+	SetEgressOverride(proxy string, meetViaProxy bool)
+}
+
+// validateProxyURL accepts the proxy shapes Chromium takes: http(s):// or
+// socks5:// with a host and port. Empty (clear) and "direct" are validated by
+// the caller before this runs.
+func validateProxyURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return fmt.Errorf("not a valid proxy address: %w", err)
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "socks5" && scheme != "http" && scheme != "https" {
+		return fmt.Errorf("proxy scheme must be socks5:// or http:// (got %q)", u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("proxy needs a host:port, e.g. socks5://172.17.0.1:3339")
+	}
+	return nil
+}
+
+// proxySettingsText renders the egress screen.
+func proxySettingsText(st egressState) string {
+	var sb strings.Builder
+	sb.WriteString("🌐 <b>Egress / Proxy</b>\n\n")
+	switch {
+	case st.proxy == "":
+		sb.WriteString("Current: <i>server default</i> (from <code>telemeetbot.yml</code>)\n")
+	case st.proxy == "direct":
+		sb.WriteString("Current: <b>direct</b> — no proxy, even if the server configures one\n")
+	default:
+		sb.WriteString(fmt.Sprintf("Current: <code>%s</code>\n", esc(st.proxy)))
+	}
+	sb.WriteString(fmt.Sprintf("Meet via proxy: <b>%s</b>%s\n", boolWord(st.meetVia), meetViaSuffix(st)))
+	sb.WriteString("\nGoogle serves its host gate to datacenter IPs (Hetzner, 2026-11-10: every entry attempt refused even on open meetings), while residential or WARP egress walks straight in. Route the browser through a cleaner proxy when joins stall on \"waiting for host\".\n\n")
+	sb.WriteString("<i>Applies to NEW sessions; running ones keep their browser. The choice survives bot restarts.</i>")
+	return sb.String()
+}
+
+func meetViaSuffix(st egressState) string {
+	if st.meetViaSet {
+		return ""
+	}
+	return " <i>(server default)</i>"
+}
+
+// proxySettingsKB renders the preset buttons, the Meet toggle and the custom
+// entry.
+func proxySettingsKB(st egressState) *tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+	row := make([]tgbotapi.InlineKeyboardButton, 0, 2)
+	for _, p := range egressPresets {
+		label := p.label
+		if st.proxy == p.value {
+			label = "✅ " + label
+		}
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(label, "set:proxy:url:"+p.value))
+		if len(row) == 2 {
+			rows = append(rows, row)
+			row = make([]tgbotapi.InlineKeyboardButton, 0, 2)
+		}
+	}
+	if len(row) > 0 {
+		rows = append(rows, row)
+	}
+	meetLabel := "🚪 Meet via proxy: "
+	if st.meetVia {
+		meetLabel += "on ✅"
+	} else {
+		meetLabel += "off ⬜️"
+	}
+	rows = append(rows,
+		[]tgbotapi.InlineKeyboardButton{
+			tgbotapi.NewInlineKeyboardButtonData(meetLabel, "set:proxy:meet"),
+			tgbotapi.NewInlineKeyboardButtonData("✏️ Custom", "set:proxy:custom"),
+		},
+		[]tgbotapi.InlineKeyboardButton{
+			tgbotapi.NewInlineKeyboardButtonData("⬅️ Settings", "set:back"),
+		},
+	)
+	return &tgbotapi.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// showProxySettings renders the egress screen. Admins only: one server, one
+// egress — a non-admin must not reroute everyone's sessions.
+func (b *Bot) showProxySettings(chatID int64, msgID int, userID int64) {
+	st := b.egressStateOf()
+	if msgID > 0 {
+		_ = b.api.Edit(chatID, msgID, proxySettingsText(st), proxySettingsKB(st))
+		return
+	}
+	b.sendText(chatID, proxySettingsText(st), proxySettingsKB(st))
+}
+
+// handleProxySetting runs the set:proxy:* callbacks.
+func (b *Bot) handleProxySetting(chatID, userID int64, msgID int, q *tgbotapi.CallbackQuery, parts []string) {
+	if b.cfg == nil || !b.cfg.IsAdmin(userID) {
+		_ = b.api.AnswerCallback(q.ID, "admins only")
+		return
+	}
+	if len(parts) < 2 {
+		_ = b.api.AnswerCallback(q.ID, "")
+		b.showProxySettings(chatID, msgID, userID)
+		return
+	}
+	st := b.egressStateOf()
+	var toast string
+	switch parts[1] {
+	case "url":
+		if len(parts) < 3 {
+			_ = b.api.AnswerCallback(q.ID, "bad preset")
+			return
+		}
+		var err error
+		st, err = b.applyEgress(parts[2], nil)
+		if err != nil {
+			_ = b.api.AnswerCallback(q.ID, "failed: "+truncate(err.Error(), 60))
+			return
+		}
+		toast = "egress saved"
+	case "direct":
+		var err error
+		st, err = b.applyEgress("direct", nil)
+		if err != nil {
+			_ = b.api.AnswerCallback(q.ID, "failed: "+truncate(err.Error(), 60))
+			return
+		}
+		toast = "egress: direct"
+	case "meet":
+		next := !st.meetVia
+		var err error
+		st, err = b.applyEgress(st.proxy, &next)
+		if err != nil {
+			_ = b.api.AnswerCallback(q.ID, "failed: "+truncate(err.Error(), 60))
+			return
+		}
+		toast = "meet via proxy " + boolWord(next)
+	case "custom":
+		_ = b.api.AnswerCallback(q.ID, "send the proxy URL")
+		b.setFlow(userID, &flow{step: stepProxyCustom, parent: "settings"})
+		var sb strings.Builder
+		sb.WriteString("🌐 <b>Custom proxy</b>\n\nSend the proxy address Chromium accepts:\n")
+		sb.WriteString("<code>socks5://host:port</code> or <code>http://host:port</code>\n\n")
+		sb.WriteString("Send <code>-</code> to clear the override (server default applies again).")
+		_ = b.api.Edit(chatID, msgID, sb.String(), playlistCancelKB())
+		return
+	default:
+		_ = b.api.AnswerCallback(q.ID, "unknown proxy setting")
+		return
+	}
+	_ = b.api.AnswerCallback(q.ID, toast)
+	_ = b.api.Edit(chatID, msgID, proxySettingsText(st), proxySettingsKB(st))
+}
 
 // showSpeedPicker renders the start-speed presets.
 func (b *Bot) showSpeedPicker(chatID int64, msgID int, userID int64) {

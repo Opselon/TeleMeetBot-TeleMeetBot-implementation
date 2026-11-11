@@ -87,6 +87,7 @@ func FromConfig(c *config.Config) (BrowserConfig, MediaOptions, MeetOptions) {
 		ExtraArgs:    c.Browser.ExtraArgs,
 		UserAgent:    c.Browser.UserAgent,
 		Proxy:        c.Browser.Proxy,
+		MeetViaProxy: c.Browser.MeetViaProxy,
 		GPU:          c.Browser.GPU,
 		WarmUp:       c.Browser.WarmUp,
 	}

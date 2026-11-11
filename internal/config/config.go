@@ -174,6 +174,13 @@ type BrowserConfig struct {
 	UserAgent string `yaml:"user_agent"`
 	// Proxy is passed to Chromium, e.g. "socks5://127.0.0.1:9050".
 	Proxy string `yaml:"proxy"`
+	// MeetViaProxy stops bypassing the proxy for meet.google.com: the meet
+	// tab's egress goes through the proxy too. Default false keeps the
+	// historical split (media through the proxy, Meet direct). Enable when
+	// the server's own IP is served Google's host gate — datacenter ranges
+	// are, and a cleaner proxied egress (WARP/residential) then reaches the
+	// room. Requires browser.proxy (or TELEMEETBOT_PROXY) to be set.
+	MeetViaProxy bool `yaml:"meet_via_proxy"`
 	// GPU selects the compositing backend: "off" (software compositing, the
 	// default in headless — measured ~6x less host CPU than SwiftShader for the
 	// same shared frames on a 2-core VPS), "swiftshader" (ANGLE/SwiftShader

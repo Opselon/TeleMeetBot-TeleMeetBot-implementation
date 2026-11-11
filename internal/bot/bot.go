@@ -192,6 +192,28 @@ func New(api API, cfg *config.Config, eng Engine, st *store.Store, ms Meetings, 
 	if cfg != nil {
 		health.SetResourceDataDir(cfg.Paths.DataDir)
 	}
+	// Restore the persisted egress override (Settings -> Egress / Proxy) so a
+	// proxy chosen in the bot survives restarts: the FIRST session must
+	// already launch through it, before anyone touches the menu again. The
+	// real engine implements egressSetter; test fakes skip the restore.
+	if b.set != nil && b.eng != nil && cfg != nil {
+		if es, ok := b.eng.(egressSetter); ok {
+			ctx, cancel := context.WithTimeout(context.Background(), settingsOpTimeout)
+			proxy, haveProxy, err := b.set.GetSetting(ctx, settingEgressProxy)
+			cancel()
+			if err == nil && haveProxy {
+				meetVia := cfg.Browser.MeetViaProxy
+				ctx2, cancel2 := context.WithTimeout(context.Background(), settingsOpTimeout)
+				v, haveToggle, err2 := b.set.GetSetting(ctx2, settingEgressMeetViaProxy)
+				cancel2()
+				if err2 == nil && haveToggle {
+					meetVia = v == "1"
+				}
+				es.SetEgressOverride(proxy, meetVia)
+				b.log.Infof("[PIPELINE:bot] restored egress override: proxy=%q meet_via_proxy=%t", proxy, meetVia)
+			}
+		}
+	}
 	return b
 }
 

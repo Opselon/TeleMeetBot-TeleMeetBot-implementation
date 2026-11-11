@@ -37,8 +37,15 @@ type BrowserConfig struct {
 	WindowHeight int
 	Lang         string
 	ExtraArgs    []string
-	UserAgent    string
-	Proxy        string
+	UserAgent string
+	Proxy     string
+	// MeetViaProxy, when true, stops bypassing the proxy for meet.google.com:
+	// the meet tab's egress goes through Proxy too. Google serves its host
+	// gate to datacenter IPs (Hetzner, live-probed 2026-11-10 — every entry
+	// attempt refused even on open meetings), so an operator with a cleaner
+	// egress (WARP/residential) can point the meet tab at it. Default false
+	// keeps the historical split: media through the proxy, Meet direct.
+	MeetViaProxy bool
 	// GPU selects the compositing backend: "off" (software compositing,
 	// default in headless — 6x less host CPU than SwiftShader for the same
 	// frames), "swiftshader" (ANGLE/SwiftShader software GL) or "auto" (leave
@@ -736,6 +743,30 @@ func (m *Manager) pruneFinishedLocked() {
 }
 
 // acquireBrowser returns a browser for a session plus a release function.
+// SetEgressOverride swaps the browser egress for FUTURE sessions: proxy is a
+// proxy URL, the sentinel "direct" (forces direct egress, defeating the
+// ambient probe) or "" (restores the configured browser.proxy), and
+// meetViaProxy decides whether the meet tab rides the proxy too (the
+// browser.meet_via_proxy runtime toggle). Running sessions keep their already
+// launched Chromium — the override lands on the next launch. The bot persists
+// the choice in its store and re-applies it here at startup; the engine stays
+// storage-free.
+func (m *Manager) SetEgressOverride(proxy string, meetViaProxy bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.browserCfg.Proxy = proxy
+	m.browserCfg.MeetViaProxy = meetViaProxy
+	if proxy == "" {
+		m.log.Infof("[PIPELINE:browser] egress override cleared: the configured browser.proxy applies again (meet_via_proxy=%t)", meetViaProxy)
+		return
+	}
+	if proxy == "direct" {
+		m.log.Infof("[PIPELINE:browser] egress override: forced direct egress (meet_via_proxy=%t)", meetViaProxy)
+		return
+	}
+	m.log.Infof("[PIPELINE:browser] egress override: proxy=%s (meet_via_proxy=%t)", proxy, meetViaProxy)
+}
+
 func (m *Manager) acquireBrowser() (*rod.Browser, func(), error) {
 	opts := launchOptions{browser: m.browserCfg, meet: m.meetCfg, forMeet: true}
 	m.applyMediaEgress(&opts)

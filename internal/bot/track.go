@@ -41,6 +41,8 @@ func flowStateOf(f *flow) (userstate.State, string) {
 		return userstate.StateAwaitingText, "broadcast text"
 	case stepGuestName:
 		return userstate.StateAwaitingText, "guest display name"
+	case stepProxyCustom:
+		return userstate.StateAwaitingText, "proxy address"
 	case stepNone:
 		if strings.TrimSpace(f.meet) != "" && strings.TrimSpace(f.media) != "" {
 			return userstate.StateReviewing, ""
