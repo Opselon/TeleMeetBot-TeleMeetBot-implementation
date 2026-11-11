@@ -216,6 +216,19 @@ type Capability struct {
 	// timeoutsOverride replaces the production probe bounds in tests. nil
 	// means "use the package constants".
 	timeoutsOverride *timeouts
+
+	// udpMu guards the UDP egress observation (udpprobe.go). It is separate
+	// from mu because the probe goroutine only ever touches these fields.
+	udpMu sync.Mutex
+	udp   udpProbeState
+}
+
+// udpProbeState caches the latest UDP egress observation with single-flight
+// refresh (see EnsureUDPProbed). All fields are guarded by udpMu.
+type udpProbeState struct {
+	result  UDPResult
+	running bool
+	lastTry time.Time
 }
 
 // New returns a fresh Capability with no observations.
@@ -698,6 +711,10 @@ type Summary struct {
 	// after a probe confirmed no route works at all. It is a diagnostic:
 	// suppression never gates what a caller is allowed to try.
 	Suppressed bool
+	// UDP is the latest WebRTC media-transport observation (udpprobe.go):
+	// whether real UDP datagrams get answers on this network. Unknown until
+	// the first probe lands.
+	UDP UDPResult
 }
 
 // Summarize returns the full diagnostic view for one configuration.
@@ -714,6 +731,7 @@ func (c *Capability) Summarize(preferred string, proxies []string) Summary {
 		LastProbeAt: last,
 		LastErr:     lastErr,
 		Suppressed:  c.suppressed(),
+		UDP:         c.UDP(),
 	}
 	for _, p := range proxies {
 		p = strings.TrimSpace(p)

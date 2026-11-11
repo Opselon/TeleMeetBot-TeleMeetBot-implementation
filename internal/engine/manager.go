@@ -469,6 +469,12 @@ func (m *Manager) ObserveNetwork(ctx context.Context) {
 		return
 	}
 	m.netcap.EnsureProbed(ctx, netcap.NewProbeConfig(m.netcapPreferred(), m.netcapProxies(), "demand"))
+	// WebRTC media transport rides on UDP; a TCP-only view of the network
+	// hides the failure class that costs the most meeting time (a silently
+	// UDP-filtered host forces every call onto TURN-over-TCP, or kills media
+	// when Google's TURN edges are unreachable). The probe is cached and
+	// non-blocking; /healthz reports it alongside the route ladder.
+	m.netcap.EnsureUDPProbed(ctx)
 }
 
 // NetworkSummary is the diagnostic view exposed through /healthz and the

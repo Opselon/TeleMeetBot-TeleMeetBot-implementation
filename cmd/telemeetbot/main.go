@@ -71,7 +71,8 @@ func main() {
 		// Live diagnosis: join-and-report against a real meeting link using
 		// the engine the bot itself uses. Does not enter the dashboard.
 		probeFlag        = flag.String("probe", "", "run a live one-shot probe against this Meet link and exit")
-		probeMedia       = flag.String("probe-media", "https://www.youtube.com/watch?v=jNQXAC9IVRw", "media link for --probe")
+		probeMedia       = flag.String("probe-media", "https://www.youtube.com/watch?v=jNQXAC9IVRw", "media link for --probe (empty value = meet-only join probe: the media tab loads a local blank page instead of YouTube)")
+		probeMode        = flag.String("probe-mode", "", "playback mode for --probe: auto (use the download ladder), browser, or download (default: browser)")
 		mediaProbeFlag   = flag.String("media-probe", "", "diagnose one media link without a meeting (plays it and samples rendered pixels)")
 		publishProbeFlag = flag.String("publish-probe", "", "capture a real media link and publish it through a WebRTC loopback (measures encoder/RTP/decoder, no meeting needed)")
 		watchProbeFlag   = flag.String("watch-probe", "", "join this Meet link as a silent guest and measure the presentation remote participants see")
@@ -220,7 +221,7 @@ func main() {
 		if *probeWaitSecs < 10 {
 			*probeWaitSecs = 10
 		}
-		if err := runProbe(*probeFlag, *probeMedia, *probeWaitSecs, cfg, logger); err != nil {
+		if err := runProbe(*probeFlag, *probeMedia, *probeWaitSecs, *probeMode, cfg, logger); err != nil {
 			logger.Errorf("probe: %v", err)
 			os.Exit(1)
 		}
