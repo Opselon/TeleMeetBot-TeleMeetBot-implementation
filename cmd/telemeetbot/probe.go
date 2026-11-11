@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Opselon/TeleMeetBot/internal/config"
@@ -64,7 +67,33 @@ func runPublishProbe(mediaLink string, seconds int, cfg *config.Config, log *slo
 // same engine the bot runs, no Telegram, no dashboard — events flow straight
 // to the log so a failing meeting can be watched in real time. The probe
 // overrides the configured admit/join wait to keep the one-shot bounded.
-func runProbe(meetLink, mediaLink string, probeSeconds int, cfg *config.Config, log *slogLogger) error {
+//
+// An empty --probe-media turns the probe into a meet-only join test: the media
+// tab is pointed at a tiny local page, so the full present/play pipeline is
+// still exercised without any YouTube traffic. That isolates the join under
+// test — YouTube datacenter bot-checks routinely fail the media leg and would
+// otherwise drown out the meeting-side signal the probe is meant to observe.
+func runProbe(meetLink, mediaLink string, probeSeconds int, probeMode string, cfg *config.Config, log *slogLogger) error {
+	if strings.TrimSpace(mediaLink) == "" {
+		srv := &http.Server{
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      10 * time.Second,
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/plain;charset=utf-8")
+				_, _ = io.WriteString(w, "meet-only probe page")
+			}),
+		}
+		ln, lerr := net.Listen("tcp", "127.0.0.1:0")
+		if lerr != nil {
+			return fmt.Errorf("probe: local meet-only page: %w", lerr)
+		}
+		go func() { _ = srv.Serve(ln) }()
+		defer func() { _ = srv.Close() }()
+		mediaLink = "http://" + ln.Addr().String() + "/blank"
+		log.Infof("probe: meet-only mode — media tab pointed at the local blank page %s", mediaLink)
+	}
+
 	stopHealth, err := startProbeHealth(cfg.Server.HealthAddr, log)
 	if err != nil {
 		log.Warnf("probe: health endpoint unavailable (%v) — continuing without it", err)
@@ -121,7 +150,11 @@ func runProbe(meetLink, mediaLink string, probeSeconds int, cfg *config.Config, 
 	s, err := eng.Start(ctx, engine.StartRequest{
 		MeetLink:  meetLink,
 		MediaLink: mediaLink,
-		TabTitle:  meetCfg.CaptureSource,
+		// Empty probeMode keeps the configured default (browser); "auto" lets
+		// an E2E probe exercise the download ladder, which is what real
+		// Telegram sessions run by default.
+		PlayMode: probeMode,
+		TabTitle: meetCfg.CaptureSource,
 	})
 	if err != nil {
 		stopProbe()

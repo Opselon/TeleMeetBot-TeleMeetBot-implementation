@@ -254,8 +254,38 @@ func networkPayload(s netcap.Summary) map[string]interface{} {
 		"probe_at":   s.LastProbeAt.UTC().Format(time.RFC3339),
 		"ladder":     ladderPayload(s),
 		"suppressed": s.Suppressed,
+		// WebRTC media transport viability: whether real UDP datagrams get
+		// answers on this host. "blocked" on a datacenter network means every
+		// meeting rides TURN-over-TCP (slower, CPU-heavier) or has no media
+		// path at all — the single most useful signal for join failures that
+		// a TCP-only probe cannot see.
+		"udp": udpPayload(s.UDP),
 	}
 	return out
+}
+
+// udpPayload renders one UDP egress observation. The STUN-mapped address is
+// intentionally omitted: /healthz is publicly readable and the mapping would
+// publish this host's transport address.
+func udpPayload(r netcap.UDPResult) map[string]interface{} {
+	outcome := r.Outcome
+	if outcome == "" {
+		outcome = "unknown"
+	}
+	m := map[string]interface{}{
+		"outcome":   outcome,
+		"attempted": r.Attempted,
+	}
+	if r.LatencyMS > 0 {
+		m["latency_ms"] = r.LatencyMS
+	}
+	if r.Error != "" {
+		m["error"] = r.Error
+	}
+	if !r.CheckedAt.IsZero() {
+		m["checked_at"] = r.CheckedAt.UTC().Format(time.RFC3339)
+	}
+	return m
 }
 
 // outcomePayload renders one measured route.

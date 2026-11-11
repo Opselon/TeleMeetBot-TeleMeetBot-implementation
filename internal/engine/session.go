@@ -587,6 +587,22 @@ func (s *Session) setError(err error) {
 	s.mgr.emit(Event{Session: s.ID, Kind: EventError, Text: err.Error()})
 }
 
+// failWithState records a terminal error under a specific state. It produces
+// exactly the surface setError does (message, log entry, EventError) without
+// forcing the generic StateError, so classified failures such as join
+// timeouts keep their own terminal state.
+func (s *Session) failWithState(state string, err error) {
+	s.mu.Lock()
+	s.errMsg = err.Error()
+	s.state = state
+	s.detail = err.Error()
+	s.ended = time.Now()
+	s.closeStageLocked(time.Now())
+	s.mu.Unlock()
+	s.log.Errorf("session %s failed: %v", s.ID, err)
+	s.mgr.emit(Event{Session: s.ID, Kind: EventError, Text: err.Error()})
+}
+
 func (s *Session) emit(kind EventKind, text string) {
 	if s.mgr != nil {
 		s.mgr.emit(Event{Session: s.ID, Kind: kind, Text: text})
@@ -835,8 +851,17 @@ func (s *Session) run() {
 
 		s.setState(StateJoining, "[4/6] Joining meeting")
 		s.log.Infof("[PIPELINE:session] [STEP 4/6] session %s: handling prejoin and host gate...", s.ID)
+		// joinMeeting owns the last stretch of setState calls. Quiet the meet
+		// leg only AFTER it returns: a reader of meetErrCh then knows every
+		// setState from this leg has already happened, so the terminal state
+		// it records can never be overwritten by a straggler poll from this
+		// loop. Quieting before the call made that guarantee void — the poll
+		// loop kept calling setState for the whole join, and a recorded
+		// terminal "error" was observed to regress to "waiting_for_admission"
+		// and finally degrade to "cancelled" via markStopped.
+		joinErr := s.joinMeeting()
 		quietMeet()
-		meetErrCh <- s.joinMeeting()
+		meetErrCh <- joinErr
 	}()
 
 	// The media leg: the Download & Stream preparation (BLOCKING), then [2/6]
@@ -939,8 +964,13 @@ func (s *Session) run() {
 	// first).
 	var meetErr error
 	meetDone := false
+	// mediaFirst records which leg settled first: only a media error that
+	// arrives while the meet leg is still in flight must wait out the join
+	// verdict (the meet-first paths below already hold their own verdict).
+	mediaFirst := false
 	select {
 	case err = <-mediaErrCh:
+		mediaFirst = true
 		// The media leg settled first; the meet leg keeps running for now and
 		// is joined (or drained) below.
 	case meetErr = <-meetErrCh:
@@ -998,76 +1028,104 @@ func (s *Session) run() {
 			return
 		}
 	}
-	// The media leg settled first with an error: the [2/6] classification
-	// block below is the fatal path exactly as before. The cancel is issued
-	// FIRST so the meet leg stops calling setState the moment its current
-	// CDP call returns: a later setState from the meet leg would otherwise
-	// overwrite the terminal StateError this branch records (the state
-	// machine is single-writer by design, and two legs must not race the
-	// terminal verdict). The classification itself still runs with the
-	// session's own terminal state unset, so setError is what finalises it —
-	// the observable order the sequential version had.
+	// The media leg settled first with an error. A media failure must not
+	// kill a join that is still in flight: YouTube bot-checks and slow
+	// downloads are routine while Google's admission gate takes minutes, and
+	// the previous behaviour cancelled the session mid-admission — the card
+	// froze on "waiting_for_admission" while the terminal verdict degraded
+	// into "cancelled". The join's own verdict decides the outcome:
+	// admitted → the meeting survives with the standard media-failure
+	// handling; failed → the media story stays the terminal verdict, exactly
+	// as the meet-first branch prefers it when both legs fail.
 	if err != nil {
-		// Cancel FIRST so the meet leg stops calling setState the moment its
-		// current CDP call returns: the state machine is single-writer by
-		// design, and a straggler setState from the meet goroutine would
-		// otherwise overwrite the terminal StateError this branch records.
-		// The classification below still runs before setError, so the
-		// observable order (phase → error) matches the sequential version.
-		// NOTE: do NOT cancel the lifespan here. The old sequential code only
-		// cancelled on Stop; a media-stage failure is reported through
-		// setError below, and cancelling first would make the s.ctx.Err()==nil
-		// guard skip it (turning a real media error into a silent "cancelled").
-		// The meet leg unwinds on its own: it observes the failed media leg via
-		// the shared state and its gate between openMeet and joinMeeting.
-		// Wait for the meet leg to go quiet — it has either reported its error
-		// or observed the dead lifespan at the gate between openMeet and
-		// joinMeeting. joinMeeting's poll loop honours ctx.Err() too, so the
-		// only unbounded case is a meet leg blocked inside a CDP call that
-		// ignores the bound context; the deadline keeps even that from
-		// holding the session's terminal verdict hostage.
-		select {
-		case <-meetQuiet:
-		case <-time.After(5 * time.Second):
-			s.log.Warnf("[PIPELINE:session] session %s: meet leg still running after media failure; recording the terminal state anyway", s.ID)
+		joinFailed := false
+		if mediaFirst && !meetDone && s.ctx.Err() == nil {
+			// Bounded wait: joinMeeting is deadline-bounded by the join
+			// timeout plus the admit wait, and (after the quietMeet reorder
+			// above) the verdict is sent only after the leg's last setState,
+			// so consuming it here makes the terminal decision race-free.
+			select {
+			case meetErr = <-meetErrCh:
+				meetDone = true
+				joinFailed = meetErr != nil
+			case <-s.ctx.Done():
+				// Stopped while waiting: cleanup owns the outcome.
+				return
+			}
+			if !joinFailed {
+				// Admitted despite the media failure: the meeting stays live.
+				// Record the media loss honestly, try the same single bounded
+				// download fallback the after-share path uses, and fall
+				// through to the share/play flow below — its [6/6] play path
+				// treats a failing playback as non-fatal, so a dead media tab
+				// can never end an admitted meeting again.
+				s.log.Warnf("[PIPELINE:session] session %s: media failed during the join (%v); the meeting continues, media recovery follows admission", s.ID, err)
+				uerr := mediateam.ClassifyUserError(err)
+				user := mediateam.FriendlyUserMessage(err)
+				if u := uerr; u != nil && u.Code == mediateam.UserCodeNetwork {
+					user = "The server can't reach the media source right now."
+				}
+				if s.playMode == mediateam.ModeAuto && s.localFile == nil {
+					s.setPhase(PhaseDownloading, "Downloading media after the browser failed…", "auto fallback after a media failure during the join")
+					if ferr := s.fallbackToDownload(); ferr != nil {
+						s.log.Warnf("[PIPELINE:session] session %s: auto fallback after media failure failed: %v", s.ID, ferr)
+						s.setPhaseFailedWith("download", PhaseFailed, mediateam.UserCodeOf(ferr),
+							"The media failed and the download fallback couldn't recover it. Use 🔀 Switch media to try another link — the meeting is still live.",
+							"auto fallback after media failure during join: "+ferr.Error())
+					}
+				} else {
+					s.setPhaseFailedWith("browser", PhaseFailed, mediateam.UserCodeOf(err),
+						user+" Use 🔀 Switch media to try another link — the meeting is still live.",
+						err.Error())
+				}
+			} else {
+				// Both legs failed; the richer media story owns the terminal
+				// verdict (symmetric with the meet-first branch below) — the
+				// join error is already logged by the leg itself.
+				s.log.Warnf("[PIPELINE:session] session %s: media leg failed (%v) and the join failed too (%v); recording the media verdict", s.ID, err, meetErr)
+			}
+		} else {
+			joinFailed = true
 		}
-		if s.ctx.Err() == nil {
-			// The media tab failed to open at all: classify for the user and
-			// record the failure honestly. The session ends here, so this is
-			// a terminal phase — but the message still tells the user what to
-			// do next instead of dumping a CDP/yt-dlp diagnostic.
+		if joinFailed {
+			// Terminal media classification, shared by both both-failed
+			// orderings and the dying-lifespan case.
 			//
 			// Do NOT erase a download-fallback recorded moments ago: when the
 			// download failed AND the browser leg could not start either, the
 			// user must learn both facts, in order — the download failed, the
-			// browser could not recover it, the meeting ends. Reporting only
-			// the browser loss would hide the real first cause.
-			uerr := mediateam.ClassifyUserError(err)
-			user := mediateam.FriendlyUserMessage(err)
-			if u := uerr; u != nil && u.Code == mediateam.UserCodeNetwork {
-				user = "The server can't reach the media source right now. Please check the link and try again."
-			}
-			prevPhase := s.Phase()
-			prevReason := s.PhaseUserReason()
-			if prevPhase == PhaseFallback || prevPhase == PhaseNetworkUnavailable {
-				user = prevReason + " The browser playback could not start either, so the stream cannot continue."
-				s.setPhaseFailedWith(s.prevPhaseFailedSummary(), PhaseFailed, mediateam.UserCodeOf(err), user, "media tab failed after download fallback: "+err.Error())
-			} else {
-				s.setPhaseFailedWith("browser", "", mediateam.UserCodeOf(err), user, err.Error())
-			}
-			s.setError(err)
-		}
-		// The meet leg has already gone quiet (or timed out) above; wait for
-		// it to finish unwinding so it can never outlive the session
-		// goroutine. A verdict consumed by the meet-first branch above
-		// (meetDone) must not be read again — the channel delivered it once.
-		if !meetDone {
+			// browser could not recover it, the meeting ends.
 			select {
-			case <-meetErrCh:
+			case <-meetQuiet:
 			case <-time.After(5 * time.Second):
+				s.log.Warnf("[PIPELINE:session] session %s: meet leg still running after media failure; recording the terminal state anyway", s.ID)
 			}
+			if s.ctx.Err() == nil {
+				uerr := mediateam.ClassifyUserError(err)
+				user := mediateam.FriendlyUserMessage(err)
+				if u := uerr; u != nil && u.Code == mediateam.UserCodeNetwork {
+					user = "The server can't reach the media source right now. Please check the link and try again."
+				}
+				prevPhase := s.Phase()
+				prevReason := s.PhaseUserReason()
+				if prevPhase == PhaseFallback || prevPhase == PhaseNetworkUnavailable {
+					user = prevReason + " The browser playback could not start either, so the stream cannot continue."
+					s.setPhaseFailedWith(s.prevPhaseFailedSummary(), PhaseFailed, mediateam.UserCodeOf(err), user, "media tab failed after download fallback: "+err.Error())
+				} else {
+					s.setPhaseFailedWith("browser", "", mediateam.UserCodeOf(err), user, err.Error())
+				}
+				s.setError(err)
+			}
+			// A verdict consumed by the meet-first branch above (meetDone)
+			// must not be read again — the channel delivered it once.
+			if !meetDone {
+				select {
+				case <-meetErrCh:
+				case <-time.After(5 * time.Second):
+				}
+			}
+			return
 		}
-		return
 	}
 	if s.ctx.Err() != nil {
 		// The lifespan died mid-media-leg: wait for the meet leg to go quiet
@@ -1219,7 +1277,14 @@ func (s *Session) handleMeetLegError(err error) {
 		return
 	}
 	if strings.Contains(err.Error(), "timed out") {
-		s.setState(StateTimedOut, err.Error())
+		// Record the timeout under its own terminal state. setError forces
+		// StateError unconditionally, which used to make every join timeout
+		// surface as a generic "error" and left StateTimedOut unreachable —
+		// the operator could not tell "Google's gate never lifted" apart
+		// from any other crash. failWithState keeps the same surface (message,
+		// log, EventError) while preserving the honest classification.
+		s.failWithState(StateTimedOut, err)
+		return
 	}
 	s.setError(err)
 }

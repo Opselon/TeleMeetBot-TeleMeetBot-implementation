@@ -215,7 +215,12 @@ func (s *Store) Interrupted() []Record {
 	var out []Record
 	for i := range s.records {
 		switch s.records[i].State {
-		case "starting", "joining", "streaming", "paused", "sharing":
+		// Every non-terminal state a restart can interrupt: a session that was
+		// waiting for a host decision, already admitted, or streaming under a
+		// canonical name must not linger as a live record after the process it
+		// belonged to is gone. The aliases (admitting/active/completed/failed)
+		// never persist — setState only records the canonical state names.
+		case "starting", "joining", "waiting_for_admission", "admitted", "sharing", "streaming", "paused", "leaving":
 			s.records[i].State = "interrupted"
 			s.records[i].EndedAt = time.Now()
 			out = append(out, s.records[i])
