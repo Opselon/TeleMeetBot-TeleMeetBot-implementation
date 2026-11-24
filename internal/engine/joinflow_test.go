@@ -261,16 +261,24 @@ func TestIntegrationLoginBounceReentersAsGuest(t *testing.T) {
 	var loads atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if r.URL.Path != "/lookup/abc-defg-hij" {
-			return
-		}
-		// First load is the bounced home screen; every later load is the
-		// meeting itself, as if the host started it in the meantime.
-		if loads.Add(1) == 1 {
+		switch r.URL.Path {
+		case "/lookup/abc-defg-hij":
+			// First load bounces to the home screen, as an unstarted
+			// meeting does after ~60s; later loads reach the meeting
+			// itself, as if the host started it in the meantime.
+			if loads.Add(1) == 1 {
+				http.Redirect(w, r, "/", http.StatusFound)
+				return
+			}
+			_, _ = w.Write([]byte(fakeOpenMeetingPage))
+		case "/":
+			// The home screen: it says "Sign in" and nothing else
+			// decisive. The tab's URL is the root path, which is what
+			// tells the bot this is the bounce, not a gate.
 			_, _ = w.Write([]byte(fakeLoginPage))
-			return
+		default:
+			w.WriteHeader(http.StatusNotFound)
 		}
-		_, _ = w.Write([]byte(fakeOpenMeetingPage))
 	}))
 	defer srv.Close()
 

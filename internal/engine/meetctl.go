@@ -236,13 +236,17 @@ func blockedFatalPhrase(detail string) string {
 }
 
 // meetSignInGate reports whether the Meet tab is showing a sign-in demand
-// on the meeting itself: the tab is still on a meeting-code URL, or it was
-// redirected to Google's sign-in. A bounce to Meet's home screen (no code
-// in the path) is NOT a gate — Meet bounces an unstarted meeting back home
-// after ~60s, and the home screen says "Sign in", but the meeting may start
-// minutes later, so the guest flow must re-enter instead of failing. When
-// the tab cannot be read, the answer is "not a gate": when in doubt the bot
-// keeps trying as a guest rather than declaring a Google account required.
+// on the meeting itself: the tab was redirected to Google's sign-in, or it
+// is still on a meeting page (any non-root path — a meeting-code URL or a
+// lookup URL, both entry points of the meeting). A bounce to Meet's home
+// screen (root path, "/") is NOT a gate — Meet bounces an unstarted meeting
+// back home after ~60s, and the home screen says "Sign in", but the meeting
+// may start minutes later, so the guest flow must re-enter instead of
+// failing. The check is deliberately path-based, not code-shaped: a lookup
+// URL's id can itself look like a meeting code, so matching the code shape
+// would misread the bounce as a gate. When the tab cannot be read, the
+// answer is "not a gate": when in doubt the bot keeps trying as a guest
+// rather than declaring a Google account required.
 func (s *Session) meetSignInGate() bool {
 	meet := s.meetTab()
 	if meet == nil {
@@ -252,17 +256,14 @@ func (s *Session) meetSignInGate() bool {
 	if err != nil {
 		return false
 	}
-	href := res.Value.Str()
-	u, err := url.Parse(strings.ToLower(href))
+	u, err := url.Parse(strings.ToLower(res.Value.Str()))
 	if err != nil {
 		return false
 	}
 	if strings.Contains(u.Host, "accounts.google.com") {
 		return true
 	}
-	// A meeting-code URL (meet.google.com/abc-defg-hij) means the demand
-	// is served on the meeting itself; the home screen carries no code.
-	return Shortcode(href) != ""
+	return strings.Trim(u.Path, "/") != ""
 }
 
 // meetStage inspects the Meet page and classifies where the bot is.
