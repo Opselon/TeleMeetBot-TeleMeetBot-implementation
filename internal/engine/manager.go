@@ -37,8 +37,8 @@ type BrowserConfig struct {
 	WindowHeight int
 	Lang         string
 	ExtraArgs    []string
-	UserAgent string
-	Proxy     string
+	UserAgent    string
+	Proxy        string
 	// MeetViaProxy, when true, stops bypassing the proxy for meet.google.com:
 	// the meet tab's egress goes through Proxy too. Google serves its host
 	// gate to datacenter IPs (Hetzner, live-probed 2026-11-10 — every entry
