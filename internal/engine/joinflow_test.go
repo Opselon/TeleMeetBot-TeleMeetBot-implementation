@@ -171,8 +171,9 @@ func TestIntegrationOpenMeetingJoinsWithoutHostWait(t *testing.T) {
 
 // TestIntegrationKnockAdmissionWaitsThenJoins pins the genuine admission flow:
 // "Ask to join" must move the bot to the knock lobby, the card must say
-// "Waiting for host to admit bot" while the bot waits, and the join must
-// complete when the host admits. This is the state the open-meeting flow must
+// "The bot knocked — tap Admit in your meeting to let it in" while the bot
+// waits, and the join must complete when the host admits. This is the state
+// the open-meeting flow must
 // NOT borrow (see TestIntegrationOpenMeetingJoinsWithoutHostWait).
 func TestIntegrationKnockAdmissionWaitsThenJoins(t *testing.T) {
 	if testing.Short() {
@@ -220,7 +221,7 @@ func TestIntegrationKnockAdmissionWaitsThenJoins(t *testing.T) {
 			if ev.Kind != EventState {
 				continue
 			}
-			if strings.Contains(ev.Text, "Waiting for host to admit bot") {
+			if strings.Contains(ev.Text, "The bot knocked") {
 				waitedForAdmission = true
 			}
 			continue
@@ -229,7 +230,7 @@ func TestIntegrationKnockAdmissionWaitsThenJoins(t *testing.T) {
 		break
 	}
 	if !waitedForAdmission {
-		t.Fatal("the knock lobby never reported \"Waiting for host to admit bot\" — real admission waits are indistinguishable from open joins")
+		t.Fatal("the knock lobby never reported \"The bot knocked\" — real admission waits are indistinguishable from open joins")
 	}
 }
 
