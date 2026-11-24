@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -232,6 +233,36 @@ func blockedFatalPhrase(detail string) string {
 		}
 	}
 	return ""
+}
+
+// meetSignInGate reports whether the Meet tab is showing a sign-in demand
+// on the meeting itself: the tab is still on a meeting-code URL, or it was
+// redirected to Google's sign-in. A bounce to Meet's home screen (no code
+// in the path) is NOT a gate — Meet bounces an unstarted meeting back home
+// after ~60s, and the home screen says "Sign in", but the meeting may start
+// minutes later, so the guest flow must re-enter instead of failing. When
+// the tab cannot be read, the answer is "not a gate": when in doubt the bot
+// keeps trying as a guest rather than declaring a Google account required.
+func (s *Session) meetSignInGate() bool {
+	meet := s.meetTab()
+	if meet == nil {
+		return false
+	}
+	res, err := meet.Timeout(5 * time.Second).Eval(`() => location.href`)
+	if err != nil {
+		return false
+	}
+	href := res.Value.Str()
+	u, err := url.Parse(strings.ToLower(href))
+	if err != nil {
+		return false
+	}
+	if strings.Contains(u.Host, "accounts.google.com") {
+		return true
+	}
+	// A meeting-code URL (meet.google.com/abc-defg-hij) means the demand
+	// is served on the meeting itself; the home screen carries no code.
+	return Shortcode(href) != ""
 }
 
 // meetStage inspects the Meet page and classifies where the bot is.

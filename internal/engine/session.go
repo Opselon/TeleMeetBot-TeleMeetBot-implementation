@@ -2023,10 +2023,49 @@ func (s *Session) joinMeeting() error {
 				s.logHostWait(&lastWaitNote, "blocked", "meeting not accepting guests yet", reloadCount, hostWaitStarted)
 			}
 		case "login":
-			if len(s.googleCookies) > 0 {
-				return errors.New("Google account cookies were rejected or expired; please re-export and update via /account")
+			// A sign-in screen is not proof the meeting requires sign-in.
+			// Meet bounces an unstarted meeting back to its home screen
+			// after ~60s, and the home screen says "Sign in" — but the
+			// meeting may start minutes later, and the blocked case already
+			// plans for that bounce by re-requesting entry. The guest flow
+			// must not die on the bounce: only a sign-in demand served ON
+			// the meeting link itself (or a redirect to Google's sign-in)
+			// is a genuine gate a guest cannot pass. Anything else is the
+			// bounce, and the bot re-enters as a guest on the blocked
+			// stage's cadence until the gate lifts or the deadline hits.
+			if s.meetSignInGate() {
+				if len(s.googleCookies) > 0 {
+					return errors.New("Google account cookies were rejected or expired; please re-export and update via /account")
+				}
+				return errors.New("this meeting only allows signed-in Google accounts to join; TeleMeetBot joins as a guest only (add your Google account in /account)")
 			}
-			return errors.New("this meeting requires a signed-in Google account; TeleMeetBot joins as a guest only (add your Google account in /account)")
+			resetClick()
+			extendWaitForHost()
+			s.setState(StateWaitingForAdmission, "[4/6] Meeting sent us back to the sign-in screen: re-entering as a guest…")
+			interval := currentReloadWait
+			if time.Since(s.lastMeetLoad) >= interval {
+				reloadCount++
+				currentReloadWait = computeReloadInterval(reloadCount)
+				s.log.Infof("[PIPELINE:meet] session %s: sign-in screen is the bounced home page, re-requesting entry as a guest (attempt %d, waited %s)",
+					s.ID, reloadCount, time.Since(hostWaitStarted).Round(time.Second))
+				if err := s.reopenMeet(); err != nil {
+					return fmt.Errorf("reload the meeting page: %w", err)
+				}
+				pace = 2 * time.Second
+			} else {
+				// Nothing can change until the next re-request: wait it out
+				// (bounded, so admission is still noticed quickly).
+				pace = blockedPollInterval
+				if remaining := interval - time.Since(s.lastMeetLoad); remaining < pace {
+					// Never trim the wait to nothing: a sub-tick pace would
+					// turn the last moments before a reload into a poll storm.
+					if remaining < 250*time.Millisecond {
+						remaining = 250 * time.Millisecond
+					}
+					pace = remaining
+				}
+				s.logHostWait(&lastWaitNote, "login", "bounced to the sign-in screen, waiting to re-enter as a guest", reloadCount, hostWaitStarted)
+			}
 		case "prejoin":
 			s.setState(StateJoining, "[4/6] Prejoin screen: preparing and joining")
 			s.fillGuestName()

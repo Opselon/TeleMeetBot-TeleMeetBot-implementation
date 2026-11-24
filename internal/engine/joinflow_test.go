@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -231,6 +232,131 @@ func TestIntegrationKnockAdmissionWaitsThenJoins(t *testing.T) {
 	}
 	if !waitedForAdmission {
 		t.Fatal("the knock lobby never reported \"The bot knocked\" — real admission waits are indistinguishable from open joins")
+	}
+}
+
+// fakeLoginPage mimics Meet's home screen after an unstarted meeting bounces
+// back: it says "Sign in" and nothing else decisive — no prejoin controls, no
+// blocked phrase, no meeting code in the URL. The bot must NOT read this as
+// "the meeting requires a Google account"; it must re-enter the meeting link
+// as a guest.
+const fakeLoginPage = `<!doctype html>
+<html><head><meta charset="utf-8"><title>Meet</title></head>
+<body>
+  <h1>Sign in</h1>
+  <p>Sign in with your Google account to continue to Google Meet</p>
+  <input placeholder="Enter a code or link">
+  <button>Join</button>
+</body></html>`
+
+// TestIntegrationLoginBounceReentersAsGuest pins the guest flow's independence
+// from a Google account: when Meet bounces an unstarted meeting back to its
+// home screen (which says "Sign in"), the bot must re-enter the meeting link
+// as a guest instead of dying with "requires a signed-in Google account".
+// The meeting opens on the re-entry, as if the host started it meanwhile.
+func TestIntegrationLoginBounceReentersAsGuest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	var loads atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if r.URL.Path != "/lookup/abc-defg-hij" {
+			return
+		}
+		// First load is the bounced home screen; every later load is the
+		// meeting itself, as if the host started it in the meantime.
+		if loads.Add(1) == 1 {
+			_, _ = w.Write([]byte(fakeLoginPage))
+			return
+		}
+		_, _ = w.Write([]byte(fakeOpenMeetingPage))
+	}))
+	defer srv.Close()
+
+	b, closeFn := newTestBrowser(t)
+	defer closeFn()
+	page := openPage(t, b, srv.URL+"/lookup/abc-defg-hij")
+
+	mgr := &Manager{
+		meetCfg: MeetOptions{
+			GuestName:          "TeleMeet Bot",
+			PresentMode:        "tab",
+			JoinTimeoutSeconds: 30,
+			AdmitWaitSeconds:   30,
+		},
+		log:      testLogger{t},
+		events:   make(chan Event, 128),
+		sessions: map[SessionID]*Session{},
+	}
+	s := &Session{
+		ID:       "s-login-bounce",
+		MeetURL:  srv.URL + "/lookup/abc-defg-hij",
+		state:    StateJoining,
+		ctx:      context.Background(),
+		meetPage: page,
+		log:      testLogger{t},
+		mgr:      mgr,
+	}
+
+	if err := s.joinMeeting(); err != nil {
+		t.Fatalf("joinMeeting died on the bounced sign-in screen instead of re-entering as a guest: %v", err)
+	}
+	if loads.Load() < 2 {
+		t.Fatalf("joinMeeting never re-entered the meeting link (loads=%d)", loads.Load())
+	}
+}
+
+// TestIntegrationLoginGateOnMeetingLinkFailsFast pins the other side of the
+// same distinction: when the sign-in demand is served ON the meeting link
+// itself (the tab's URL still carries the meeting code), no guest retry can
+// ever pass it, so the bot must fail fast with an honest error instead of
+// re-entering for the whole wait budget.
+func TestIntegrationLoginGateOnMeetingLinkFailsFast(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(fakeLoginPage))
+	}))
+	defer srv.Close()
+
+	b, closeFn := newTestBrowser(t)
+	defer closeFn()
+	page := openPage(t, b, srv.URL+"/rmr-wcru-qdw")
+
+	mgr := &Manager{
+		meetCfg: MeetOptions{
+			GuestName:          "TeleMeet Bot",
+			PresentMode:        "tab",
+			JoinTimeoutSeconds: 30,
+			AdmitWaitSeconds:   30,
+		},
+		log:      testLogger{t},
+		events:   make(chan Event, 128),
+		sessions: map[SessionID]*Session{},
+	}
+	s := &Session{
+		ID:       "s-login-gate",
+		MeetURL:  srv.URL + "/rmr-wcru-qdw",
+		state:    StateJoining,
+		ctx:      context.Background(),
+		meetPage: page,
+		log:      testLogger{t},
+		mgr:      mgr,
+	}
+
+	start := time.Now()
+	err := s.joinMeeting()
+	if err == nil {
+		t.Fatal("joinMeeting accepted a meeting that only allows signed-in accounts")
+	}
+	if !strings.Contains(err.Error(), "only allows signed-in Google accounts") {
+		t.Fatalf("joinMeeting failed with the wrong error: %v", err)
+	}
+	if d := time.Since(start); d > 15*time.Second {
+		t.Fatalf("sign-in gate took %v to fail; it must fail fast instead of retrying a gate a guest can never pass", d)
 	}
 }
 
