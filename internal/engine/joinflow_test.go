@@ -368,6 +368,91 @@ func TestIntegrationLoginGateOnMeetingLinkFailsFast(t *testing.T) {
 	}
 }
 
+// fakeKnockPageWithLobbyHint mimics the real Meet prejoin screen for a
+// knock-required meeting: besides the "Ask to join" button it carries
+// lobby-like helper text ("You'll be able to join the meeting when the
+// host lets you in."). The classifier must still read it as prejoin —
+// checking the lobby first misread this page as the lobby, so the bot
+// waited forever for an admission nobody could give: no knock was ever
+// sent (session s-9eceaf4e, 2026-11-24).
+const fakeKnockPageWithLobbyHint = `<!doctype html>
+<html><head><meta charset="utf-8"><title>Meet</title></head>
+<body>
+  <div id="prejoin">
+    <input placeholder="Your name" aria-label="Your name">
+    <button id="knock" aria-label="Ask to join">Ask to join</button>
+    <p>You'll be able to join the meeting when the host lets you in.</p>
+  </div>
+  <div id="lobby" style="display:none">Asking to be let in&hellip; You'll join when someone lets you in.</div>
+  <div id="call" style="display:none">
+    <button id="leave" aria-label="Leave call">Leave call</button>
+  </div>
+<script>
+  var knocked = false;
+  document.getElementById('knock').addEventListener('click', function () {
+    if (knocked) return;
+    knocked = true;
+    document.getElementById('prejoin').style.display = 'none';
+    document.getElementById('lobby').style.display = 'block';
+    setTimeout(function () {
+      document.getElementById('lobby').style.display = 'none';
+      document.getElementById('call').style.display = 'block';
+      window.__tmPCs = [` + fakeTransportPC + `];
+    }, 3000);
+  });
+</script>
+</body></html>`
+
+// TestIntegrationPrejoinWithLobbyHintKnocksAndJoins is the regression for
+// session s-9eceaf4e (2026-11-24): the bot loaded a live meeting's prejoin
+// screen, classified it as the lobby (its helper text matches the lobby
+// regex), and waited in a phantom lobby forever — no prejoin observation,
+// no click, no knock, and the host saw nothing to admit. A prejoin screen
+// carrying lobby-like helper text must classify as prejoin, and the join
+// must then knock for real and enter when the host admits.
+func TestIntegrationPrejoinWithLobbyHintKnocksAndJoins(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(fakeKnockPageWithLobbyHint))
+	}))
+	defer srv.Close()
+
+	b, closeFn := newTestBrowser(t)
+	defer closeFn()
+	page := openPage(t, b, srv.URL+"/lookup/abc-defg-hij")
+
+	mgr := &Manager{
+		meetCfg: MeetOptions{
+			GuestName:          "TeleMeet Bot",
+			PresentMode:        "tab",
+			JoinTimeoutSeconds: 30,
+			AdmitWaitSeconds:   30,
+		},
+		log:      testLogger{t},
+		events:   make(chan Event, 128),
+		sessions: map[SessionID]*Session{},
+	}
+	s := &Session{
+		ID:       "s-prejoin-hint",
+		MeetURL:  srv.URL + "/lookup/abc-defg-hij",
+		state:    StateJoining,
+		ctx:      context.Background(),
+		meetPage: page,
+		log:      testLogger{t},
+		mgr:      mgr,
+	}
+
+	if stage, info := s.meetStage(); stage != "prejoin" {
+		t.Fatalf("prejoin screen with lobby-like helper text classified as %q (%s), want prejoin — the bot would wait in a phantom lobby without ever knocking", stage, info)
+	}
+	if err := s.joinMeeting(); err != nil {
+		t.Fatalf("joinMeeting failed on a knock meeting whose prejoin carries lobby-like helper text: %v", err)
+	}
+}
+
 // TestJoinClickRetryPolicy pins the label-aware retry cadence: an open
 // meeting's "Join now" must be retried quickly (a swallowed click costs
 // seconds of join latency), while "Ask to join" knocks are spaced wider —

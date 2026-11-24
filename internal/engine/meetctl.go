@@ -86,14 +86,23 @@ const meetClassifyFn = `() => {
   if (/you are presenting|you're presenting|stop presenting|you are sharing|you're sharing|stop sharing/.test(body)) {
     return ["meeting", "presentation indicators visible"];
   }
+  // Prejoin is checked BEFORE the lobby: the prejoin screen itself carries
+  // lobby-like helper text ("You'll be able to join when the host lets you
+  // in"), so checking the lobby first misreads the prejoin as the lobby —
+  // and the bot then waits forever for an admission nobody can give, because
+  // no knock was ever sent (session s-9eceaf4e, 2026-11-24: blocked, then
+  // straight to "lobby" with no prejoin observation and no click at all).
+  // A visible join button is what makes a page the prejoin screen; the real
+  // lobby has no join button left to click, so this order cannot misread a
+  // real lobby as prejoin.
+  if (/join now|ask to join|ready to join/.test(body) || vis('input[placeholder*="name" i]') || vis('input[aria-label*="name" i]')) {
+    return ["prejoin", "prejoin screen"];
+  }
   if (/waiting for (the )?host|you.ll be able to join|someone will let you in|waiting to be admitted|you.ll join when someone lets you in|asking to join|asking to be let in/.test(body)) {
     return ["lobby", "in the lobby, host must admit"];
   }
   if (/meeting is full|you can.t join this (video )?call|this meeting has ended|the call has ended|invalid meeting|check your meeting code|no one can join|ask the host|needs permission/.test(body)) {
     return ["blocked", excerpt];
-  }
-  if (/join now|ask to join|ready to join/.test(body) || vis('input[placeholder*="name" i]') || vis('input[aria-label*="name" i]')) {
-    return ["prejoin", "prejoin screen"];
   }
   if (/sign in|use a personal account|join with a google account/.test(body)) {
     return ["login", snippet(/sign in|use a personal account|join with a google account/)];
