@@ -1739,6 +1739,22 @@ func (s *Session) openMedia() error {
 	// Consent walls, surface fitting and the buffered-video wait. The wall is
 	// cleared BEFORE the cosmetic CSS is installed: a hidden dialog cannot be
 	// clicked, and the video never paints while the lightbox owns the page.
+	//
+	// The media tab must be the ACTIVE tab while its player loads: in
+	// headless Chrome a backgrounded tab's media pipeline never starts —
+	// the player sits at readyState 0 with no metadata for the whole wait,
+	// even with disable-background-timer-throttling,
+	// disable-backgrounding-occluded-windows and
+	// disable-renderer-backgrounding set (reproduced live on the Swiss host:
+	// YouTube tab + Meet tab, ready=0 for 35s; the same YouTube tab alone
+	// reaches readyState 4 in ~3s). The Meet tab is created after this one,
+	// so by the time the wait runs this tab is backgrounded. Bring it to the
+	// front here; nothing else in the session activates a tab, so focus
+	// stays here until the media is ready. The Meet leg drives its tab
+	// through CDP evals/clicks, which work on a backgrounded tab.
+	if _, err := p.Activate(); err != nil {
+		s.log.Warnf("[PIPELINE:media] session %s: could not bring media tab to front: %v", s.ID, err)
+	}
 	s.setState(StateJoining, "[2/6] Waiting for playable video")
 	s.log.Infof("[PIPELINE:media] session %s: preparing the media surface (consent → fit → ready)...", s.ID)
 	if err := s.prepareMedia(p); err != nil {
