@@ -86,6 +86,18 @@ const meetClassifyFn = `() => {
   if (/you are presenting|you're presenting|stop presenting|you are sharing|you're sharing|stop sharing/.test(body)) {
     return ["meeting", "presentation indicators visible"];
   }
+  // Google's bot-verification interstitial ("Getting ready... System info
+  // will be sent to confirm you're not a bot"), shown to datacenter
+  // headless browsers before the prejoin screen. It carries lobby-like
+  // text ("You'll be able to join") AND a "Sign in" button, so without
+  // this branch it misreads as the lobby (session s-83495cdb, 2026-11-24:
+  // the live tab's DOM proved it) and the bot waits for an admission
+  // nobody can give — no knock was ever sent. Checked before prejoin,
+  // lobby and login; the phrases are unique to this interstitial, while
+  // "getting ready" alone is too generic to trust.
+  if (/confirm you're not a bot|system info will be sent/.test(body)) {
+    return ["botcheck", "google is verifying the browser"];
+  }
   // Prejoin is checked BEFORE the lobby: the prejoin screen itself carries
   // lobby-like helper text ("You'll be able to join when the host lets you
   // in"), so checking the lobby first misreads the prejoin as the lobby —
@@ -406,6 +418,42 @@ func (s *Session) clickJoin() (bool, string) {
 		s.log.Debugf("[PIPELINE:meet] session %s: clickJoin found no active join button", s.ID)
 	}
 	return label != "", label
+}
+
+// clickGotIt dismisses the sign-in nudge on Google's bot-verification
+// interstitial ("Got it"). It returns false when no such button is visible
+// — the nudge is already gone — so calling it on every botcheck observation
+// is harmless.
+func (s *Session) clickGotIt() bool {
+	meet := s.meetTab()
+	if meet == nil {
+		return false
+	}
+	res, err := meet.Timeout(4 * time.Second).Eval(`() => {
+  const norm = x => (x || "").replace(/\s+/g, " ").trim().toLowerCase();
+  const els = Array.from(document.querySelectorAll('button, [role=button], div[role=button]'));
+  for (const el of els) {
+    if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
+    const label = norm(el.getAttribute('aria-label') || "");
+    const text = norm(el.innerText || el.textContent || "");
+    if (label !== "got it" && text !== "got it") continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) continue;
+    try { el.scrollIntoView({block: 'center'}); } catch (e) {}
+    el.click();
+    return "got it";
+  }
+  return "";
+}`)
+	if err != nil {
+		s.log.Warnf("[PIPELINE:meet] session %s: clickGotIt eval error: %v", s.ID, err)
+		return false
+	}
+	if clicked := strings.TrimSpace(res.Value.Str()) != ""; clicked {
+		s.log.Infof("[PIPELINE:meet] session %s: clickGotIt clicked \"Got it\"", s.ID)
+		return true
+	}
+	return false
 }
 
 // mutePrejoinDevices turns off camera and microphone on the prejoin screen,

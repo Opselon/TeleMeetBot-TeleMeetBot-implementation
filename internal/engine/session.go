@@ -2066,6 +2066,31 @@ func (s *Session) joinMeeting() error {
 				}
 				s.logHostWait(&lastWaitNote, "login", "bounced to the sign-in screen, waiting to re-enter as a guest", reloadCount, hostWaitStarted)
 			}
+		case "botcheck":
+			// Google's bot-verification interstitial, shown to datacenter
+			// headless browsers before the prejoin screen (session
+			// s-83495cdb, proven by reading the live tab's DOM: "Getting
+			// ready... System info will be sent to confirm you're not a
+			// bot"). It must not be read as the lobby: no knock was ever
+			// sent, so no admission can ever arrive. Dismiss the sign-in
+			// nudge ("Got it") and bring the Meet tab to the front — a
+			// backgrounded tab's page work stalls in headless Chrome (the
+			// media leg proved it), and the media tab's activation leaves
+			// this tab backgrounded — then wait for the check to resolve
+			// to the prejoin screen.
+			resetClick()
+			extendWaitForHost()
+			if s.clickGotIt() {
+				s.log.Infof("[PIPELINE:meet] session %s: dismissed the sign-in prompt on the browser-verification screen", s.ID)
+			}
+			if meet := s.meetTab(); meet != nil {
+				if _, err := meet.Activate(); err != nil {
+					s.log.Warnf("[PIPELINE:meet] session %s: could not bring the Meet tab to the front: %v", s.ID, err)
+				}
+			}
+			s.setState(StateWaitingForAdmission, "[4/6] Google is checking the browser — waiting for the meeting to open…")
+			pace = 2 * time.Second
+			s.logHostWait(&lastWaitNote, "botcheck", "browser verification running, waiting for the prejoin screen", 0, hostWaitStarted)
 		case "prejoin":
 			s.setState(StateJoining, "[4/6] Prejoin screen: preparing and joining")
 			s.fillGuestName()

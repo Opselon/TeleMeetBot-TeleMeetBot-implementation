@@ -453,6 +453,108 @@ func TestIntegrationPrejoinWithLobbyHintKnocksAndJoins(t *testing.T) {
 	}
 }
 
+// fakeBotcheckPage mimics Google's bot-verification interstitial, shown to
+// datacenter headless browsers before the prejoin screen: "Getting ready...
+// System info will be sent to confirm you're not a bot", plus a sign-in
+// nudge with a "Got it" button. Clicking "Got it" dismisses the nudge and
+// the check resolves to the prejoin screen. The page must classify as
+// botcheck — its "You'll be able to join" text misread it as the lobby
+// (session s-83495cdb, 2026-11-24), so the bot waited for an admission
+// nobody could give.
+const fakeBotcheckPage = `<!doctype html>
+<html><head><meta charset="utf-8"><title>Meet</title></head>
+<body>
+  <div id="botcheck">
+    <span>Meet</span>
+    <button>Sign in</button>
+    <p>Getting ready...</p>
+    <p>You'll be able to join in just a moment</p>
+    <p>By joining, you agree to the Terms of Service and Privacy Policy. System info will be sent to confirm you're not a bot.</p>
+    <div id="nudge">
+      <p>Sign in with your Google account</p>
+      <p>Instead of waiting to be let in, sign in with the Google account your host invited</p>
+      <button id="gotit">Got it</button>
+    </div>
+  </div>
+  <div id="prejoin" style="display:none">
+    <input placeholder="Your name" aria-label="Your name">
+    <button id="knock" aria-label="Ask to join">Ask to join</button>
+  </div>
+  <div id="lobby" style="display:none">Asking to be let in&hellip; You'll join when someone lets you in.</div>
+  <div id="call" style="display:none">
+    <button id="leave" aria-label="Leave call">Leave call</button>
+  </div>
+<script>
+  document.getElementById('gotit').addEventListener('click', function () {
+    document.getElementById('nudge').style.display = 'none';
+    document.getElementById('botcheck').style.display = 'none';
+    document.getElementById('prejoin').style.display = 'block';
+  });
+  var knocked = false;
+  document.getElementById('knock').addEventListener('click', function () {
+    if (knocked) return;
+    knocked = true;
+    document.getElementById('prejoin').style.display = 'none';
+    document.getElementById('lobby').style.display = 'block';
+    setTimeout(function () {
+      document.getElementById('lobby').style.display = 'none';
+      document.getElementById('call').style.display = 'block';
+      window.__tmPCs = [` + fakeTransportPC + `];
+    }, 3000);
+  });
+</script>
+</body></html>`
+
+// TestIntegrationBotcheckResolvesToPrejoinAndJoins is the regression for
+// session s-83495cdb (2026-11-24): the bot loaded Google's bot-verification
+// interstitial, classified it as the lobby ("You'll be able to join"), and
+// waited in a phantom lobby forever — no prejoin observation, no click, no
+// knock. The interstitial must classify as botcheck, and the join must then
+// dismiss the sign-in prompt, reach the prejoin screen, knock for real and
+// enter when the host admits.
+func TestIntegrationBotcheckResolvesToPrejoinAndJoins(t *testing.T) {
+	if testing.Short() {
+		t.Skip("integration test")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(fakeBotcheckPage))
+	}))
+	defer srv.Close()
+
+	b, closeFn := newTestBrowser(t)
+	defer closeFn()
+	page := openPage(t, b, srv.URL+"/lookup/abc-defg-hij")
+
+	mgr := &Manager{
+		meetCfg: MeetOptions{
+			GuestName:          "TeleMeet Bot",
+			PresentMode:        "tab",
+			JoinTimeoutSeconds: 30,
+			AdmitWaitSeconds:   30,
+		},
+		log:      testLogger{t},
+		events:   make(chan Event, 128),
+		sessions: map[SessionID]*Session{},
+	}
+	s := &Session{
+		ID:       "s-botcheck",
+		MeetURL:  srv.URL + "/lookup/abc-defg-hij",
+		state:    StateJoining,
+		ctx:      context.Background(),
+		meetPage: page,
+		log:      testLogger{t},
+		mgr:      mgr,
+	}
+
+	if stage, info := s.meetStage(); stage != "botcheck" {
+		t.Fatalf("bot-verification interstitial classified as %q (%s), want botcheck — the bot would wait in a phantom lobby without ever knocking", stage, info)
+	}
+	if err := s.joinMeeting(); err != nil {
+		t.Fatalf("joinMeeting failed on a meeting behind the browser-verification screen: %v", err)
+	}
+}
+
 // TestJoinClickRetryPolicy pins the label-aware retry cadence: an open
 // meeting's "Join now" must be retried quickly (a swallowed click costs
 // seconds of join latency), while "Ask to join" knocks are spaced wider —
