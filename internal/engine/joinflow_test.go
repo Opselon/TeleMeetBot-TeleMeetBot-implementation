@@ -460,7 +460,9 @@ func TestIntegrationPrejoinWithLobbyHintKnocksAndJoins(t *testing.T) {
 // the check resolves to the prejoin screen. The page must classify as
 // botcheck — its "You'll be able to join" text misread it as the lobby
 // (session s-83495cdb, 2026-11-24), so the bot waited for an admission
-// nobody could give.
+// nobody could give. The prejoin screen carries the same disclaimer in its
+// footer, so prejoin must be checked before botcheck (session s-842f4f8b,
+// 2026-11-24) — that footer is in the fake prejoin below on purpose.
 const fakeBotcheckPage = `<!doctype html>
 <html><head><meta charset="utf-8"><title>Meet</title></head>
 <body>
@@ -479,6 +481,7 @@ const fakeBotcheckPage = `<!doctype html>
   <div id="prejoin" style="display:none">
     <input placeholder="Your name" aria-label="Your name">
     <button id="knock" aria-label="Ask to join">Ask to join</button>
+    <p>By joining, you agree to the Terms of Service and Privacy Policy. System info will be sent to confirm you're not a bot.</p>
   </div>
   <div id="lobby" style="display:none">Asking to be let in&hellip; You'll join when someone lets you in.</div>
   <div id="call" style="display:none">

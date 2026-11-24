@@ -86,29 +86,38 @@ const meetClassifyFn = `() => {
   if (/you are presenting|you're presenting|stop presenting|you are sharing|you're sharing|stop sharing/.test(body)) {
     return ["meeting", "presentation indicators visible"];
   }
+  // Prejoin is checked BEFORE the lobby and BEFORE botcheck: the prejoin
+  // screen itself carries lobby-like helper text ("You'll be able to join
+  // when the host lets you in"), so checking the lobby first misreads the
+  // prejoin as the lobby — and the bot then waits forever for an admission
+  // nobody can give, because no knock was ever sent (session s-9eceaf4e,
+  // 2026-11-24: blocked, then straight to "lobby" with no prejoin
+  // observation and no click at all). A visible join button is what makes
+  // a page the prejoin screen; the real lobby has no join button left to
+  // click, so this order cannot misread a real lobby as prejoin.
+  //
+  // The same ordering applies to botcheck: the prejoin screen's footer
+  // carries the bot-verification disclaimer ("System info will be sent to
+  // confirm you're not a bot"), so checking botcheck first misreads the
+  // prejoin as the interstitial (session s-842f4f8b, 2026-11-24: the check
+  // HAD resolved — the live tab showed "This call is open to anyone" with
+  // a "Join now" button — but the bot kept waiting in botcheck, never
+  // reached the prejoin case, never filled the guest name, and the Join
+  // now button stayed disabled on the empty name field).
+  if (/join now|ask to join|ready to join/.test(body) || vis('input[placeholder*="name" i]') || vis('input[aria-label*="name" i]')) {
+    return ["prejoin", "prejoin screen"];
+  }
   // Google's bot-verification interstitial ("Getting ready... System info
   // will be sent to confirm you're not a bot"), shown to datacenter
   // headless browsers before the prejoin screen. It carries lobby-like
   // text ("You'll be able to join") AND a "Sign in" button, so without
   // this branch it misreads as the lobby (session s-83495cdb, 2026-11-24:
   // the live tab's DOM proved it) and the bot waits for an admission
-  // nobody can give — no knock was ever sent. Checked before prejoin,
-  // lobby and login; the phrases are unique to this interstitial, while
+  // nobody can give. Checked after prejoin (see above) but before lobby
+  // and login; the phrases are unique to the interstitial's body, while
   // "getting ready" alone is too generic to trust.
   if (/confirm you're not a bot|system info will be sent/.test(body)) {
     return ["botcheck", "google is verifying the browser"];
-  }
-  // Prejoin is checked BEFORE the lobby: the prejoin screen itself carries
-  // lobby-like helper text ("You'll be able to join when the host lets you
-  // in"), so checking the lobby first misreads the prejoin as the lobby —
-  // and the bot then waits forever for an admission nobody can give, because
-  // no knock was ever sent (session s-9eceaf4e, 2026-11-24: blocked, then
-  // straight to "lobby" with no prejoin observation and no click at all).
-  // A visible join button is what makes a page the prejoin screen; the real
-  // lobby has no join button left to click, so this order cannot misread a
-  // real lobby as prejoin.
-  if (/join now|ask to join|ready to join/.test(body) || vis('input[placeholder*="name" i]') || vis('input[aria-label*="name" i]')) {
-    return ["prejoin", "prejoin screen"];
   }
   if (/waiting for (the )?host|you.ll be able to join|someone will let you in|waiting to be admitted|you.ll join when someone lets you in|asking to join|asking to be let in/.test(body)) {
     return ["lobby", "in the lobby, host must admit"];
